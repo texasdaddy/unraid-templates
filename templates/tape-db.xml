@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>tape-db</Name>
+  <Repository>timescale/timescaledb:latest-pg16</Repository>
+  <Registry>https://hub.docker.com/r/timescale/timescaledb</Registry>
+  <Network>br0</Network>
+  <MyIP>192.168.1.74</MyIP>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support/>
+  <Project>https://github.com/timescale/timescaledb</Project>
+  <Overview>TimescaleDB (prod) — Tape's market-data warehouse.</Overview>
+  <Category>Database:</Category>
+  <TemplateURL>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/templates/tape-db.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/icons/tape_db.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <DateInstalled/>
+  <Description>TimescaleDB (prod) for Tape.</Description>
+  <Config Name="Postgres Port" Target="5432" Default="5432" Mode="tcp" Description="Postgres port" Type="Port" Display="always" Required="false" Mask="false">5432</Config>
+  <Config Name="Data" Target="/var/lib/postgresql/data" Default="/mnt/user/appdata/tape-db/data" Mode="rw" Description="Postgres data dir" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/tape-db/data</Config>
+  <Config Name="POSTGRES_USER" Target="POSTGRES_USER" Default="tape" Mode="" Description="DB user" Type="Variable" Display="always" Required="true" Mask="false">tape</Config>
+  <Config Name="POSTGRES_PASSWORD" Target="POSTGRES_PASSWORD" Default="" Mode="" Description="DB password" Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="POSTGRES_DB" Target="POSTGRES_DB" Default="tape" Mode="" Description="DB name" Type="Variable" Display="always" Required="true" Mask="false">tape</Config>
+</Container>

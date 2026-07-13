@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>tape-dev</Name>
+  <Repository>ghcr.io/texasdaddy/tape:dev</Repository>
+  <Registry>https://github.com/texasdaddy/tape/pkgs/container/tape</Registry>
+  <Network>br0</Network>
+  <MyIP>192.168.1.61</MyIP>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support/>
+  <Project>https://github.com/texasdaddy/tape</Project>
+  <Overview>Tape (dev) — Schwab-backed market + account data tier for CEF Tracker + Keystone.</Overview>
+  <Category>Network:Other</Category>
+  <WebUI>http://[IP]:[PORT:8000]/v1/health</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/templates/tape-dev.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/icons/tape_dev.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <DateInstalled/>
+  <Description>Tape (dev) — Schwab-backed market + account data tier.</Description>
+  <Config Name="HTTP Port" Target="8000" Default="8000" Mode="tcp" Description="App HTTP port" Type="Port" Display="always" Required="false" Mask="false">8000</Config>
+  <Config Name="Data" Target="/data" Default="/mnt/user/appdata/tape-dev/data" Mode="rw" Description="Encrypted token store" Type="Path" Display="always" Required="false" Mask="false">/mnt/user/appdata/tape-dev/data</Config>
+  <Config Name="SCHWAB_APP_KEY" Target="SCHWAB_APP_KEY" Default="" Mode="" Description="Schwab app key" Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="SCHWAB_APP_SECRET" Target="SCHWAB_APP_SECRET" Default="" Mode="" Description="Schwab app secret" Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="SCHWAB_CALLBACK_URL" Target="SCHWAB_CALLBACK_URL" Default="https://tape-dev.reinlie.com/v1/admin/callback" Mode="" Description="OAuth callback URL" Type="Variable" Display="always" Required="true" Mask="false">https://tape-dev.reinlie.com/v1/admin/callback</Config>
+  <Config Name="TOKEN_ENCRYPTION_KEY" Target="TOKEN_ENCRYPTION_KEY" Default="" Mode="" Description="Fernet key for token-at-rest encryption" Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="DATABASE_URL" Target="DATABASE_URL" Default="" Mode="" Description="TimescaleDB URL; blank disables the warehouse" Type="Variable" Display="advanced" Required="false" Mask="true"/>
+</Container>

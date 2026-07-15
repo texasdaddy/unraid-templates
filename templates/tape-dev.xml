@@ -25,5 +25,4 @@
   <Config Name="SCHWAB_CALLBACK_URL" Target="SCHWAB_CALLBACK_URL" Default="https://tape-dev.reinlie.com/v1/admin/callback" Mode="" Description="OAuth callback URL" Type="Variable" Display="always" Required="true" Mask="false">https://tape-dev.reinlie.com/v1/admin/callback</Config>
   <Config Name="TOKEN_ENCRYPTION_KEY" Target="TOKEN_ENCRYPTION_KEY" Default="" Mode="" Description="Fernet key for token-at-rest encryption" Type="Variable" Display="always" Required="false" Mask="true"/>
   <Config Name="DATABASE_URL" Target="DATABASE_URL" Default="" Mode="" Description="Warehouse DB URL (REQUIRED): postgresql+psycopg://tape:PASSWORD@192.168.1.64:5432/tape" Type="Variable" Display="always" Required="true" Mask="true"/>
-  <Config Name="TEMPLATE_SYNC_TEST" Target="TEMPLATE_SYNC_TEST" Default="hello-from-github" Mode="" Description="THROWAWAY: proves TemplateURL auto-sync. Will be reverted." Type="Variable" Display="always" Required="false" Mask="false">hello-from-github</Config>
 </Container>

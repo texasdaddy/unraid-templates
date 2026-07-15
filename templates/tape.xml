@@ -24,5 +24,5 @@
   <Config Name="SCHWAB_APP_SECRET" Target="SCHWAB_APP_SECRET" Default="" Mode="" Description="Schwab app secret" Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="SCHWAB_CALLBACK_URL" Target="SCHWAB_CALLBACK_URL" Default="https://tape.reinlie.com/v1/admin/callback" Mode="" Description="OAuth callback URL" Type="Variable" Display="always" Required="true" Mask="false">https://tape.reinlie.com/v1/admin/callback</Config>
   <Config Name="TOKEN_ENCRYPTION_KEY" Target="TOKEN_ENCRYPTION_KEY" Default="" Mode="" Description="Fernet key for token-at-rest encryption" Type="Variable" Display="always" Required="true" Mask="true"/>
-  <Config Name="DATABASE_URL" Target="DATABASE_URL" Default="" Mode="" Description="TimescaleDB URL; blank disables the warehouse" Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="DATABASE_URL" Target="DATABASE_URL" Default="" Mode="" Description="Warehouse DB URL (REQUIRED): postgresql+psycopg://tape:PASSWORD@192.168.1.74:5432/tape" Type="Variable" Display="always" Required="true" Mask="true"/>
 </Container>

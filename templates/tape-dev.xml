@@ -19,7 +19,7 @@
   <DateInstalled/>
   <Description>Tape (dev) — Schwab-backed market + account data tier.</Description>
   <Config Name="HTTP Port" Target="8000" Default="8000" Mode="tcp" Description="App HTTP port" Type="Port" Display="always" Required="false" Mask="false">8000</Config>
-  <Config Name="Data" Target="/data" Default="/mnt/user/appdata/tape-dev" Mode="rw" Description="Encrypted token store" Type="Path" Display="always" Required="false" Mask="false">/mnt/user/appdata/tape-dev</Config>
+  <Config Name="Data" Target="/data" Default="/mnt/user/appdata/tape-dev/data" Mode="rw" Description="Encrypted token store" Type="Path" Display="always" Required="false" Mask="false">/mnt/user/appdata/tape-dev/data</Config>
   <Config Name="SCHWAB_APP_KEY" Target="SCHWAB_APP_KEY" Default="" Mode="" Description="Schwab app key" Type="Variable" Display="always" Required="true" Mask="false"/>
   <Config Name="SCHWAB_APP_SECRET" Target="SCHWAB_APP_SECRET" Default="" Mode="" Description="Schwab app secret" Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="SCHWAB_CALLBACK_URL" Target="SCHWAB_CALLBACK_URL" Default="https://tape-dev.reinlie.com/v1/admin/callback" Mode="" Description="OAuth callback URL" Type="Variable" Display="always" Required="true" Mask="false">https://tape-dev.reinlie.com/v1/admin/callback</Config>

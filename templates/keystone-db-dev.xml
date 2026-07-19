@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>keystone-db-dev</Name>
+  <Repository>postgres:16</Repository>
+  <Registry>https://hub.docker.com/_/postgres</Registry>
+  <Network>br0</Network>
+  <MyIP></MyIP>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support/>
+  <Project>https://github.com/texasdaddy/keystone</Project>
+  <Overview>PostgreSQL 16 (dev) — Keystone's tenant-private datastore (RLS). Stock postgres:16, NOT TimescaleDB (that's Tape's warehouse). Set MyIP to a free br0 address (tape uses .61/.64/.71/.74).</Overview>
+  <Category>Database:</Category>
+  <TemplateURL>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/templates/keystone-db-dev.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/icons/keystone_db_dev.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <DateInstalled/>
+  <Description>PostgreSQL 16 (dev) for Keystone.</Description>
+  <Config Name="Postgres Port" Target="5432" Default="5432" Mode="tcp" Description="Postgres port" Type="Port" Display="always" Required="false" Mask="false">5432</Config>
+  <Config Name="Data" Target="/var/lib/postgresql/data" Default="/mnt/user/appdata/keystone-db-dev/data" Mode="rw" Description="Postgres data dir" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/keystone-db-dev/data</Config>
+  <Config Name="POSTGRES_USER" Target="POSTGRES_USER" Default="keystone" Mode="" Description="DB user" Type="Variable" Display="always" Required="true" Mask="false">keystone</Config>
+  <Config Name="POSTGRES_PASSWORD" Target="POSTGRES_PASSWORD" Default="" Mode="" Description="DB password (set this; reuse in keystone-dev DATABASE_URL)" Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="POSTGRES_DB" Target="POSTGRES_DB" Default="keystone" Mode="" Description="DB name" Type="Variable" Display="always" Required="true" Mask="false">keystone</Config>
+</Container>

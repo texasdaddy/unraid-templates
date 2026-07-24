@@ -27,7 +27,7 @@
   <DateInstalled/>
   <Description>Auto-reauth bot — maintains the Schwab OAuth token for Tape (single bot, serves both tape instances). SKELETON template — validate config before use.</Description>
   <!-- Trusted-device profile MUST persist across container updates (losing it forces manual re-consent). -->
-  <Config Name="Profile" Target="/profile" Default="/mnt/user/appdata/reauth-bot/profile" Mode="rw" Description="Trusted-device profile / session state (persist across updates)" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/reauth-bot/profile</Config>
+  <Config Name="Profile" Target="/profile" Default="/mnt/apps/appdata/reauth-bot/profile" Mode="rw" Description="Trusted-device profile / session state (persist across updates)" Type="Path" Display="always" Required="true" Mask="false">/mnt/apps/appdata/reauth-bot/profile</Config>
   <!-- VERIFY every variable below against the reauth-bot build's actual env contract, INCLUDING how it
        addresses both tape instances (one URL? two? a list?). -->
   <Config Name="TAPE_URL" Target="TAPE_URL" Default="http://192.168.1.61:8000" Mode="" Description="Tape API base URL where the refreshed token is delivered — VERIFY how both prod+dev tapes are targeted" Type="Variable" Display="always" Required="true" Mask="false">http://192.168.1.61:8000</Config>

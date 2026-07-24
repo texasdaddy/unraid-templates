@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<!--
+  SKELETON TEMPLATE — assembled by the icon-work session so the reauth-bot icon has a home and a
+  future session can complete/validate. The ICON reference is correct and live.
+  There is ONE reauth-bot (not a dev/prod split): a single Schwab app/token, one bot that keeps the
+  token alive and delivers it to both tape instances (prod + dev).
+  Everything marked "VERIFY" must be checked against the actual reauth-bot (tape#16) build before
+  deploy: image repo/tag, IP, port(s), env var names + values, and volume paths.
+-->
+<Container version="2">
+  <Name>reauth-bot</Name>
+  <Repository>ghcr.io/texasdaddy/tape-reauth</Repository>              <!-- VERIFY exact image name + tag -->
+  <Registry>https://github.com/texasdaddy/tape/pkgs/container</Registry>
+  <Network>br0</Network>
+  <MyIP>192.168.1.62</MyIP>                                            <!-- VERIFY / assign a free IP -->
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support/>
+  <Project>https://github.com/texasdaddy/tape</Project>
+  <Overview>Auto-reauth bot — keeps Tape's Schwab OAuth token alive via a trusted-device profile, so the token refreshes itself without manual re-consent. ONE bot for the whole deploy: a single Schwab app/token, delivered to both tape instances (prod + dev). SKELETON: validate repo/IP/port(s)/env against the tape#16 build before use.</Overview>
+  <Category>Network:Other</Category>
+  <WebUI/>                                                            <!-- VERIFY: does it expose a health/UI port? -->
+  <TemplateURL>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/templates/reauth-bot.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/icons/reauth_bot.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <DateInstalled/>
+  <Description>Auto-reauth bot — maintains the Schwab OAuth token for Tape (single bot, serves both tape instances). SKELETON template — validate config before use.</Description>
+  <!-- Trusted-device profile MUST persist across container updates (losing it forces manual re-consent). -->
+  <Config Name="Profile" Target="/profile" Default="/mnt/user/appdata/reauth-bot/profile" Mode="rw" Description="Trusted-device profile / session state (persist across updates)" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/reauth-bot/profile</Config>
+  <!-- VERIFY every variable below against the reauth-bot build's actual env contract, INCLUDING how it
+       addresses both tape instances (one URL? two? a list?). -->
+  <Config Name="TAPE_URL" Target="TAPE_URL" Default="http://192.168.1.61:8000" Mode="" Description="Tape API base URL where the refreshed token is delivered — VERIFY how both prod+dev tapes are targeted" Type="Variable" Display="always" Required="true" Mask="false">http://192.168.1.61:8000</Config>
+  <Config Name="SCHWAB_APP_KEY" Target="SCHWAB_APP_KEY" Default="" Mode="" Description="Schwab app key" Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="SCHWAB_APP_SECRET" Target="SCHWAB_APP_SECRET" Default="" Mode="" Description="Schwab app secret" Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="SCHWAB_LOGIN_ID" Target="SCHWAB_LOGIN_ID" Default="" Mode="" Description="Schwab login id (trusted-device auth) — VERIFY name" Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="SCHWAB_PASSWORD" Target="SCHWAB_PASSWORD" Default="" Mode="" Description="Schwab password — VERIFY name" Type="Variable" Display="always" Required="true" Mask="true"/>
+</Container>

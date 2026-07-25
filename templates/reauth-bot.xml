@@ -1,22 +1,22 @@
 <?xml version="1.0"?>
 <!--
-  reauth-bot — keeps Tape's Schwab OAuth token alive via a trusted-device browser profile.
-  Self-contained image (tape repo ops/reauth/, built by CI → GHCR): deploys the Unraid way —
-  UI import → set IP + Schwab variables → Apply. One-time interactive seed is a SEED_MODE
-  variable toggle (no docker-run, no mounted script). One bot serves the whole deploy.
-  Full standup: tape repo ops/reauth/README.md.
+  reauth-bot — standalone Schwab trusted-device re-consent bot (its own repo:
+  github.com/texasdaddy/reauth-bot). Self-contained image built by that repo's CI → GHCR:
+  deploys the Unraid way — UI import → set IP + variables → Apply. One-time interactive seed is
+  a SEED_MODE variable toggle (no docker-run, no mounted script). This template deploys it for
+  Tape (LOGIN_URL/TOKEN_URL default to tape-dev). Full runbook: reauth-bot repo README.
 -->
 <Container version="2">
   <Name>reauth-bot</Name>
-  <Repository>ghcr.io/texasdaddy/reauth-bot:dev</Repository>            <!-- dev PoC uses :dev; prod flips to :latest -->
-  <Registry>https://github.com/texasdaddy/tape/pkgs/container/reauth-bot</Registry>
+  <Repository>ghcr.io/texasdaddy/reauth-bot:latest</Repository>
+  <Registry>https://github.com/texasdaddy/reauth-bot/pkgs/container/reauth-bot</Registry>
   <Network>br0</Network>
   <MyIP>192.168.1.60</MyIP>                                            <!-- .60: assigned by Scott 2026-07-25 (verified free on br0). Bot is outbound-only. -->
   <Shell>sh</Shell>
   <Privileged>false</Privileged>
   <Support/>
-  <Project>https://github.com/texasdaddy/tape</Project>
-  <Overview>Auto-reauth bot for Tape (tape#16). Self-contained image (reauth.py + seed noVNC tooling baked in). On a ~72h cadence it drives Tape's own /v1/admin/login flow inside a persistent trusted-device profile (skips 2FA) so the Schwab 7-day consent refreshes itself. One bot for the whole deploy (single Schwab app/token). REQUIRES a one-time interactive trusted-device seed: set SEED_MODE=1 + SEED_VNC_PASSWORD, Apply, complete the consent over noVNC (http://CONTAINER-IP:6080/vnc.html), then clear SEED_MODE and Apply. The trusted-device cookie MUST persist across updates (Profile volume). See ops/reauth/README.md.</Overview>
+  <Project>https://github.com/texasdaddy/reauth-bot</Project>
+  <Overview>Standalone Schwab trusted-device re-consent bot (repo: github.com/texasdaddy/reauth-bot). Self-contained image; on a ~72h cadence it drives a target service's login flow inside a persistent trusted-device profile (skips 2FA) so the Schwab 7-day consent refreshes itself. This template targets Tape (LOGIN_URL/TOKEN_URL default to tape-dev). REQUIRES a one-time interactive trusted-device seed: set SEED_MODE=1 + SEED_VNC_PASSWORD, Apply, complete the consent over noVNC (http://CONTAINER-IP:6080/vnc.html), then clear SEED_MODE and Apply. The trusted-device cookie MUST persist across updates (Profile volume). See the reauth-bot repo README.</Overview>
   <Category>Network:Other</Category>
   <WebUI/>                                                            <!-- steady state has no web UI; seed noVNC is at http://CONTAINER-IP:6080/vnc.html only while SEED_MODE=1 -->
   <TemplateURL>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/templates/reauth-bot.xml</TemplateURL>
@@ -24,19 +24,21 @@
   <ExtraParams/>
   <PostArgs/>
   <DateInstalled/>
-  <Description>Auto-reauth bot — maintains the Schwab OAuth token for Tape. Self-contained image; UI-deployed; one-time seed via SEED_MODE. See ops/reauth/README.md.</Description>
+  <Description>Standalone Schwab trusted-device re-consent bot (github.com/texasdaddy/reauth-bot). Self-contained image; UI-deployed; one-time seed via SEED_MODE. This template targets Tape.</Description>
 
   <!-- Trusted-device profile MUST persist across container updates (losing it forces a manual re-seed). -->
   <Config Name="Profile" Target="/profile" Default="/mnt/apps/appdata/reauth-bot/profile" Mode="rw" Description="Trusted-device browser profile + /profile/shots debug captures (persist across updates; root-only, holds brokerage imagery)" Type="Path" Display="always" Required="true" Mask="false">/mnt/apps/appdata/reauth-bot/profile</Config>
 
   <!-- Schwab LOGIN creds (full-account; this container's env is root-only). The bot does NOT
-       need the Schwab APP key/secret — those live in Tape and mint the token server-side. -->
+       need the Schwab APP key/secret — those live in the target service, which mints the token. -->
   <Config Name="SCHWAB_USER" Target="SCHWAB_USER" Default="" Mode="" Description="Schwab login id (drives the trusted-device browser login)" Type="Variable" Display="always" Required="true" Mask="false"/>
   <Config Name="SCHWAB_PASS" Target="SCHWAB_PASS" Default="" Mode="" Description="Schwab password" Type="Variable" Display="always" Required="true" Mask="true"/>
 
-  <!-- Tape endpoints the bot drives + reads (dev by default; swap host for prod). -->
-  <Config Name="TAPE_LOGIN_URL" Target="TAPE_LOGIN_URL" Default="https://tape-dev.reinlie.com/v1/admin/login" Mode="" Description="Tape login endpoint the bot navigates to start consent" Type="Variable" Display="always" Required="true" Mask="false">https://tape-dev.reinlie.com/v1/admin/login</Config>
-  <Config Name="TAPE_TOKEN_URL" Target="TAPE_TOKEN_URL" Default="https://tape-dev.reinlie.com/v1/admin/token" Mode="" Description="Tape token-status endpoint the bot reads to confirm refresh_issued_at advanced" Type="Variable" Display="always" Required="true" Mask="false">https://tape-dev.reinlie.com/v1/admin/token</Config>
+  <!-- Target service's OWN OAuth endpoints (default: tape-dev; swap host for prod / another service). -->
+  <Config Name="LOGIN_URL" Target="LOGIN_URL" Default="https://tape-dev.reinlie.com/v1/admin/login" Mode="" Description="The service's login endpoint the bot navigates to start consent" Type="Variable" Display="always" Required="true" Mask="false">https://tape-dev.reinlie.com/v1/admin/login</Config>
+  <Config Name="TOKEN_URL" Target="TOKEN_URL" Default="https://tape-dev.reinlie.com/v1/admin/token" Mode="" Description="The service's token-status endpoint the bot reads to confirm the consent advanced" Type="Variable" Display="always" Required="true" Mask="false">https://tape-dev.reinlie.com/v1/admin/token</Config>
+  <Config Name="CALLBACK_URL_MATCH" Target="CALLBACK_URL_MATCH" Default="" Mode="" Description="Optional: substring of the post-consent redirect back to the service (blank = image default /v1/admin/callback)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="TOKEN_ISSUED_FIELD" Target="TOKEN_ISSUED_FIELD" Default="" Mode="" Description="Optional: the monotonic consent field in TOKEN_URL's JSON (blank = image default refresh_issued_at)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
 
   <!-- Alerts + cadence. -->
   <Config Name="REAUTH_NTFY_URL" Target="REAUTH_NTFY_URL" Default="" Mode="" Description="Full ntfy topic URL for success/failure pushes (unset = log-only)" Type="Variable" Display="always" Required="false" Mask="false"/>

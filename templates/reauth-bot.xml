@@ -10,8 +10,7 @@
   <Name>reauth-bot</Name>
   <Repository>ghcr.io/texasdaddy/reauth-bot:latest</Repository>
   <Registry>https://github.com/texasdaddy/reauth-bot/pkgs/container/reauth-bot</Registry>
-  <Network>br0</Network>
-  <MyIP><internal-ip></MyIP>                                            <!-- .60: assigned by the owner 2026-07-25 (verified free on br0). Bot is outbound-only. -->
+  <Network>bridge</Network>                                           <!-- neutral default; the bot is outbound-only. Pick br0 + a fixed IP in the UI if you prefer. -->
   <Shell>sh</Shell>
   <Privileged>false</Privileged>
   <Support/>
@@ -50,7 +49,7 @@
   <Config Name="SEED_MODE" Target="SEED_MODE" Default="" Mode="" Description="Set to 1 ONLY for the one-time interactive seed (headed browser over noVNC on :6080); blank = headless steady state" Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="SEED_VNC_PASSWORD" Target="SEED_VNC_PASSWORD" Default="" Mode="" Description="Required when SEED_MODE=1 — VNC password gating noVNC (the seed is a live brokerage login on br0). Blank refuses to start in seed mode." Type="Variable" Display="advanced" Required="false" Mask="true"/>
   <Config Name="REAUTH_SEED_HOLD_SECONDS" Target="REAUTH_SEED_HOLD_SECONDS" Default="900" Mode="" Description="How long (s) the seed keeps the headed browser open for you to log in + approve 2FA. Raise if a slow SMS 2FA risks closing it mid-login." Type="Variable" Display="advanced" Required="false" Mask="false">900</Config>
-  <Config Name="Seed noVNC" Target="6080" Default="" Mode="tcp" Description="noVNC port, used ONLY during the seed (SEED_MODE=1). On br0 reach it at http://CONTAINER-IP:6080/vnc.html." Type="Port" Display="advanced" Required="false" Mask="false">6080</Config>
+  <Config Name="Seed noVNC" Target="6080" Default="6080" Mode="tcp" Description="noVNC port, used ONLY during the seed (SEED_MODE=1). Reach it at http://SERVER-OR-CONTAINER-IP:6080/vnc.html (on bridge it's the host IP; on br0 the container IP)." Type="Port" Display="advanced" Required="false" Mask="false">6080</Config>
 
   <!-- Schwab page selectors — override ONLY if the in-script defaults don't match the live pages
        (confirm during the seed). Left blank = use the image defaults. -->

@@ -35,7 +35,7 @@
 
   <!-- Target service's OWN OAuth endpoints (default: tape-dev; swap host for prod / another service). -->
   <Config Name="LOGIN_URL" Target="LOGIN_URL" Default="https://tape-dev.reinlie.com/v1/admin/login" Mode="" Description="The service's login endpoint the bot navigates to start consent" Type="Variable" Display="always" Required="true" Mask="false">https://tape-dev.reinlie.com/v1/admin/login</Config>
-  <Config Name="TOKEN_URL" Target="TOKEN_URL" Default="https://tape-dev.reinlie.com/v1/admin/token" Mode="" Description="The service's token-status endpoint the bot reads to confirm the consent advanced" Type="Variable" Display="always" Required="true" Mask="false">https://tape-dev.reinlie.com/v1/admin/token</Config>
+  <Config Name="TOKEN_URL" Target="TOKEN_URL" Default="http://192.168.1.61:8000/v1/admin/token" Mode="" Description="The service's token-status endpoint the bot reads (plain HTTP GET) to confirm the consent advanced. Use a DIRECT/internal URL not behind a CDN — a public CDN (Cloudflare) 403s non-browser requests. For tape: the container IP." Type="Variable" Display="always" Required="true" Mask="false">http://192.168.1.61:8000/v1/admin/token</Config>
   <Config Name="CALLBACK_URL_MATCH" Target="CALLBACK_URL_MATCH" Default="" Mode="" Description="Optional: substring of the post-consent redirect back to the service (blank = image default /v1/admin/callback)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="TOKEN_ISSUED_FIELD" Target="TOKEN_ISSUED_FIELD" Default="" Mode="" Description="Optional: the monotonic consent field in TOKEN_URL's JSON (blank = image default refresh_issued_at)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
 

@@ -1,38 +1,56 @@
 <?xml version="1.0"?>
 <!--
-  SKELETON TEMPLATE — assembled by the icon-work session so the reauth-bot icon has a home and a
-  future session can complete/validate. The ICON reference is correct and live.
-  There is ONE reauth-bot (not a dev/prod split): a single Schwab app/token, one bot that keeps the
-  token alive and delivers it to both tape instances (prod + dev).
-  Everything marked "VERIFY" must be checked against the actual reauth-bot (tape#16) build before
-  deploy: image repo/tag, IP, port(s), env var names + values, and volume paths.
+  reauth-bot — keeps Tape's Schwab OAuth token alive via a trusted-device browser profile.
+  ARCHITECTURE (v3.3 Amd 21): NO image of our own — the stock pinned Playwright image runs
+  `reauth.py` mounted in from appdata. One bot serves the whole deploy (single Schwab app/token).
+  Full standup runbook + one-time trusted-device seed: tape repo `ops/reauth/README.md`.
+  Set SCHWAB_USER / SCHWAB_PASS (and, for prod, swap the TAPE_* URLs) before starting.
 -->
 <Container version="2">
   <Name>reauth-bot</Name>
-  <Repository>ghcr.io/texasdaddy/tape-reauth</Repository>              <!-- VERIFY exact image name + tag -->
-  <Registry>https://github.com/texasdaddy/tape/pkgs/container</Registry>
+  <Repository>mcr.microsoft.com/playwright/python:v1.49.0-jammy</Repository>
+  <Registry>https://mcr.microsoft.com/en-us/product/playwright/python/about</Registry>
   <Network>br0</Network>
-  <MyIP><internal-ip></MyIP>                                            <!-- VERIFY / assign a free IP -->
+  <MyIP><internal-ip></MyIP>                                            <!-- VERIFY free on br0 (keystone-dev was also proposed .62); the bot is outbound-only, so any free IP works -->
   <Shell>sh</Shell>
   <Privileged>false</Privileged>
   <Support/>
   <Project>https://github.com/texasdaddy/tape</Project>
-  <Overview>Auto-reauth bot — keeps Tape's Schwab OAuth token alive via a trusted-device profile, so the token refreshes itself without manual re-consent. ONE bot for the whole deploy: a single Schwab app/token, delivered to both tape instances (prod + dev). SKELETON: validate repo/IP/port(s)/env against the tape#16 build before use.</Overview>
+  <Overview>Auto-reauth bot for Tape (tape#16). Runs the stock Playwright image with ops/reauth/reauth.py mounted in — no custom image to build. On a ~72h cadence it drives Tape's own /v1/admin/login flow inside a persistent trusted-device profile (skips 2FA) so the Schwab 7-day consent refreshes itself. One bot for the whole deploy (single Schwab app/token). REQUIRES a one-time interactive trusted-device seed — see ops/reauth/README.md. The trusted-device cookie MUST persist across updates (Profile volume); losing it forces a manual re-seed.</Overview>
   <Category>Network:Other</Category>
-  <WebUI/>                                                            <!-- VERIFY: does it expose a health/UI port? -->
+  <WebUI/>                                                            <!-- no steady-state web UI; the seed noVNC is a one-off, loopback+SSH only (README) -->
   <TemplateURL>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/templates/reauth-bot.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/icons/reauth_bot.png</Icon>
   <ExtraParams/>
-  <PostArgs/>
+  <!-- The container is the stock image; the bot IS this mounted script. -->
+  <PostArgs>python /app/reauth.py</PostArgs>
   <DateInstalled/>
-  <Description>Auto-reauth bot — maintains the Schwab OAuth token for Tape (single bot, serves both tape instances). SKELETON template — validate config before use.</Description>
+  <Description>Auto-reauth bot — maintains the Schwab OAuth token for Tape (single bot, serves both tape instances). Stock Playwright image + mounted reauth.py. One-time trusted-device seed required (ops/reauth/README.md).</Description>
+
   <!-- Trusted-device profile MUST persist across container updates (losing it forces manual re-consent). -->
-  <Config Name="Profile" Target="/profile" Default="/mnt/POOL/appdata/reauth-bot/profile" Mode="rw" Description="Trusted-device profile / session state (persist across updates)" Type="Path" Display="always" Required="true" Mask="false">/mnt/POOL/appdata/reauth-bot/profile</Config>
-  <!-- VERIFY every variable below against the reauth-bot build's actual env contract, INCLUDING how it
-       addresses both tape instances (one URL? two? a list?). -->
-  <Config Name="TAPE_URL" Target="TAPE_URL" Default="http://<internal-ip>:8000" Mode="" Description="Tape API base URL where the refreshed token is delivered — VERIFY how both prod+dev tapes are targeted" Type="Variable" Display="always" Required="true" Mask="false">http://<internal-ip>:8000</Config>
-  <Config Name="SCHWAB_APP_KEY" Target="SCHWAB_APP_KEY" Default="" Mode="" Description="Schwab app key" Type="Variable" Display="always" Required="true" Mask="false"/>
-  <Config Name="SCHWAB_APP_SECRET" Target="SCHWAB_APP_SECRET" Default="" Mode="" Description="Schwab app secret" Type="Variable" Display="always" Required="true" Mask="true"/>
-  <Config Name="SCHWAB_LOGIN_ID" Target="SCHWAB_LOGIN_ID" Default="" Mode="" Description="Schwab login id (trusted-device auth) — VERIFY name" Type="Variable" Display="always" Required="true" Mask="false"/>
-  <Config Name="SCHWAB_PASSWORD" Target="SCHWAB_PASSWORD" Default="" Mode="" Description="Schwab password — VERIFY name" Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="Profile" Target="/profile" Default="/mnt/POOL/appdata/reauth-bot/profile" Mode="rw" Description="Trusted-device browser profile + /profile/shots debug captures (persist across updates; root-only, holds brokerage imagery)" Type="Path" Display="always" Required="true" Mask="false">/mnt/POOL/appdata/reauth-bot/profile</Config>
+  <!-- The bot script, mounted read-only (no image to build). Copy tape/ops/reauth/reauth.py here. -->
+  <Config Name="Script" Target="/app/reauth.py" Default="/mnt/POOL/appdata/reauth-bot/reauth.py" Mode="ro" Description="The bot script (tape repo ops/reauth/reauth.py), mounted read-only" Type="Path" Display="always" Required="true" Mask="false">/mnt/POOL/appdata/reauth-bot/reauth.py</Config>
+
+  <!-- Schwab LOGIN creds (full-account; keep this container's env root-only). The bot does NOT
+       need the Schwab APP key/secret — those live in Tape and mint the token server-side. -->
+  <Config Name="SCHWAB_USER" Target="SCHWAB_USER" Default="" Mode="" Description="Schwab login id (drives the trusted-device browser login)" Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="SCHWAB_PASS" Target="SCHWAB_PASS" Default="" Mode="" Description="Schwab password" Type="Variable" Display="always" Required="true" Mask="true"/>
+
+  <!-- Tape endpoints the bot drives + reads (dev by default; swap host for prod). -->
+  <Config Name="TAPE_LOGIN_URL" Target="TAPE_LOGIN_URL" Default="https://tape-dev.your-domain.example/v1/admin/login" Mode="" Description="Tape login endpoint the bot navigates to start consent" Type="Variable" Display="always" Required="true" Mask="false">https://tape-dev.your-domain.example/v1/admin/login</Config>
+  <Config Name="TAPE_TOKEN_URL" Target="TAPE_TOKEN_URL" Default="https://tape-dev.your-domain.example/v1/admin/token" Mode="" Description="Tape token-status endpoint the bot reads to confirm refresh_issued_at advanced" Type="Variable" Display="always" Required="true" Mask="false">https://tape-dev.your-domain.example/v1/admin/token</Config>
+
+  <!-- Alerts + cadence. -->
+  <Config Name="REAUTH_NTFY_URL" Target="REAUTH_NTFY_URL" Default="" Mode="" Description="Full ntfy topic URL for success/failure pushes (unset = log-only)" Type="Variable" Display="always" Required="false" Mask="false"/>
+  <Config Name="REAUTH_INTERVAL_HOURS" Target="REAUTH_INTERVAL_HOURS" Default="72" Mode="" Description="Refresh cadence in hours (~3d = 2+ tries per 7-day Schwab window)" Type="Variable" Display="always" Required="false" Mask="false">72</Config>
+  <Config Name="REAUTH_RETRY_HOURS" Target="REAUTH_RETRY_HOURS" Default="24" Mode="" Description="Retry interval after a failed run, in hours" Type="Variable" Display="always" Required="false" Mask="false">24</Config>
+
+  <!-- Schwab page selectors — override ONLY if the in-script defaults don't match the live pages
+       (confirm during the seed). Left blank = use reauth.py defaults. -->
+  <Config Name="SEL_USER" Target="SEL_USER" Default="" Mode="" Description="Optional: username field CSS selector (blank = script default #loginIdInput)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="SEL_PASS" Target="SEL_PASS" Default="" Mode="" Description="Optional: password field selector (blank = #passwordInput)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="SEL_SUBMIT" Target="SEL_SUBMIT" Default="" Mode="" Description="Optional: submit button selector (blank = #btnLogin)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="SEL_CONSENT" Target="SEL_CONSENT" Default="" Mode="" Description="Optional: consent/allow button selector list (blank = script default)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="SEL_2FA" Target="SEL_2FA" Default="" Mode="" Description="Optional: selector(s) that detect a re-appeared 2FA prompt (blank = script default). This gates the 're-seed required' alarm — most likely to need tuning at seed." Type="Variable" Display="advanced" Required="false" Mask="false"/>
 </Container>

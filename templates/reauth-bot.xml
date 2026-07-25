@@ -11,7 +11,7 @@
   <Repository>mcr.microsoft.com/playwright/python:v1.49.0-jammy</Repository>
   <Registry>https://mcr.microsoft.com/en-us/product/playwright/python/about</Registry>
   <Network>br0</Network>
-  <MyIP><internal-ip></MyIP>                                            <!-- .63: verified free on br0 (2026-07-25), chosen over .62 which is keystone-dev's proposed IP. Bot is outbound-only. -->
+  <MyIP><internal-ip></MyIP>                                            <!-- .60: assigned by the owner 2026-07-25 (verified free on br0). Bot is outbound-only. -->
   <Shell>sh</Shell>
   <Privileged>false</Privileged>
   <Support/>

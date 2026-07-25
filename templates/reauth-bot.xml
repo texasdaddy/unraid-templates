@@ -1,38 +1,35 @@
 <?xml version="1.0"?>
 <!--
   reauth-bot — keeps Tape's Schwab OAuth token alive via a trusted-device browser profile.
-  ARCHITECTURE (v3.3 Amd 21): NO image of our own — the stock pinned Playwright image runs
-  `reauth.py` mounted in from appdata. One bot serves the whole deploy (single Schwab app/token).
-  Full standup runbook + one-time trusted-device seed: tape repo `ops/reauth/README.md`.
-  Set SCHWAB_USER / SCHWAB_PASS (and, for prod, swap the TAPE_* URLs) before starting.
+  Self-contained image (tape repo ops/reauth/, built by CI → GHCR): deploys the Unraid way —
+  UI import → set IP + Schwab variables → Apply. One-time interactive seed is a SEED_MODE
+  variable toggle (no docker-run, no mounted script). One bot serves the whole deploy.
+  Full standup: tape repo ops/reauth/README.md.
 -->
 <Container version="2">
   <Name>reauth-bot</Name>
-  <Repository>mcr.microsoft.com/playwright/python:v1.49.0-jammy</Repository>
-  <Registry>https://mcr.microsoft.com/en-us/product/playwright/python/about</Registry>
+  <Repository>ghcr.io/texasdaddy/reauth-bot:dev</Repository>            <!-- dev PoC uses :dev; prod flips to :latest -->
+  <Registry>https://github.com/texasdaddy/tape/pkgs/container/reauth-bot</Registry>
   <Network>br0</Network>
   <MyIP>192.168.1.60</MyIP>                                            <!-- .60: assigned by Scott 2026-07-25 (verified free on br0). Bot is outbound-only. -->
   <Shell>sh</Shell>
   <Privileged>false</Privileged>
   <Support/>
   <Project>https://github.com/texasdaddy/tape</Project>
-  <Overview>Auto-reauth bot for Tape (tape#16). Runs the stock Playwright image with ops/reauth/reauth.py mounted in — no custom image to build. On a ~72h cadence it drives Tape's own /v1/admin/login flow inside a persistent trusted-device profile (skips 2FA) so the Schwab 7-day consent refreshes itself. One bot for the whole deploy (single Schwab app/token). REQUIRES a one-time interactive trusted-device seed — see ops/reauth/README.md. The trusted-device cookie MUST persist across updates (Profile volume); losing it forces a manual re-seed.</Overview>
+  <Overview>Auto-reauth bot for Tape (tape#16). Self-contained image (reauth.py + seed noVNC tooling baked in). On a ~72h cadence it drives Tape's own /v1/admin/login flow inside a persistent trusted-device profile (skips 2FA) so the Schwab 7-day consent refreshes itself. One bot for the whole deploy (single Schwab app/token). REQUIRES a one-time interactive trusted-device seed: set SEED_MODE=1 + SEED_VNC_PASSWORD, Apply, complete the consent over noVNC (http://CONTAINER-IP:6080/vnc.html), then clear SEED_MODE and Apply. The trusted-device cookie MUST persist across updates (Profile volume). See ops/reauth/README.md.</Overview>
   <Category>Network:Other</Category>
-  <WebUI/>                                                            <!-- no steady-state web UI; the seed noVNC is a one-off, loopback+SSH only (README) -->
+  <WebUI/>                                                            <!-- steady state has no web UI; seed noVNC is at http://CONTAINER-IP:6080/vnc.html only while SEED_MODE=1 -->
   <TemplateURL>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/templates/reauth-bot.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/icons/reauth_bot.png</Icon>
   <ExtraParams/>
-  <!-- The container is the stock image; the bot IS this mounted script. -->
-  <PostArgs>python /app/reauth.py</PostArgs>
+  <PostArgs/>
   <DateInstalled/>
-  <Description>Auto-reauth bot — maintains the Schwab OAuth token for Tape (single bot, serves both tape instances). Stock Playwright image + mounted reauth.py. One-time trusted-device seed required (ops/reauth/README.md).</Description>
+  <Description>Auto-reauth bot — maintains the Schwab OAuth token for Tape. Self-contained image; UI-deployed; one-time seed via SEED_MODE. See ops/reauth/README.md.</Description>
 
-  <!-- Trusted-device profile MUST persist across container updates (losing it forces manual re-consent). -->
+  <!-- Trusted-device profile MUST persist across container updates (losing it forces a manual re-seed). -->
   <Config Name="Profile" Target="/profile" Default="/mnt/apps/appdata/reauth-bot/profile" Mode="rw" Description="Trusted-device browser profile + /profile/shots debug captures (persist across updates; root-only, holds brokerage imagery)" Type="Path" Display="always" Required="true" Mask="false">/mnt/apps/appdata/reauth-bot/profile</Config>
-  <!-- The bot script, mounted read-only (no image to build). Copy tape/ops/reauth/reauth.py here. -->
-  <Config Name="Script" Target="/app/reauth.py" Default="/mnt/apps/appdata/reauth-bot/reauth.py" Mode="ro" Description="The bot script (tape repo ops/reauth/reauth.py), mounted read-only" Type="Path" Display="always" Required="true" Mask="false">/mnt/apps/appdata/reauth-bot/reauth.py</Config>
 
-  <!-- Schwab LOGIN creds (full-account; keep this container's env root-only). The bot does NOT
+  <!-- Schwab LOGIN creds (full-account; this container's env is root-only). The bot does NOT
        need the Schwab APP key/secret — those live in Tape and mint the token server-side. -->
   <Config Name="SCHWAB_USER" Target="SCHWAB_USER" Default="" Mode="" Description="Schwab login id (drives the trusted-device browser login)" Type="Variable" Display="always" Required="true" Mask="false"/>
   <Config Name="SCHWAB_PASS" Target="SCHWAB_PASS" Default="" Mode="" Description="Schwab password" Type="Variable" Display="always" Required="true" Mask="true"/>
@@ -46,11 +43,18 @@
   <Config Name="REAUTH_INTERVAL_HOURS" Target="REAUTH_INTERVAL_HOURS" Default="72" Mode="" Description="Refresh cadence in hours (~3d = 2+ tries per 7-day Schwab window)" Type="Variable" Display="always" Required="false" Mask="false">72</Config>
   <Config Name="REAUTH_RETRY_HOURS" Target="REAUTH_RETRY_HOURS" Default="24" Mode="" Description="Retry interval after a failed run, in hours" Type="Variable" Display="always" Required="false" Mask="false">24</Config>
 
+  <!-- One-time seed (leave BOTH blank for steady state). Set SEED_MODE=1 + a strong
+       SEED_VNC_PASSWORD, Apply, do the consent over noVNC, then clear SEED_MODE and Apply. -->
+  <Config Name="SEED_MODE" Target="SEED_MODE" Default="" Mode="" Description="Set to 1 ONLY for the one-time interactive seed (headed browser over noVNC on :6080); blank = headless steady state" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="SEED_VNC_PASSWORD" Target="SEED_VNC_PASSWORD" Default="" Mode="" Description="Required when SEED_MODE=1 — VNC password gating noVNC (the seed is a live brokerage login on br0). Blank refuses to start in seed mode." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="REAUTH_SEED_HOLD_SECONDS" Target="REAUTH_SEED_HOLD_SECONDS" Default="900" Mode="" Description="How long (s) the seed keeps the headed browser open for you to log in + approve 2FA. Raise if a slow SMS 2FA risks closing it mid-login." Type="Variable" Display="advanced" Required="false" Mask="false">900</Config>
+  <Config Name="Seed noVNC" Target="6080" Default="" Mode="tcp" Description="noVNC port, used ONLY during the seed (SEED_MODE=1). On br0 reach it at http://CONTAINER-IP:6080/vnc.html." Type="Port" Display="advanced" Required="false" Mask="false">6080</Config>
+
   <!-- Schwab page selectors — override ONLY if the in-script defaults don't match the live pages
-       (confirm during the seed). Left blank = use reauth.py defaults. -->
-  <Config Name="SEL_USER" Target="SEL_USER" Default="" Mode="" Description="Optional: username field CSS selector (blank = script default #loginIdInput)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+       (confirm during the seed). Left blank = use the image defaults. -->
+  <Config Name="SEL_USER" Target="SEL_USER" Default="" Mode="" Description="Optional: username field CSS selector (blank = default #loginIdInput)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="SEL_PASS" Target="SEL_PASS" Default="" Mode="" Description="Optional: password field selector (blank = #passwordInput)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="SEL_SUBMIT" Target="SEL_SUBMIT" Default="" Mode="" Description="Optional: submit button selector (blank = #btnLogin)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
-  <Config Name="SEL_CONSENT" Target="SEL_CONSENT" Default="" Mode="" Description="Optional: consent/allow button selector list (blank = script default)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
-  <Config Name="SEL_2FA" Target="SEL_2FA" Default="" Mode="" Description="Optional: selector(s) that detect a re-appeared 2FA prompt (blank = script default). This gates the 're-seed required' alarm — most likely to need tuning at seed." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="SEL_CONSENT" Target="SEL_CONSENT" Default="" Mode="" Description="Optional: consent/allow button selector list (blank = image default)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="SEL_2FA" Target="SEL_2FA" Default="" Mode="" Description="Optional: selector(s) detecting a re-appeared 2FA prompt (blank = image default). Gates the 're-seed required' alarm." Type="Variable" Display="advanced" Required="false" Mask="false"/>
 </Container>

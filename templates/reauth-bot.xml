@@ -41,7 +41,7 @@
 
   <!-- Alerts + cadence. -->
   <Config Name="REAUTH_NTFY_URL" Target="REAUTH_NTFY_URL" Default="" Mode="" Description="Full ntfy topic URL for success/failure pushes (unset = log-only)" Type="Variable" Display="always" Required="false" Mask="false"/>
-  <Config Name="REAUTH_INTERVAL_HOURS" Target="REAUTH_INTERVAL_HOURS" Default="72" Mode="" Description="Refresh cadence in hours (~3d = 2+ tries per 7-day Schwab window)" Type="Variable" Display="always" Required="false" Mask="false">72</Config>
+  <Config Name="REAUTH_INTERVAL_HOURS" Target="REAUTH_INTERVAL_HOURS" Default="96" Mode="" Description="Refresh cadence in hours (~4d; ≥1 retry of margin before the 7-day Schwab wall). The bot also SKIPS the reauth on startup if the consent is already fresh, so a restart never adds a redundant one." Type="Variable" Display="always" Required="false" Mask="false">96</Config>
   <Config Name="REAUTH_RETRY_HOURS" Target="REAUTH_RETRY_HOURS" Default="24" Mode="" Description="Retry interval after a failed run, in hours" Type="Variable" Display="always" Required="false" Mask="false">24</Config>
 
   <!-- One-time seed (leave BOTH blank for steady state). Set SEED_MODE=1 + a strong

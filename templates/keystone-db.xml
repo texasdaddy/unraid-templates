@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>keystone-db</Name>
+  <Repository>postgres:16</Repository>
+  <Registry>https://hub.docker.com/_/postgres</Registry>
+  <Network>bridge</Network>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support/>
+  <Project>https://github.com/texasdaddy/keystone</Project>
+  <Overview>PostgreSQL 16 — Keystone's tenant-private datastore (row-level security). Stock postgres:16 (NOT TimescaleDB — Keystone's schema is relational multi-tenant, no hypertables). Neutral template: bridge networking + no baked IP — set network mode / static IP + POSTGRES_PASSWORD at container creation. Autostart this DB BEFORE the keystone app container.</Overview>
+  <Category>Database:</Category>
+  <WebUI/>
+  <TemplateURL>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/templates/keystone-db.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/icons/keystone_db.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <DateInstalled/>
+  <Description>PostgreSQL 16 for Keystone. Neutral template; set IP + POSTGRES_PASSWORD at creation.</Description>
+  <Config Name="Postgres Port" Target="5432" Default="5432" Mode="tcp" Description="PostgreSQL port" Type="Port" Display="always" Required="false" Mask="false">5432</Config>
+  <Config Name="Data" Target="/var/lib/postgresql/data" Default="/mnt/apps/appdata/keystone-db/data" Mode="rw" Description="Postgres data dir — pool path, NOT the /mnt/user FUSE overlay" Type="Path" Display="always" Required="true" Mask="false">/mnt/apps/appdata/keystone-db/data</Config>
+  <Config Name="POSTGRES_USER" Target="POSTGRES_USER" Default="keystone" Mode="" Description="DB user" Type="Variable" Display="always" Required="true" Mask="false">keystone</Config>
+  <Config Name="POSTGRES_PASSWORD" Target="POSTGRES_PASSWORD" Default="" Mode="" Description="DB password (set at creation; reuse as the app's DB_PASSWORD)" Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="POSTGRES_DB" Target="POSTGRES_DB" Default="keystone" Mode="" Description="DB name" Type="Variable" Display="always" Required="true" Mask="false">keystone</Config>
+</Container>

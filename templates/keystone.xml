@@ -1,0 +1,49 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>keystone</Name>
+  <Repository>ghcr.io/texasdaddy/keystone:stable</Repository>
+  <Registry>https://github.com/texasdaddy/keystone/pkgs/container/keystone</Registry>
+  <Network>bridge</Network>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support/>
+  <Project>https://github.com/texasdaddy/keystone</Project>
+  <Overview>Keystone — self-hosted multi-tenant personal financial platform (FastAPI + PostgreSQL 16 + Next.js). Consumes market/account data from Tape via its API (Keystone does not talk to Schwab directly). Neutral template: bridge networking + no baked IP — set network mode / static IP, image tag (:dev or :stable), DB host + password, and secrets at container creation. The DB connection is assembled internally from the discrete DB_* variables (no baked DATABASE_URL).</Overview>
+  <Category>Network:Other</Category>
+  <WebUI>http://[IP]:[PORT:8000]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/templates/keystone.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/icons/keystone.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <DateInstalled/>
+  <Description>Keystone — multi-tenant personal financial platform. Neutral template; set IP, image tag, DB host/password, and secrets at creation.</Description>
+
+  <Config Name="HTTP Port" Target="8000" Default="8000" Mode="tcp" Description="App HTTP port (FastAPI/gunicorn)" Type="Port" Display="always" Required="false" Mask="false">8000</Config>
+  <Config Name="Data" Target="/data" Default="/mnt/apps/appdata/keystone" Mode="rw" Description="App data (encrypted file vault, _210). Pool path — NOT the /mnt/user FUSE overlay." Type="Path" Display="always" Required="false" Mask="false">/mnt/apps/appdata/keystone</Config>
+
+  <!-- Database connection — discrete variables (INFRASTRUCTURE B.10); the app assembles the
+       connection string internally. Set DB_HOST to the keystone-db container IP + DB_PASSWORD
+       at creation. NO baked DATABASE_URL (that would hardcode the DB IP, violating B.7). -->
+  <Config Name="DB_HOST" Target="DB_HOST" Default="" Mode="" Description="PostgreSQL host — the keystone-db container's IP (set at creation)" Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="DB_PORT" Target="DB_PORT" Default="5432" Mode="" Description="PostgreSQL port" Type="Variable" Display="always" Required="true" Mask="false">5432</Config>
+  <Config Name="DB_USER" Target="DB_USER" Default="keystone" Mode="" Description="PostgreSQL user" Type="Variable" Display="always" Required="true" Mask="false">keystone</Config>
+  <Config Name="DB_PASSWORD" Target="DB_PASSWORD" Default="" Mode="" Description="PostgreSQL password (matches keystone-db POSTGRES_PASSWORD)" Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="DB_NAME" Target="DB_NAME" Default="keystone" Mode="" Description="PostgreSQL database name" Type="Variable" Display="always" Required="true" Mask="false">keystone</Config>
+
+  <!-- App secrets — PROVISIONAL forward-declarations. Keystone's Module 0 (Core) code is not
+       built yet; when it is, its config is the SSOT for the FINAL variable names. Because this is
+       a TemplateURL-tracked template, a later rename merges into an existing container on its Edit
+       page (no recreate). Set all of these at creation; generate strong random values. -->
+  <Config Name="JWT_SECRET_KEY" Target="JWT_SECRET_KEY" Default="" Mode="" Description="PROVISIONAL (reconciles with Module 0 code). Signing secret for JWT access + rotating refresh tokens — ONE key (refresh 'rotation' issues a new token, not a second signing key)." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="FILE_ENCRYPTION_KEY" Target="FILE_ENCRYPTION_KEY" Default="" Mode="" Description="PROVISIONAL (reconciles with Module 0 code). AES-256 key for the _210 file vault (personal documents at rest)." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <!-- Per-tenant KMS / key-management vars are intentionally NOT declared: _000 mandates a KMS
+       interface but the impl (Vault / TPM / cloud) is an unmade prod-era decision. They merge in
+       via the Edit page when the key service is chosen. -->
+
+  <!-- Email-code MFA (Gmail SMTP). PROVISIONAL names; optional (only for the email MFA method). -->
+  <Config Name="SMTP_HOST" Target="SMTP_HOST" Default="" Mode="" Description="PROVISIONAL. SMTP host for email-code MFA (e.g. smtp.gmail.com)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="SMTP_PORT" Target="SMTP_PORT" Default="587" Mode="" Description="PROVISIONAL. SMTP port" Type="Variable" Display="advanced" Required="false" Mask="false">587</Config>
+  <Config Name="SMTP_USER" Target="SMTP_USER" Default="" Mode="" Description="PROVISIONAL. SMTP username" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="SMTP_PASSWORD" Target="SMTP_PASSWORD" Default="" Mode="" Description="PROVISIONAL. SMTP password / app password" Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="SMTP_FROM" Target="SMTP_FROM" Default="" Mode="" Description="PROVISIONAL. From address for MFA emails" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+</Container>

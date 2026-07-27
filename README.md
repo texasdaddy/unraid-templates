@@ -20,10 +20,8 @@ https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/icons/<name>.
 | tape-db-dev | `icons/tape_db_dev.png` | `templates/tape-db-dev.xml` |
 | cef-tracker (prod) | `icons/cef-tracker.png` | `templates/cef-tracker.xml` |
 | reauth-bot | `icons/reauth_bot.png` | `templates/reauth-bot.xml` |
-| keystone (prod) | `icons/keystone.png` | _(template pending)_ |
-| keystone-dev | `icons/keystone_dev.png` | `templates/keystone-dev.xml` |
-| keystone-db (prod) | `icons/keystone_db.png` | _(template pending)_ |
-| keystone-db-dev | `icons/keystone_db_dev.png` | `templates/keystone-db-dev.xml` |
+| keystone | `icons/keystone.png` | `templates/keystone.xml` |
+| keystone-db | `icons/keystone_db.png` | `templates/keystone-db.xml` |
 
 Every template + icon in this repo must have a row here — keep this table in sync when adding either (the reauth-bot icon was added 2026-07-25 but not listed until 2026-07-27).
 

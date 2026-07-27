@@ -14,10 +14,8 @@ https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/icons/<name>.
 
 | Container | Icon | Template |
 |---|---|---|
-| tape (prod) | `icons/tape.png` | `templates/tape.xml` |
-| tape-dev | `icons/tape_dev.png` | `templates/tape-dev.xml` |
-| tape-db (prod) | `icons/tape_db.png` | `templates/tape-db.xml` |
-| tape-db-dev | `icons/tape_db_dev.png` | `templates/tape-db-dev.xml` |
+| tape (dev+prod) | `icons/tape.png` | `templates/tape.xml` |
+| tape-db (dev+prod) | `icons/tape_db.png` | `templates/tape-db.xml` |
 | cef-tracker (prod) | `icons/cef-tracker.png` | `templates/cef-tracker.xml` |
 | reauth-bot | `icons/reauth_bot.png` | `templates/reauth-bot.xml` |
 | keystone | `icons/keystone.png` | `templates/keystone.xml` |

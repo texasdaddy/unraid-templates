@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<!--
+  cef-tracker — closed-end fund discount-to-NAV tracker (Flask/SQLite; its own repo:
+  github.com/texasdaddy/cef-tracker). Self-contained image built by that repo's CI → GHCR.
+  Deploys the Unraid way: UI import → set FLASK_SECRET_KEY (+ optional OAuth) → Apply.
+  /data (the SQLite DB) is the ONLY volume, on the appdata pool path. Single prod container,
+  single gunicorn worker (APScheduler). All other runtime config (FRED key, SMTP, Anthropic,
+  ntfy) is managed in-app under Admin → System Settings, not here.
+-->
+<Container version="2">
+  <Name>cef-tracker</Name>
+  <Repository>ghcr.io/texasdaddy/cef-tracker:stable</Repository>
+  <Registry>https://github.com/texasdaddy/cef-tracker/pkgs/container/cef-tracker</Registry>
+  <Network>bridge</Network>                                          <!-- neutral default; pick br0 + a fixed IP in the UI if you prefer. -->
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support/>
+  <Project>https://github.com/texasdaddy/cef-tracker</Project>
+  <Overview>CEF Tracker — closed-end fund discount-to-NAV surveillance (BUY/WATCH/HOLD/SELL/AVOID signals) over ~367 CEFs, with a CEFConnect/FRED/sponsor data pipeline (APScheduler). Flask/SQLite, single gunicorn worker. The only persistent volume is /data (the SQLite DB) on the appdata pool. Set FLASK_SECRET_KEY (required; the app refuses to start if empty). Google/Microsoft OAuth are optional. All other runtime config (FRED key, SMTP, Anthropic, ntfy) is managed in-app under Admin → System Settings.</Overview>
+  <Category>Network:Other</Category>
+  <WebUI>http://[IP]:[PORT:5000]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/templates/cef-tracker.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/icons/cef-tracker.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <DateInstalled/>
+  <Description>CEF Tracker — closed-end fund discount-to-NAV tracker (Flask/SQLite).</Description>
+  <Config Name="HTTP Port" Target="5000" Default="5000" Mode="tcp" Description="App HTTP port" Type="Port" Display="always" Required="false" Mask="false">5000</Config>
+  <Config Name="Data" Target="/data" Default="/mnt/apps/appdata/cef-tracker/data" Mode="rw" Description="SQLite DB directory — the only persistent volume (appdata pool path)." Type="Path" Display="always" Required="false" Mask="false">/mnt/apps/appdata/cef-tracker/data</Config>
+  <Config Name="FLASK_SECRET_KEY" Target="FLASK_SECRET_KEY" Default="" Mode="" Description="Flask session signing key. REQUIRED — the app refuses to start if empty. Generate: python -c &quot;import secrets; print(secrets.token_hex(32))&quot;" Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="APP_BASE_URL" Target="APP_BASE_URL" Default="https://ceftracker.reinlie.com" Mode="" Description="Public base URL; used to build the OAuth redirect URIs. Pre-filled — do NOT leave blank (an empty value overrides the app default rather than falling back to it)." Type="Variable" Display="always" Required="false" Mask="false">https://ceftracker.reinlie.com</Config>
+  <Config Name="GOOGLE_CLIENT_ID" Target="GOOGLE_CLIENT_ID" Default="" Mode="" Description="Google OAuth client ID (optional; blank disables Google sign-in)." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="GOOGLE_CLIENT_SECRET" Target="GOOGLE_CLIENT_SECRET" Default="" Mode="" Description="Google OAuth client secret (optional)." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="MICROSOFT_CLIENT_ID" Target="MICROSOFT_CLIENT_ID" Default="" Mode="" Description="Microsoft OAuth client ID (optional; blank disables Microsoft sign-in)." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="MICROSOFT_CLIENT_SECRET" Target="MICROSOFT_CLIENT_SECRET" Default="" Mode="" Description="Microsoft OAuth client secret (optional)." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+</Container>

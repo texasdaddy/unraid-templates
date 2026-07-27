@@ -1,15 +1,20 @@
 <?xml version="1.0"?>
+<!--
+  tape — ONE neutral template for the Tape data tier (dev AND prod). Per INFRASTRUCTURE §2 B.7
+  there is no separate -dev file: the operator sets the host-specific values at CREATION —
+  Name (tape / tape-dev), image tag (:stable prod / :dev), network + static IP, the discrete
+  DB_* vars, and the OAuth callback host. Nothing environment-specific is baked here.
+-->
 <Container version="2">
   <Name>tape</Name>
   <Repository>ghcr.io/texasdaddy/tape:stable</Repository>
   <Registry>https://github.com/texasdaddy/tape/pkgs/container/tape</Registry>
-  <Network>br0</Network>
-  <MyIP><internal-ip></MyIP>
+  <Network>bridge</Network>
   <Shell>sh</Shell>
   <Privileged>false</Privileged>
   <Support/>
   <Project>https://github.com/texasdaddy/tape</Project>
-  <Overview>Tape (prod) — Schwab-backed market + account data tier for CEF Tracker + Keystone.</Overview>
+  <Overview>Tape — Schwab-backed market + account data tier for CEF Tracker + Keystone. ONE neutral template for dev and prod: at creation set Name (tape / tape-dev), image tag (:stable for prod, :dev for dev), network (br0) + static IP per the §3 scheme, the discrete DB_* vars pointing at the tape-db container, and the SCHWAB_CALLBACK_URL for this env. The app assembles the DB connection string from DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME (§2 B.10) — no baked DATABASE_URL.</Overview>
   <Category>Network:Other</Category>
   <WebUI>http://[IP]:[PORT:8000]/v1/health</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/templates/tape.xml</TemplateURL>
@@ -17,13 +22,18 @@
   <ExtraParams/>
   <PostArgs/>
   <DateInstalled/>
-  <Description>Tape (prod) — Schwab-backed market + account data tier.</Description>
+  <Description>Tape — Schwab-backed market + account data tier (one neutral template, dev+prod).</Description>
   <Config Name="HTTP Port" Target="8000" Default="8000" Mode="tcp" Description="App HTTP port" Type="Port" Display="always" Required="false" Mask="false">8000</Config>
-  <Config Name="Data" Target="/data" Default="/mnt/POOL/appdata/tape/data" Mode="rw" Description="Encrypted token store" Type="Path" Display="always" Required="false" Mask="false">/mnt/POOL/appdata/tape/data</Config>
+  <Config Name="Data" Target="/data" Default="/mnt/POOL/appdata/tape/data" Mode="rw" Description="Encrypted token store (set /mnt/POOL/appdata/tape-dev/data for a dev container)" Type="Path" Display="always" Required="false" Mask="false">/mnt/POOL/appdata/tape/data</Config>
   <Config Name="SCHWAB_APP_KEY" Target="SCHWAB_APP_KEY" Default="" Mode="" Description="Schwab app key" Type="Variable" Display="always" Required="true" Mask="false"/>
   <Config Name="SCHWAB_APP_SECRET" Target="SCHWAB_APP_SECRET" Default="" Mode="" Description="Schwab app secret" Type="Variable" Display="always" Required="true" Mask="true"/>
-  <Config Name="SCHWAB_CALLBACK_URL" Target="SCHWAB_CALLBACK_URL" Default="https://tape.your-domain.example/v1/admin/callback" Mode="" Description="OAuth callback URL" Type="Variable" Display="always" Required="true" Mask="false">https://tape.your-domain.example/v1/admin/callback</Config>
+  <Config Name="SCHWAB_CALLBACK_URL" Target="SCHWAB_CALLBACK_URL" Default="" Mode="" Description="OAuth callback URL for THIS env — e.g. https://tape.your-domain.example/v1/admin/callback (prod) or https://tape-dev.your-domain.example/v1/admin/callback (dev)" Type="Variable" Display="always" Required="true" Mask="false"/>
   <Config Name="TOKEN_ENCRYPTION_KEY" Target="TOKEN_ENCRYPTION_KEY" Default="" Mode="" Description="Fernet key for token-at-rest encryption" Type="Variable" Display="always" Required="true" Mask="true"/>
-  <Config Name="DATABASE_URL" Target="DATABASE_URL" Default="" Mode="" Description="Warehouse DB URL (REQUIRED): postgresql+psycopg://tape:PASSWORD@<internal-ip>:5432/tape" Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="DB_HOST" Target="DB_HOST" Default="" Mode="" Description="Warehouse DB host — the tape-db container's IP for this env (per the §3 IP scheme, e.g. .61 prod / .71 dev)" Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="DB_PORT" Target="DB_PORT" Default="5432" Mode="" Description="Warehouse DB port" Type="Variable" Display="always" Required="false" Mask="false">5432</Config>
+  <Config Name="DB_USER" Target="DB_USER" Default="tape" Mode="" Description="Warehouse DB user (matches the tape-db container's POSTGRES_USER)" Type="Variable" Display="always" Required="false" Mask="false">tape</Config>
+  <Config Name="DB_PASSWORD" Target="DB_PASSWORD" Default="" Mode="" Description="Warehouse DB password (matches the tape-db container's POSTGRES_PASSWORD)" Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="DB_NAME" Target="DB_NAME" Default="tape" Mode="" Description="Warehouse DB name (matches the tape-db container's POSTGRES_DB)" Type="Variable" Display="always" Required="false" Mask="false">tape</Config>
+  <Config Name="DATABASE_URL" Target="DATABASE_URL" Default="" Mode="" Description="OPTIONAL override — full SQLAlchemy URL (postgresql+psycopg://user:pass@host:port/db). Leave BLANK to use the discrete DB_* vars above; if set, it wins." Type="Variable" Display="advanced" Required="false" Mask="true"/>
   <Config Name="FRED_API_KEY" Target="FRED_API_KEY" Default="" Mode="" Description="FRED (St. Louis Fed) API key — free from fred.stlouisfed.org (32 alphanumeric). Enables the macro feed (F9: yield curve, rates, spreads, inflation, DXY). Unset = the FRED job no-ops; the rest of Tape is unaffected." Type="Variable" Display="always" Required="false" Mask="true"/>
 </Container>

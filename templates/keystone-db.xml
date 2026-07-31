@@ -18,7 +18,7 @@
   <DateInstalled/>
   <Description>PostgreSQL 16 for Keystone. Neutral template; set IP + POSTGRES_PASSWORD at creation.</Description>
   <Config Name="Postgres Port" Target="5432" Default="5432" Mode="tcp" Description="PostgreSQL port" Type="Port" Display="always" Required="false" Mask="false">5432</Config>
-  <Config Name="Data" Target="/var/lib/postgresql/data" Default="/mnt/POOL/appdata/keystone-db/data" Mode="rw" Description="Postgres data dir — use a POOL path, NOT the user-share FUSE overlay. REPLACE POOL with your own cache/pool name before Apply." Type="Path" Display="always" Required="true" Mask="false">/mnt/POOL/appdata/keystone-db/data</Config>
+  <Config Name="Data" Target="/var/lib/postgresql/data" Default="" Mode="rw" Description="Postgres data dir. REQUIRED - an absolute path on a POOL, NOT the user-share FUSE overlay." Type="Path" Display="always" Required="true" Mask="false"/>
   <Config Name="POSTGRES_USER" Target="POSTGRES_USER" Default="keystone" Mode="" Description="DB user" Type="Variable" Display="always" Required="true" Mask="false">keystone</Config>
   <Config Name="POSTGRES_PASSWORD" Target="POSTGRES_PASSWORD" Default="" Mode="" Description="DB password (set at creation; reuse as the app's DB_PASSWORD)" Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="POSTGRES_DB" Target="POSTGRES_DB" Default="keystone" Mode="" Description="DB name" Type="Variable" Display="always" Required="true" Mask="false">keystone</Config>

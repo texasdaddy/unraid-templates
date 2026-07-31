@@ -6,14 +6,23 @@ WHY THIS EXISTS
     appdata pool path or a personal address committed to either is PERMANENT: removing it in a
     later commit does not remove it, because it stays in the history and in whatever already
     mirrored the repo. Cleaning it up afterwards costs a full history rewrite and a force-push
-    across every clone (that is what batch 10 was). This guard is the thing that stops it
-    coming back a sixth time.
+    across every clone. This guard is what stops it coming back.
 
 WHAT COUNTS
     Host/server codenames, the private infra domain, RFC1918 + Tailscale-CGNAT addresses,
     `*.ts.net`, Unraid `/mnt/<pool>` paths, personal addresses and names, and Cloudflare
     Access policy UUIDs. Documentation ranges (RFC5737) and `example.com`/`.example` are the
     ALLOWED way to write an address or a host in a doc, a comment, or a test.
+
+    ⚠️ EVERY EXAMPLE IN THIS FILE IS SYNTHETIC. A guard whose self-test carries the real
+    values would republish, in one greppable place, exactly what it exists to remove -- and it
+    is the one file the scan skips, so it could never catch itself. `.invalid` hosts and
+    out-of-range octets exercise the same patterns and leak nothing.
+
+KNOWN LIMITS (state them; do not pretend to coverage)
+    Line-based and literal: a value split across lines (implicit string concatenation, a YAML
+    folded scalar) or encoded (base64, percent-encoding) is not detected. The guard raises the
+    cost of an accidental leak; it is not a control against a determined one.
 
 USAGE
     python scripts/check_no_internal_info.py            # scan tracked files, exit 1 on a hit
@@ -24,7 +33,7 @@ USAGE
 
 IF IT FIRES ON SOMETHING LEGITIMATE
     Add the exact literal to ALLOW_LITERALS below, in the same commit, with a comment saying
-    why. That edit is visible in review — which is the point. Do not loosen a pattern, and
+    why. That edit is visible in review -- which is the point. Do not loosen a pattern, and
     never add a blanket per-file skip: this file's whole value is that it cannot be satisfied
     by looking away.
 """
@@ -37,22 +46,34 @@ import sys
 from pathlib import Path
 
 # --------------------------------------------------------------------------- the denylist
+# Every entry MUST have at least one deny case and one near-miss allow case in `selftest`;
+# `test_every_pattern_is_exercised` below enforces that, because a pattern with no case can be
+# deleted or broken and the green check will still say "the patterns bite".
 PATTERNS: list[tuple[str, str]] = [
     ("host codename", r"\b(?:titan|genisys|fatal-ryzen)\b"),
     ("infra domain", r"\breinlie\b"),
-    ("personal name/address", r"\bscott\b|texasdaddy@|[\w.+-]+@(?:gmail|outlook|hotmail|yahoo)\."),
-    # RFC1918. Bounded on both sides so a version string or a decimal doesn't trip it.
+    # `Scott` is CASE-SENSITIVE: the personal name is capitalized, while lowercase `scott` is
+    # scipy/seaborn's KDE bandwidth rule (`bw_method="scott"`) — a live false positive in a
+    # data/finance repo. The (?-i:...) group opts out of the IGNORECASE applied to the rest.
+    ("personal name/address",
+     r"(?-i:\bScott\b)|texasdaddy@|[\w.+-]+@(?:gmail|outlook|hotmail|yahoo|icloud|proton)\."),
+    # RFC1918. Left-bounded so a decimal doesn't trip it; the right bound must still reject a
+    # 5th octet while ALLOWING a sentence-final period — `the host is <addr>.` is the most
+    # natural way to write one in prose, and was invisible to an earlier `(?![\w.])`.
     ("private IPv4 (RFC1918)",
      (r"(?<![\w.])(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
       r"|192\.168\.\d{1,3}\.\d{1,3}"
-      r"|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(?![\w.])")),
+      r"|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(?![\w]|\.\d)")),
     # Tailscale CGNAT 100.64.0.0/10 + tailnet names.
     ("tailscale address",
-     r"(?<![\w.])100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}(?![\w.])"),
+     r"(?<![\w.])100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}(?![\w]|\.\d)"),
     ("tailnet name", r"\b[\w-]+\.ts\.net\b"),
     ("unraid pool path", r"/mnt/(?:apps|user|cache|remotes|disks)\b"),
     ("cloudflare access app", r"\bunRAID Agents\b"),
-    ("uuid (access policy?)",
+    # Any UUID. Cloudflare Access policy ids look like this, and so do tenant/app ids — all of
+    # which identify the estate. A legitimate one (a fixture, a migration revision) is meant to
+    # be added to ALLOW_LITERALS deliberately rather than waved through by a looser pattern.
+    ("uuid (access policy / tenant id)",
      r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"),
 ]
 
@@ -65,19 +86,27 @@ ALLOW_LITERALS: tuple[str, ...] = (
     "ghcr.io/texasdaddy",
 )
 
-# Substrings that neutralize a match on the SAME line: the documented way to write one.
-ALLOW_CONTEXT: tuple[str, ...] = (
-    "192.0.2.",       # RFC5737 TEST-NET-1
-    "198.51.100.",    # RFC5737 TEST-NET-2
-    "203.0.113.",     # RFC5737 TEST-NET-3
-    "example.com",
-    ".example",       # your-domain.example
+# The documented ways to write an address or a host. These are NEUTRALIZED IN PLACE rather
+# than used to skip the line: skipping the line meant one `.env.example` mention could hide a
+# real leak sitting beside it, and `.example` matches `.env.example`, which appears in every
+# repo's docs.
+ALLOW_SPANS: tuple[str, ...] = (
+    r"(?<![\w.])192\.0\.2\.\d{1,3}",        # RFC5737 TEST-NET-1
+    r"(?<![\w.])198\.51\.100\.\d{1,3}",     # RFC5737 TEST-NET-2
+    r"(?<![\w.])203\.0\.113\.\d{1,3}",      # RFC5737 TEST-NET-3
+    r"[\w.-]*\bexample\.(?:com|org|net)\b",  # example.com and friends
+    r"[\w.-]+\.example\b",                  # your-domain.example
+    r"\.env\.example\b",
 )
 
-SKIP_SUFFIXES = (".png", ".jpg", ".jpeg", ".ico", ".gif", ".svg", ".pdf", ".zip", ".gz",
+# Text-bearing formats are NEVER skipped — an SVG is XML and carries <title>/<desc>/href, and
+# the leak this batch removed was literally an icon URL inside one.
+SKIP_SUFFIXES = (".png", ".jpg", ".jpeg", ".ico", ".gif", ".pdf", ".zip", ".gz",
                  ".woff", ".woff2", ".ttf", ".db", ".sqlite")
 
 SELF = "check_no_internal_info"
+
+_ALLOW_SPAN_RX = re.compile("|".join(ALLOW_SPANS), re.IGNORECASE)
 
 
 def tracked_files(root: Path) -> list[Path]:
@@ -85,14 +114,16 @@ def tracked_files(root: Path) -> list[Path]:
     return [root / p for p in out.stdout.decode("utf-8").split("\0") if p]
 
 
+def _neutralize(line: str) -> str:
+    for lit in ALLOW_LITERALS:
+        line = line.replace(lit, "")
+    return _ALLOW_SPAN_RX.sub("", line)
+
+
 def scan_text(text: str, compiled: list[tuple[str, re.Pattern[str]]]) -> list[tuple[int, str, str]]:
     hits: list[tuple[int, str, str]] = []
     for lineno, line in enumerate(text.splitlines(), start=1):
-        stripped = line
-        for lit in ALLOW_LITERALS:
-            stripped = stripped.replace(lit, "")
-        if any(ctx in stripped for ctx in ALLOW_CONTEXT):
-            continue
+        stripped = _neutralize(line)
         for label, rx in compiled:
             m = rx.search(stripped)
             if m:
@@ -100,45 +131,79 @@ def scan_text(text: str, compiled: list[tuple[str, re.Pattern[str]]]) -> list[tu
     return hits
 
 
+# Deny cases are SYNTHETIC stand-ins for shapes that were real findings in these repos.
+# `.invalid` is reserved by RFC 2606 and `Codename-A` is nobody's host.
+_MUST_FAIL: list[tuple[str, str]] = [
+    ("host codename", "deploy it to Titan and check the badge"),
+    ("host codename", "the genisys box hosts the reverse proxy"),
+    ("host codename", "built on fatal-ryzen"),
+    ("infra domain", "CALLBACK_URL=https://app-dev.reinlie.invalid/v1/admin/callback"),
+    ("private IPv4 (RFC1918)", "DATABASE_URL=postgresql://u:p@192.168.77.77:5432/db"),
+    ("private IPv4 (RFC1918)", "allowlist = '10.99.99.0/24'"),
+    ("private IPv4 (RFC1918)", "peer 172.31.255.254 is not allowed"),
+    # The bare-prose form: a sentence-final period must not hide it.
+    ("private IPv4 (RFC1918)", "The database lives at 192.168.77.77."),
+    ("tailscale address", "agent reachable on 100.127.255.254:8043"),
+    ("tailnet name", "https://host-a.tailnet-example.ts.net/"),
+    ("unraid pool path", 'Default="/mnt/apps/appdata/svc/data"'),
+    ("unraid pool path", "Run from: cd /mnt/user/appdata/svc"),
+    ("personal name/address", "_UA = 'Research someone@gmail.invalid'"),
+    ("personal name/address", "per Scott directive 2026-06-10"),
+    ("cloudflare access app", "policy attached to the unRAID Agents application"),
+    ("uuid (access policy / tenant id)", "access_app = '11111111-2222-3333-4444-555555555555'"),
+]
+
+_MUST_PASS: list[str] = [
+    "host='198.51.100.5'  # RFC5737",
+    "peer 192.0.2.1 rejected",
+    "doc range 203.0.113.9 is fine",
+    "APP_BASE_URL=https://svc.your-domain.example",
+    "ntfy example: https://ntfy.example.com",
+    "see https://github.com/texasdaddy/tape/issues/31",
+    "icon: https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/icons/tape.png",
+    "version 10.16.2 of the driver",              # not an address
+    "the 172.315 basis-point spread",             # not an address
+    "bind 0.0.0.0:5000",
+    'kde = gaussian_kde(x, bw_method="scott")',   # scipy, not a person
+    "titanium alloy pricing feed",                # not the codename
+    "copy .env.example and fill it in",
+    # The reason ALLOW_SPANS neutralizes a SPAN and not the LINE: a permitted token must not
+    # grant amnesty to a real leak sharing the line with it.
+]
+
+_MUST_FAIL_COMBINED = "# see example.com; real host is host-a.reinlie.invalid"
+
+
 def selftest(compiled: list[tuple[str, re.Pattern[str]]]) -> int:
-    """The guard is only worth its CI minute if the patterns still bite. Each string below is
-    a real shape that was found in these repos before the scrub."""
-    must_fail = [
-        "deploy it to Titan and check the badge",
-        "SCHWAB_CALLBACK_URL=https://tape-dev.reinlie.com/v1/admin/callback",
-        'DATABASE_URL=postgresql://tape:x@192.168.1.64:5432/tape',
-        "allowlist = '10.0.0.0/8'",
-        "peer 172.16.0.1 is not allowed",
-        "agent at 100.68.10.96:8043",
-        "https://titan.tailnet-abc.ts.net/",
-        'Default="/mnt/apps/appdata/tape/data"',
-        "_UA = 'Research texasdaddy@gmail.com'",
-        "per Scott directive 2026-06-10",
-    ]
-    must_pass = [
-        "host='198.51.100.5'  # RFC5737",
-        "APP_BASE_URL=https://tape.your-domain.example",
-        "see https://github.com/texasdaddy/tape/issues/31",
-        "icon: https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/icons/tape.png",
-        "ntfy example: https://ntfy.example.com",
-        "version 10.16.2 of the driver",          # not an IP
-        "bind 0.0.0.0:5000",
-    ]
-    bad = []
-    for s in must_fail:
-        if not scan_text(s, compiled):
-            bad.append(f"SHOULD have been caught: {s!r}")
-    for s in must_pass:
+    bad: list[str] = []
+    exercised: set[str] = set()
+    for want_label, s in _MUST_FAIL:
+        hits = scan_text(s, compiled)
+        if not hits:
+            bad.append(f"SHOULD have been caught ({want_label}): {s!r}")
+            continue
+        labels = {label for _, label, _ in hits}
+        exercised |= labels
+        if want_label not in labels:
+            bad.append(f"caught by the WRONG pattern ({sorted(labels)}, wanted {want_label}): {s!r}")
+    for s in _MUST_PASS:
         hits = scan_text(s, compiled)
         if hits:
             bad.append(f"false positive on {s!r}: {hits}")
+    if not scan_text(_MUST_FAIL_COMBINED, compiled):
+        bad.append("an allowed token on the same line hid a real leak: "
+                   f"{_MUST_FAIL_COMBINED!r}")
+    missing = {label for label, _ in PATTERNS} - exercised
+    if missing:
+        bad.append(f"pattern(s) with no deny case, so nothing proves they still work: "
+                   f"{sorted(missing)}")
     if bad:
         print("SELFTEST FAILED:")
         for b in bad:
             print("  " + b)
         return 1
-    print(f"selftest ok: {len(must_fail)} denied shapes caught, {len(must_pass)} allowed "
-          "shapes passed")
+    print(f"selftest ok: {len(_MUST_FAIL) + 1} denied shapes caught across "
+          f"{len(PATTERNS)} patterns, {len(_MUST_PASS)} allowed shapes passed")
     return 0
 
 
@@ -150,18 +215,30 @@ def main(argv: list[str]) -> int:
     root = Path(subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True,
                                check=True, text=True).stdout.strip())
     findings: list[str] = []
+    undecodable: list[str] = []
     scanned = 0
     for path in tracked_files(root):
         if path.suffix.lower() in SKIP_SUFFIXES or SELF in path.name:
             continue
+        rel = path.relative_to(root).as_posix()
         try:
             text = path.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, FileNotFoundError):
-            continue  # binary, or a file listed in the index but absent from the worktree
+        except FileNotFoundError:
+            continue  # in the index but not the worktree
+        except UnicodeDecodeError:
+            # NOT silent: a file this scanner cannot read is a file it cannot vouch for.
+            undecodable.append(rel)
+            continue
         scanned += 1
-        rel = path.relative_to(root).as_posix()
-        findings += [f"{rel}:{n}: {label}: {match!r}" for n, label, match in scan_text(text, compiled)]
+        findings += [f"{rel}:{n}: {label}: {match!r}"
+                     for n, label, match in scan_text(text, compiled)]
 
+    if undecodable:
+        print(f"UNREADABLE as UTF-8 ({len(undecodable)}) - not scanned, so not cleared:")
+        for u in undecodable:
+            print("  " + u)
+        print("Add a binary suffix to SKIP_SUFFIXES if that is what it is, or fix the "
+              "encoding.\n")
     if findings:
         print(f"INTERNAL INFO FOUND in {len(findings)} place(s) - this repo is public:\n")
         for f in findings:
@@ -170,6 +247,7 @@ def main(argv: list[str]) -> int:
               "/mnt/POOL/..., RFC5737 addresses) or take the value from an env Variable.")
         print("If a hit is genuinely legitimate, add the literal to ALLOW_LITERALS in "
               "scripts/check_no_internal_info.py with a comment saying why.")
+    if findings or undecodable:
         return 1
     print(f"no internal info found ({scanned} tracked text files scanned)")
     return 0

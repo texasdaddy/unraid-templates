@@ -26,7 +26,7 @@
   <DateInstalled/>
   <Description>CEF Tracker — closed-end fund discount-to-NAV tracker (Flask/SQLite).</Description>
   <Config Name="HTTP Port" Target="5000" Default="5000" Mode="tcp" Description="App HTTP port" Type="Port" Display="always" Required="false" Mask="false">5000</Config>
-  <Config Name="Data" Target="/data" Default="/mnt/POOL/appdata/cef-tracker/data" Mode="rw" Description="SQLite DB directory — the only persistent volume. REPLACE POOL with your own cache/pool name before Apply." Type="Path" Display="always" Required="false" Mask="false">/mnt/POOL/appdata/cef-tracker/data</Config>
+  <Config Name="Data" Target="/data" Default="" Mode="rw" Description="SQLite DB directory - the only persistent volume. REQUIRED - an absolute path on a POOL." Type="Path" Display="always" Required="true" Mask="false"/>
   <Config Name="FLASK_SECRET_KEY" Target="FLASK_SECRET_KEY" Default="" Mode="" Description="Flask session signing key. REQUIRED — the app refuses to start if empty. Generate: python -c &quot;import secrets; print(secrets.token_hex(32))&quot;" Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="APP_BASE_URL" Target="APP_BASE_URL" Default="" Mode="" Description="Public base URL of THIS deployment; used to build the OAuth redirect URIs, so it must match what is registered with Google/Microsoft. REQUIRED for OAuth sign-in — the image carries no default." Type="Variable" Display="always" Required="false" Mask="false"/>
   <Config Name="GOOGLE_CLIENT_ID" Target="GOOGLE_CLIENT_ID" Default="" Mode="" Description="Google OAuth client ID (optional; blank disables Google sign-in)." Type="Variable" Display="advanced" Required="false" Mask="false"/>

@@ -19,7 +19,7 @@
   <Description>Keystone — multi-tenant personal financial platform. Neutral template; set IP, image tag, DB host/password, and secrets at creation.</Description>
 
   <Config Name="HTTP Port" Target="8000" Default="8000" Mode="tcp" Description="App HTTP port (FastAPI/gunicorn)" Type="Port" Display="always" Required="false" Mask="false">8000</Config>
-  <Config Name="Data" Target="/data" Default="/mnt/POOL/appdata/keystone" Mode="rw" Description="App data (encrypted file vault, _210). Pool path — NOT the /mnt/POOL FUSE overlay." Type="Path" Display="always" Required="false" Mask="false">/mnt/POOL/appdata/keystone</Config>
+  <Config Name="Data" Target="/data" Default="" Mode="rw" Description="App data (encrypted file vault). REQUIRED - an absolute path on a POOL, NOT the user-share FUSE overlay." Type="Path" Display="always" Required="true" Mask="false"/>
 
   <!-- Database connection — discrete variables (INFRASTRUCTURE B.10); the app assembles the
        connection string internally. Set DB_HOST to the keystone-db container IP + DB_PASSWORD
@@ -35,7 +35,7 @@
        a TemplateURL-tracked template, a later rename merges into an existing container on its Edit
        page (no recreate). Set all of these at creation; generate strong random values. -->
   <Config Name="JWT_SECRET_KEY" Target="JWT_SECRET_KEY" Default="" Mode="" Description="PROVISIONAL (reconciles with Module 0 code). Signing secret for JWT access + rotating refresh tokens — ONE key (refresh 'rotation' issues a new token, not a second signing key)." Type="Variable" Display="always" Required="true" Mask="true"/>
-  <Config Name="FILE_ENCRYPTION_KEY" Target="FILE_ENCRYPTION_KEY" Default="" Mode="" Description="PROVISIONAL (reconciles with Module 0 code). AES-256 key for the _210 file vault (personal documents at rest)." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="FILE_ENCRYPTION_KEY" Target="FILE_ENCRYPTION_KEY" Default="" Mode="" Description="PROVISIONAL (reconciles with Module 0 code). AES-256 key for the file vault (personal documents at rest)." Type="Variable" Display="always" Required="true" Mask="true"/>
   <!-- Per-tenant KMS / key-management vars are intentionally NOT declared: _000 mandates a KMS
        interface but the impl (Vault / TPM / cloud) is an unmade prod-era decision. They merge in
        via the Edit page when the key service is chosen. -->

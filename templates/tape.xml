@@ -14,7 +14,7 @@
   <Privileged>false</Privileged>
   <Support/>
   <Project>https://github.com/texasdaddy/tape</Project>
-  <Overview>Tape — Schwab-backed market + account data tier for CEF Tracker + Keystone. ONE neutral template for dev and prod: at creation set Name (tape / tape-dev), image tag (:stable for prod, :dev for dev), network (br0) + static IP per the §3 scheme, the discrete DB_* vars pointing at the tape-db container, and the SCHWAB_CALLBACK_URL for this env. The app assembles the DB connection string from DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME (§2 B.10) — no baked DATABASE_URL.</Overview>
+  <Overview>Tape — Schwab-backed market + account data tier for CEF Tracker + Keystone. ONE neutral template for dev and prod: at creation set Name (tape / tape-dev), image tag (:stable for prod, :dev for dev), network + a static IP if you use one, the discrete DB_* vars pointing at the tape-db container, and the SCHWAB_CALLBACK_URL for this env. The app assembles the DB connection string from DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME (§2 B.10) — no baked DATABASE_URL.</Overview>
   <Category>Network:Other</Category>
   <WebUI>http://[IP]:[PORT:8000]/v1/health</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/templates/tape.xml</TemplateURL>
@@ -24,12 +24,12 @@
   <DateInstalled/>
   <Description>Tape — Schwab-backed market + account data tier (one neutral template, dev+prod).</Description>
   <Config Name="HTTP Port" Target="8000" Default="8000" Mode="tcp" Description="App HTTP port" Type="Port" Display="always" Required="false" Mask="false">8000</Config>
-  <Config Name="Data" Target="/data" Default="/mnt/POOL/appdata/tape/data" Mode="rw" Description="Encrypted token store (set /mnt/POOL/appdata/tape-dev/data for a dev container)" Type="Path" Display="always" Required="false" Mask="false">/mnt/POOL/appdata/tape/data</Config>
+  <Config Name="Data" Target="/data" Default="" Mode="rw" Description="Encrypted token store. REQUIRED - set an absolute path on a POOL (e.g. /mnt/&lt;pool&gt;/appdata/tape/data, or .../tape-dev/data for a dev container). Do NOT leave it blank and do not point it at the RAM-backed root filesystem." Type="Path" Display="always" Required="true" Mask="false"/>
   <Config Name="SCHWAB_APP_KEY" Target="SCHWAB_APP_KEY" Default="" Mode="" Description="Schwab app key" Type="Variable" Display="always" Required="true" Mask="false"/>
   <Config Name="SCHWAB_APP_SECRET" Target="SCHWAB_APP_SECRET" Default="" Mode="" Description="Schwab app secret" Type="Variable" Display="always" Required="true" Mask="true"/>
-  <Config Name="SCHWAB_CALLBACK_URL" Target="SCHWAB_CALLBACK_URL" Default="" Mode="" Description="OAuth callback URL for THIS env — e.g. https://tape.your-domain.example/v1/admin/callback (prod) or https://tape-dev.your-domain.example/v1/admin/callback (dev)" Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="SCHWAB_CALLBACK_URL" Target="SCHWAB_CALLBACK_URL" Default="" Mode="" Description="OAuth callback URL for THIS env — e.g. https://tape.your-domain.example/v1/admin/callback (prod) or https://tape-dev.your-domain.example/v1/admin/callback (dev). REQUIRED: the image carries no default and it must match the URI registered on the Schwab app." Type="Variable" Display="always" Required="true" Mask="false"/>
   <Config Name="TOKEN_ENCRYPTION_KEY" Target="TOKEN_ENCRYPTION_KEY" Default="" Mode="" Description="Fernet key for token-at-rest encryption" Type="Variable" Display="always" Required="true" Mask="true"/>
-  <Config Name="DB_HOST" Target="DB_HOST" Default="" Mode="" Description="Warehouse DB host — the tape-db container's IP for this env (per the §3 IP scheme, e.g. .61 prod / .71 dev)" Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="DB_HOST" Target="DB_HOST" Default="" Mode="" Description="Warehouse DB host - the address of the tape-db container serving THIS environment" Type="Variable" Display="always" Required="true" Mask="false"/>
   <Config Name="DB_PORT" Target="DB_PORT" Default="5432" Mode="" Description="Warehouse DB port" Type="Variable" Display="always" Required="false" Mask="false">5432</Config>
   <Config Name="DB_USER" Target="DB_USER" Default="tape" Mode="" Description="Warehouse DB user (matches the tape-db container's POSTGRES_USER)" Type="Variable" Display="always" Required="false" Mask="false">tape</Config>
   <Config Name="DB_PASSWORD" Target="DB_PASSWORD" Default="" Mode="" Description="Warehouse DB password (matches the tape-db container's POSTGRES_PASSWORD)" Type="Variable" Display="always" Required="true" Mask="true"/>

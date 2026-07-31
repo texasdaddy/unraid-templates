@@ -3,8 +3,8 @@
   reauth-bot — standalone Schwab trusted-device re-consent bot (its own repo:
   github.com/texasdaddy/reauth-bot). Self-contained image built by that repo's CI → GHCR:
   deploys the Unraid way — UI import → set IP + variables → Apply. One-time interactive seed is
-  a SEED_MODE variable toggle (no docker-run, no mounted script). This template deploys it for
-  Tape (LOGIN_URL/TOKEN_URL default to tape-dev). Full runbook: reauth-bot repo README.
+  a SEED_MODE variable toggle (no docker-run, no mounted script). This template targets Tape;
+  LOGIN_URL/TOKEN_URL have no default and are set at creation. Full runbook: reauth-bot repo README.
 -->
 <Container version="2">
   <Name>reauth-bot</Name>
@@ -15,7 +15,7 @@
   <Privileged>false</Privileged>
   <Support/>
   <Project>https://github.com/texasdaddy/reauth-bot</Project>
-  <Overview>Standalone Schwab trusted-device re-consent bot (repo: github.com/texasdaddy/reauth-bot). Self-contained image; on a ~72h cadence it drives a target service's login flow inside a persistent trusted-device profile (skips 2FA) so the Schwab 7-day consent refreshes itself. This template targets Tape (LOGIN_URL/TOKEN_URL default to tape-dev). REQUIRES a one-time interactive trusted-device seed: set SEED_MODE=1 + SEED_VNC_PASSWORD, Apply, complete the consent over noVNC (http://CONTAINER-IP:6080/vnc.html), then clear SEED_MODE and Apply. The trusted-device cookie MUST persist across updates (Profile volume). See the reauth-bot repo README.</Overview>
+  <Overview>Standalone Schwab trusted-device re-consent bot (repo: github.com/texasdaddy/reauth-bot). Self-contained image; on a ~72h cadence it drives a target service's login flow inside a persistent trusted-device profile (skips 2FA) so the Schwab 7-day consent refreshes itself. This template targets Tape; LOGIN_URL/TOKEN_URL have no default and must be set at creation. REQUIRES a one-time interactive trusted-device seed: set SEED_MODE=1 + SEED_VNC_PASSWORD, Apply, complete the consent over noVNC (http://CONTAINER-IP:6080/vnc.html), then clear SEED_MODE and Apply. The trusted-device cookie MUST persist across updates (Profile volume). See the reauth-bot repo README.</Overview>
   <Category>Network:Other</Category>
   <WebUI/>                                                            <!-- steady state has no web UI; seed noVNC is at http://CONTAINER-IP:6080/vnc.html only while SEED_MODE=1 -->
   <TemplateURL>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/templates/reauth-bot.xml</TemplateURL>
@@ -26,7 +26,7 @@
   <Description>Standalone Schwab trusted-device re-consent bot (github.com/texasdaddy/reauth-bot). Self-contained image; UI-deployed; one-time seed via SEED_MODE. This template targets Tape.</Description>
 
   <!-- Trusted-device profile MUST persist across container updates (losing it forces a manual re-seed). -->
-  <Config Name="Profile" Target="/profile" Default="/mnt/POOL/appdata/reauth-bot/profile" Mode="rw" Description="Trusted-device browser profile + /profile/shots debug captures (persist across updates; root-only, holds brokerage imagery). REPLACE POOL with your own cache/pool name before Apply." Type="Path" Display="always" Required="true" Mask="false">/mnt/POOL/appdata/reauth-bot/profile</Config>
+  <Config Name="Profile" Target="/profile" Default="" Mode="rw" Description="Trusted-device browser profile + /profile/shots debug captures. REQUIRED - an absolute path on a POOL. It MUST survive updates and reboots: losing it forces the manual interactive re-seed." Type="Path" Display="always" Required="true" Mask="false"/>
 
   <!-- Schwab LOGIN creds (full-account; this container's env is root-only). The bot does NOT
        need the Schwab APP key/secret — those live in the target service, which mints the token. -->

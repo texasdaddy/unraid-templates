@@ -43,9 +43,9 @@ PATTERNS: list[tuple[str, str]] = [
     ("personal name/address", r"\bscott\b|texasdaddy@|[\w.+-]+@(?:gmail|outlook|hotmail|yahoo)\."),
     # RFC1918. Bounded on both sides so a version string or a decimal doesn't trip it.
     ("private IPv4 (RFC1918)",
-     r"(?<![\w.])(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
-     r"|192\.168\.\d{1,3}\.\d{1,3}"
-     r"|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(?![\w.])"),
+     (r"(?<![\w.])(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+      r"|192\.168\.\d{1,3}\.\d{1,3}"
+      r"|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(?![\w.])")),
     # Tailscale CGNAT <internal-ip>/10 + tailnet names.
     ("tailscale address",
      r"(?<![\w.])100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}(?![\w.])"),

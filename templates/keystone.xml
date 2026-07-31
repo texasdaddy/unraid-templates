@@ -19,7 +19,7 @@
   <Description>Keystone — multi-tenant personal financial platform. Neutral template; set IP, image tag, DB host/password, and secrets at creation.</Description>
 
   <Config Name="HTTP Port" Target="8000" Default="8000" Mode="tcp" Description="App HTTP port (FastAPI/gunicorn)" Type="Port" Display="always" Required="false" Mask="false">8000</Config>
-  <Config Name="Data" Target="/data" Default="/mnt/apps/appdata/keystone" Mode="rw" Description="App data (encrypted file vault, _210). Pool path — NOT the /mnt/user FUSE overlay." Type="Path" Display="always" Required="false" Mask="false">/mnt/apps/appdata/keystone</Config>
+  <Config Name="Data" Target="/data" Default="/mnt/POOL/appdata/keystone" Mode="rw" Description="App data (encrypted file vault, _210). Use a POOL path, NOT the user-share FUSE overlay. REPLACE POOL with your own cache/pool name before Apply." Type="Path" Display="always" Required="false" Mask="false">/mnt/POOL/appdata/keystone</Config>
 
   <!-- Database connection — discrete variables (INFRASTRUCTURE B.10); the app assembles the
        connection string internally. Set DB_HOST to the keystone-db container IP + DB_PASSWORD

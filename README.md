@@ -1,6 +1,6 @@
 # unraid-templates
 
-Public Unraid Docker templates + icons for the Reinlie self-hosted stack
+Public Unraid Docker templates + icons for the Keystone self-hosted stack
 (**Tape**, **CEF Tracker**, and later **Keystone**). Public so Unraid can fetch icons
 anonymously via `raw.githubusercontent.com`; the application source stays in its own
 private repos.
@@ -27,4 +27,4 @@ Every template + icon in this repo must have a row here — keep this table in s
 `templates/` holds the Unraid container templates (`<Icon>` pre-set). Secrets are blank
 by design — fill them in Unraid on import.
 
-**This repo is registered as a template repository on Titan** (`/boot/config/plugins/dockerMan/template-repos`), so Unraid tracks it: the templates appear under **Docker → Add Container** and, because each template carries a `<TemplateURL>` to its raw file, Unraid **merges new `<Config>` variables into an existing container when its Edit page is opened** (no purge/redeploy needed — that's the CA update path; "check for update" only checks the image). GitHub-raw caches ~5 min.
+**This repo is registered as a template repository on the Unraid host** (`/boot/config/plugins/dockerMan/template-repos`), so Unraid tracks it: the templates appear under **Docker → Add Container** and, because each template carries a `<TemplateURL>` to its raw file, Unraid **merges new `<Config>` variables into an existing container when its Edit page is opened** (no purge/redeploy needed — that's the CA update path; "check for update" only checks the image). GitHub-raw caches ~5 min.

@@ -14,7 +14,7 @@
   <Privileged>false</Privileged>
   <Support/>
   <Project>https://github.com/timescale/timescaledb</Project>
-  <Overview>TimescaleDB — Tape's market-data warehouse. ONE neutral template for dev and prod: at creation set Name (tape-db / tape-db-dev), network (br0) + static IP per the §3 scheme (DB takes the lower number in each pair; start before the app), the appdata data path (/mnt/apps/appdata/tape-db or /tape-db-dev), and POSTGRES_PASSWORD. The tape app's DB_HOST/DB_USER/DB_PASSWORD/DB_NAME must match this container's IP + POSTGRES_USER/PASSWORD/DB.</Overview>
+  <Overview>TimescaleDB — Tape's market-data warehouse. ONE neutral template for dev and prod: at creation set Name (tape-db / tape-db-dev), network (br0) + static IP per the §3 scheme (DB takes the lower number in each pair; start before the app), the appdata data path on a pool (.../appdata/tape-db or /tape-db-dev), and POSTGRES_PASSWORD. The tape app's DB_HOST/DB_USER/DB_PASSWORD/DB_NAME must match this container's IP + POSTGRES_USER/PASSWORD/DB.</Overview>
   <Category>Database:</Category>
   <TemplateURL>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/templates/tape-db.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/icons/tape_db.png</Icon>
@@ -23,7 +23,7 @@
   <DateInstalled/>
   <Description>TimescaleDB — Tape's market-data warehouse (one neutral template, dev+prod).</Description>
   <Config Name="Postgres Port" Target="5432" Default="5432" Mode="tcp" Description="Postgres port" Type="Port" Display="always" Required="false" Mask="false">5432</Config>
-  <Config Name="Data" Target="/var/lib/postgresql/data" Default="/mnt/apps/appdata/tape-db/data" Mode="rw" Description="Postgres data dir (set /mnt/apps/appdata/tape-db-dev/data for a dev container)" Type="Path" Display="always" Required="true" Mask="false">/mnt/apps/appdata/tape-db/data</Config>
+  <Config Name="Data" Target="/var/lib/postgresql/data" Default="/mnt/POOL/appdata/tape-db/data" Mode="rw" Description="Postgres data dir (use .../tape-db-dev/data for a dev container). REPLACE POOL with your own cache/pool name before Apply." Type="Path" Display="always" Required="true" Mask="false">/mnt/POOL/appdata/tape-db/data</Config>
   <Config Name="POSTGRES_USER" Target="POSTGRES_USER" Default="tape" Mode="" Description="DB user (must match the tape app's DB_USER)" Type="Variable" Display="always" Required="true" Mask="false">tape</Config>
   <Config Name="POSTGRES_PASSWORD" Target="POSTGRES_PASSWORD" Default="" Mode="" Description="DB password (must match the tape app's DB_PASSWORD)" Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="POSTGRES_DB" Target="POSTGRES_DB" Default="tape" Mode="" Description="DB name (must match the tape app's DB_NAME)" Type="Variable" Display="always" Required="true" Mask="false">tape</Config>

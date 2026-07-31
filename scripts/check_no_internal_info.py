@@ -50,9 +50,9 @@ from pathlib import Path
 # `test_every_pattern_is_exercised` below enforces that, because a pattern with no case can be
 # deleted or broken and the green check will still say "the patterns bite".
 PATTERNS: list[tuple[str, str]] = [
-    ("host codename", r"\b(?:unraid-host|media-host|workstation)\b"),
+    ("host codename", r"\b(?:titan|genisys|fatal-ryzen)\b"),
     ("infra domain", r"\breinlie\b"),
-    # `the owner` is CASE-SENSITIVE: the personal name is capitalized, while lowercase `scott` is
+    # `Scott` is CASE-SENSITIVE: the personal name is capitalized, while lowercase `scott` is
     # scipy/seaborn's KDE bandwidth rule (`bw_method="scott"`) — a live false positive in a
     # data/finance repo. The (?-i:...) group opts out of the IGNORECASE applied to the rest.
     ("personal name/address",
@@ -64,7 +64,7 @@ PATTERNS: list[tuple[str, str]] = [
      (r"(?<![\w.])(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
       r"|192\.168\.\d{1,3}\.\d{1,3}"
       r"|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(?![\w]|\.\d)")),
-    # Tailscale CGNAT <internal-ip>/10 + tailnet names.
+    # Tailscale CGNAT 100.64.0.0/10 + tailnet names.
     ("tailscale address",
      r"(?<![\w.])100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}(?![\w]|\.\d)"),
     ("tailnet name", r"\b[\w-]+\.ts\.net\b"),
@@ -134,21 +134,21 @@ def scan_text(text: str, compiled: list[tuple[str, re.Pattern[str]]]) -> list[tu
 # Deny cases are SYNTHETIC stand-ins for shapes that were real findings in these repos.
 # `.invalid` is reserved by RFC 2606 and `Codename-A` is nobody's host.
 _MUST_FAIL: list[tuple[str, str]] = [
-    ("host codename", "deploy it to the Unraid host and check the badge"),
-    ("host codename", "the media-host box hosts the reverse proxy"),
-    ("host codename", "built on workstation"),
+    ("host codename", "deploy it to Titan and check the badge"),
+    ("host codename", "the genisys box hosts the reverse proxy"),
+    ("host codename", "built on fatal-ryzen"),
     ("infra domain", "CALLBACK_URL=https://app-dev.reinlie.invalid/v1/admin/callback"),
-    ("private IPv4 (RFC1918)", "DATABASE_URL=postgresql://u:p@<internal-ip>:5432/db"),
-    ("private IPv4 (RFC1918)", "allowlist = '<internal-ip>/24'"),
-    ("private IPv4 (RFC1918)", "peer <internal-ip> is not allowed"),
+    ("private IPv4 (RFC1918)", "DATABASE_URL=postgresql://u:p@192.168.77.77:5432/db"),
+    ("private IPv4 (RFC1918)", "allowlist = '10.99.99.0/24'"),
+    ("private IPv4 (RFC1918)", "peer 172.31.255.254 is not allowed"),
     # The bare-prose form: a sentence-final period must not hide it.
-    ("private IPv4 (RFC1918)", "The database lives at <internal-ip>."),
-    ("tailscale address", "agent reachable on <internal-ip>:8043"),
-    ("tailnet name", "https://host-a.<tailnet-host>/"),
-    ("unraid pool path", 'Default="/mnt/POOL/appdata/svc/data"'),
-    ("unraid pool path", "Run from: cd /mnt/POOL/appdata/svc"),
+    ("private IPv4 (RFC1918)", "The database lives at 192.168.77.77."),
+    ("tailscale address", "agent reachable on 100.127.255.254:8043"),
+    ("tailnet name", "https://host-a.tailnet-example.ts.net/"),
+    ("unraid pool path", 'Default="/mnt/apps/appdata/svc/data"'),
+    ("unraid pool path", "Run from: cd /mnt/user/appdata/svc"),
     ("personal name/address", "_UA = 'Research someone@gmail.invalid'"),
-    ("personal name/address", "per the owner directive 2026-06-10"),
+    ("personal name/address", "per Scott directive 2026-06-10"),
     ("cloudflare access app", "policy attached to the unRAID Agents application"),
     ("uuid (access policy / tenant id)", "access_app = '11111111-2222-3333-4444-555555555555'"),
 ]

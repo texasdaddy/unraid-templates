@@ -1,0 +1,6 @@
+#!/bin/sh
+# Blocks a commit that would put internal identifying information into this public repo.
+# Opt in per clone (one time):   git config core.hooksPath .githooks
+# CI runs the same check, so this is a convenience, not the enforcement point.
+if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+exec "$PY" scripts/check_no_internal_info.py

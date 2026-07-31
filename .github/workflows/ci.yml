@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # This repo is PUBLIC by necessity — Unraid fetches the icons and templates anonymously
+  # over raw.githubusercontent.com. That makes it the likeliest place for a concrete host,
+  # IP or appdata path to leak, because templates are where operator-specific values live.
+  # Every such default must be a visible placeholder the operator replaces at creation.
+  no-internal-info:
+    name: No internal info (public-repo guard)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Self-test the patterns, then scan
+        run: |
+          python scripts/check_no_internal_info.py --selftest
+          python scripts/check_no_internal_info.py
+
+  templates:
+    name: Templates are well-formed XML
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      # A malformed template does not fail loudly — Unraid just silently doesn't offer it
+      # under Add Container, which reads as "the repo sync is broken" and costs an hour.
+      - name: Parse every template
+        run: |
+          python - <<'PY'
+          import glob, sys, xml.etree.ElementTree as ET
+          bad = []
+          files = sorted(glob.glob("templates/*.xml"))
+          for f in files:
+              try:
+                  ET.parse(f)
+              except ET.ParseError as e:
+                  bad.append(f"{f}: {e}")
+          for b in bad:
+              print(b)
+          print(f"{len(files) - len(bad)}/{len(files)} templates parse")
+          sys.exit(1 if bad or not files else 0)
+          PY

@@ -36,7 +36,12 @@ by design — fill them in Unraid on import.
 | Script | What it is | Where it runs |
 |---|---|---|
 | `scripts/sync-templates.py` | Reconciles the Unraid host's `my-*.xml` container templates against this repo | Unraid host, via **User Scripts** |
-| `scripts/check_no_internal_info.py` | Public-repo guard: fails if an operator host, IP, pool path or personal name is committed | CI (required check) + locally |
+| `scripts/check_no_internal_info.py` | Public-repo guard: fails if an operator host, IP, pool path or personal name is committed | CI, on every PR — see the caveat below |
+
+> **The guard is advisory, not enforcing.** It runs on every pull request and
+> fails loudly, but `main` has no branch protection and no rulesets, so nothing
+> stops a red run from being merged. Read the check before merging; do not treat
+> a leak as impossible because CI exists.
 
 ### `sync-templates.py`
 

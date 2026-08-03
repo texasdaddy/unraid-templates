@@ -16,7 +16,7 @@
   <Privileged>false</Privileged>
   <Support/>
   <Project>https://github.com/texasdaddy/cef-tracker</Project>
-  <Overview>CEF Tracker — closed-end fund discount-to-NAV surveillance (BUY/WATCH/HOLD/SELL/AVOID signals) over ~367 CEFs, with a CEFConnect/FRED/sponsor data pipeline (APScheduler). Flask/SQLite, single gunicorn worker. The only persistent volume is /data (the SQLite DB) on the appdata pool. Set FLASK_SECRET_KEY (required; the app refuses to start if empty). Google/Microsoft OAuth are optional. All other runtime config (FRED key, SMTP, Anthropic, ntfy) is managed in-app under Admin → System Settings.</Overview>
+  <Overview>CEF Tracker — closed-end fund discount-to-NAV surveillance (BUY/WATCH/HOLD/SELL/AVOID signals) over ~367 CEFs, with a CEFConnect/FRED/sponsor data pipeline (APScheduler). Flask/SQLite, single gunicorn worker. The only persistent volume is /data (the SQLite DB) on the appdata pool. Set FLASK_SECRET_KEY (required; without it the container starts but stays UNHEALTHY, serving only a 503 that names the missing variable). Google/Microsoft OAuth are optional. All other runtime config (FRED key, SMTP, Anthropic, ntfy) is managed in-app under Admin → System Settings.</Overview>
   <Category>Network:Other</Category>
   <WebUI>http://[IP]:[PORT:5000]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/templates/cef-tracker.xml</TemplateURL>
@@ -27,7 +27,7 @@
   <Description>CEF Tracker — closed-end fund discount-to-NAV tracker (Flask/SQLite).</Description>
   <Config Name="HTTP Port" Target="5000" Default="5000" Mode="tcp" Description="App HTTP port" Type="Port" Display="always" Required="false" Mask="false">5000</Config>
   <Config Name="Data" Target="/data" Default="" Mode="rw" Description="SQLite DB directory - the only persistent volume. REQUIRED - an absolute path on a POOL." Type="Path" Display="always" Required="true" Mask="false"/>
-  <Config Name="FLASK_SECRET_KEY" Target="FLASK_SECRET_KEY" Default="" Mode="" Description="Flask session signing key. REQUIRED — the app refuses to start if empty. Generate: python -c &quot;import secrets; print(secrets.token_hex(32))&quot;" Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="FLASK_SECRET_KEY" Target="FLASK_SECRET_KEY" Default="" Mode="" Description="Flask session signing key. REQUIRED — if missing or blank the container still starts, but every page returns 503 and Docker reports it UNHEALTHY until you set it. Generate: python -c &quot;import secrets; print(secrets.token_hex(32))&quot;" Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="APP_BASE_URL" Target="APP_BASE_URL" Default="" Mode="" Description="Public base URL of THIS deployment; used to build the OAuth redirect URIs, so it must match what is registered with Google/Microsoft. REQUIRED for OAuth sign-in — the image carries no default." Type="Variable" Display="always" Required="false" Mask="false"/>
   <Config Name="GOOGLE_CLIENT_ID" Target="GOOGLE_CLIENT_ID" Default="" Mode="" Description="Google OAuth client ID (optional; blank disables Google sign-in)." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="GOOGLE_CLIENT_SECRET" Target="GOOGLE_CLIENT_SECRET" Default="" Mode="" Description="Google OAuth client secret (optional)." Type="Variable" Display="advanced" Required="false" Mask="true"/>

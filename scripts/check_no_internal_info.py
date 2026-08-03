@@ -14,10 +14,21 @@ WHAT COUNTS
     Access policy UUIDs. Documentation ranges (RFC5737) and `example.com`/`.example` are the
     ALLOWED way to write an address or a host in a doc, a comment, or a test.
 
-    ⚠️ EVERY EXAMPLE IN THIS FILE IS SYNTHETIC. A guard whose self-test carries the real
-    values would republish, in one greppable place, exactly what it exists to remove -- and it
-    is the one file the scan skips, so it could never catch itself. `.invalid` hosts and
-    out-of-range octets exercise the same patterns and leak nothing.
+    ⚠️ THE DENYLIST ITSELF NAMES THE REAL VALUES, and it has to: you cannot match a host
+    codename without writing it down. So this file DOES republish, in one greppable place,
+    the very strings it exists to remove -- and it is the one file the scan skips, so it can
+    never catch itself. That is an accepted, deliberate trade, not an oversight; do not let a
+    reader conclude otherwise. The `_MUST_FAIL` cases likewise use the real codenames and
+    domain -- what makes them safe is not that they are synthetic (they are not) but that
+    they add NO exposure beyond what PATTERNS already carries. Where a case can be defanged
+    without weakening it, it is: `.invalid` hosts (RFC 2606), implausible-but-valid octets,
+    and placeholder UUIDs.
+
+    ⚠️ Corollary, learned the hard way: a COMPILED copy of this file (`__pycache__/*.pyc`)
+    embeds those same literals and is not human-readable, so it is easy to commit by accident.
+    One was found tracked in the public templates repo. The skip below is therefore matched on
+    the EXACT relative path -- an earlier substring match on the filename also matched the
+    `.pyc`, which is precisely how it stayed invisible. Keep `__pycache__/` gitignored.
 
 KNOWN LIMITS (state them; do not pretend to coverage)
     Line-based and literal: a value split across lines (implicit string concatenation, a YAML
@@ -104,7 +115,13 @@ ALLOW_SPANS: tuple[str, ...] = (
 SKIP_SUFFIXES = (".png", ".jpg", ".jpeg", ".ico", ".gif", ".pdf", ".zip", ".gz",
                  ".woff", ".woff2", ".ttf", ".db", ".sqlite")
 
-SELF = "check_no_internal_info"
+# The ONE file the scan cannot clear, matched by EXACT repo-relative path. It was previously
+# `SELF in path.name`, a substring test that also matched
+# `scripts/__pycache__/check_no_internal_info.cpython-312.pyc` -- a tracked, binary, literal-
+# bearing copy that the scan therefore skipped in silence. Anything that is not exactly this
+# path gets scanned, and a `.pyc` is deliberately NOT in SKIP_SUFFIXES so it surfaces as
+# unreadable-and-therefore-not-cleared rather than being waved through.
+SELF_RELPATH = "scripts/check_no_internal_info.py"
 
 _ALLOW_SPAN_RX = re.compile("|".join(ALLOW_SPANS), re.IGNORECASE)
 
@@ -131,8 +148,10 @@ def scan_text(text: str, compiled: list[tuple[str, re.Pattern[str]]]) -> list[tu
     return hits
 
 
-# Deny cases are SYNTHETIC stand-ins for shapes that were real findings in these repos.
-# `.invalid` is reserved by RFC 2606 and `Codename-A` is nobody's host.
+# Deny cases reproduce shapes that were REAL findings in these repos, and they use the real
+# codenames/domain/name because that is what the patterns match on -- see the module
+# docstring: this file already carries those literals in PATTERNS, so the cases add nothing.
+# Hosts are `.invalid` (RFC 2606) and the addresses are implausible so nothing here resolves.
 _MUST_FAIL: list[tuple[str, str]] = [
     ("host codename", "deploy it to Titan and check the badge"),
     ("host codename", "the genisys box hosts the reverse proxy"),
@@ -215,27 +234,31 @@ def main(argv: list[str]) -> int:
     root = Path(subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True,
                                check=True, text=True).stdout.strip())
     findings: list[str] = []
-    undecodable: list[str] = []
+    unreadable: list[str] = []
     scanned = 0
     for path in tracked_files(root):
-        if path.suffix.lower() in SKIP_SUFFIXES or SELF in path.name:
-            continue
         rel = path.relative_to(root).as_posix()
+        if rel == SELF_RELPATH or path.suffix.lower() in SKIP_SUFFIXES:
+            continue
         try:
             text = path.read_text(encoding="utf-8")
         except FileNotFoundError:
-            continue  # in the index but not the worktree
+            # Tracked but absent from the worktree. This used to `continue` silently, which
+            # is the same "waved it through" shape as the .pyc bug: the blob is still staged
+            # and would still be committed, we just could not read it. Not clearing it.
+            unreadable.append(f"{rel} (tracked, but not in the working tree)")
+            continue
         except UnicodeDecodeError:
             # NOT silent: a file this scanner cannot read is a file it cannot vouch for.
-            undecodable.append(rel)
+            unreadable.append(rel)
             continue
         scanned += 1
         findings += [f"{rel}:{n}: {label}: {match!r}"
                      for n, label, match in scan_text(text, compiled)]
 
-    if undecodable:
-        print(f"UNREADABLE as UTF-8 ({len(undecodable)}) - not scanned, so not cleared:")
-        for u in undecodable:
+    if unreadable:
+        print(f"NOT SCANNED, therefore NOT CLEARED ({len(unreadable)}):")
+        for u in unreadable:
             print("  " + u)
         print("Add a binary suffix to SKIP_SUFFIXES if that is what it is, or fix the "
               "encoding.\n")
@@ -247,7 +270,7 @@ def main(argv: list[str]) -> int:
               "/mnt/POOL/..., RFC5737 addresses) or take the value from an env Variable.")
         print("If a hit is genuinely legitimate, add the literal to ALLOW_LITERALS in "
               "scripts/check_no_internal_info.py with a comment saying why.")
-    if findings or undecodable:
+    if findings or unreadable:
         return 1
     print(f"no internal info found ({scanned} tracked text files scanned)")
     return 0

@@ -1,0 +1,12 @@
+# Python bytecode. NOT merely noise here: a compiled copy of
+# scripts/check_no_internal_info.py embeds the guard's denylist literals -- the real host
+# codenames, infra domain and personal name -- in a binary nobody reads in review. One was
+# tracked in this PUBLIC repo before this file existed. Keep it that way.
+__pycache__/
+*.pyc
+*.pyo
+
+# Local env / secrets. Nothing here should ever carry a value, but be explicit.
+.env
+.env.*
+!.env.example

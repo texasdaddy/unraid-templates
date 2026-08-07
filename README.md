@@ -36,7 +36,17 @@ by design — fill them in Unraid on import.
 | Script | What it is | Where it runs |
 |---|---|---|
 | `scripts/sync-templates.py` | Reconciles the Unraid host's `my-*.xml` container templates against this repo | Unraid host, via **User Scripts** |
+| `scripts/sync-templates.userscript.sh` | Two-line shell wrapper that runs `sync-templates.py` under `python3` — this is what goes in the User Script body | Unraid host, via **User Scripts** |
 | `scripts/check_no_internal_info.py` | Public-repo guard: fails if an operator host, IP, pool path or personal name is committed | CI, on every PR — see the caveat below |
+
+> **⚠️ `sync-templates.py` must be installed via the wrapper, not pasted in directly.** The
+> User Scripts plugin stores each script as a file named `script` and runs it as **shell**.
+> Pasting the Python straight in produces a file bash tries to parse, and bash exits **2** on a
+> syntax error with no useful stderr — which is exactly how this failed silently for a build
+> session calling it through the Unraid agent (`execute_user_script`), while it ran fine by hand
+> as `python3 script`. The editor also saves the file mode 600, so its `#!/usr/bin/env python3`
+> shebang cannot be honored either: with no execute bit there is nothing to exec. Install steps
+> are in the wrapper's header comment.
 
 > **The guard is advisory, not enforcing.** It runs on every pull request and
 > fails loudly, but `main` has no branch protection and no rulesets, so nothing

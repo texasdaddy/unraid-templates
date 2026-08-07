@@ -83,7 +83,17 @@ parameter, never a second script:
 The committed copy is the **live** version (`DRY_RUN = False`). To validate a change
 first, flip the constant to `True`, run it, review the output, then flip it back.
 
-**Install as an Unraid User Script:** *Settings → User Scripts → Add New Script*,
-name it `sync-templates`, paste the file in as the script body, and run it with
-*Run Script* (leave it unscheduled — it is a deliberate, on-demand action, not a
-cron job). Requires python3 ≥ 3.9; stdlib only, no dependencies to install.
+**Install as an Unraid User Script** — *Settings → User Scripts → Add New Script*, named
+`sync_docker_templates` (this is the name the Unraid agent invokes it by). Leave it unscheduled;
+it is a deliberate, on-demand action, not a cron job. Requires python3 ≥ 3.9; stdlib only.
+
+> **Do NOT paste `sync-templates.py` in as the script body.** The plugin stores the body as a
+> file named `script` and runs it as **shell**, so pasted Python is handed to bash, which exits
+> **2** on the first line with no useful error. The editor also saves it mode 600, so the file's
+> `#!/usr/bin/env python3` shebang cannot be honored either — with no execute bit there is
+> nothing to exec.
+
+Instead, copy `sync-templates.py` into the script's folder and paste
+`scripts/sync-templates.userscript.sh` in as the body — it names the interpreter explicitly, so
+it works from the UI, from the agent by name, and by hand alike. Full steps are in the wrapper's
+header comment.

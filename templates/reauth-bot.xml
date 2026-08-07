@@ -15,7 +15,7 @@
   <Privileged>false</Privileged>
   <Support/>
   <Project>https://github.com/texasdaddy/reauth-bot</Project>
-  <Overview>Standalone Schwab trusted-device re-consent bot (repo: github.com/texasdaddy/reauth-bot). Self-contained image; on a ~72h cadence it drives a target service's login flow inside a persistent trusted-device profile (skips 2FA) so the Schwab 7-day consent refreshes itself. This template targets Tape; LOGIN_URL/TOKEN_URL have no default and must be set at creation. REQUIRES a one-time interactive trusted-device seed: set SEED_MODE=1 + SEED_VNC_PASSWORD, Apply, complete the consent over noVNC (http://CONTAINER-IP:6080/vnc.html), then clear SEED_MODE and Apply. The trusted-device cookie MUST persist across updates (Profile volume). See the reauth-bot repo README.</Overview>
+  <Overview>Standalone Schwab trusted-device re-consent bot (repo: github.com/texasdaddy/reauth-bot). Self-contained image; on a ~96h cadence it drives a target service's login flow inside a persistent trusted-device profile (skips 2FA) so the Schwab 7-day consent refreshes itself. This template targets Tape; LOGIN_URL/TOKEN_URL have no default and must be set at creation. REQUIRES a one-time interactive trusted-device seed: set SEED_MODE=1 + SEED_VNC_PASSWORD, Apply, complete the consent over noVNC (http://CONTAINER-IP:6080/vnc.html), then clear SEED_MODE and Apply. The trusted-device cookie MUST persist across updates (Profile volume). Alerting follows the fleet standard: set ALERT_NTFY_URL to the FULL topic URL and mount the shared alerting config read-only at /kw_shared; each run reports OK/ERROR to both email and ntfy. See the reauth-bot repo README.</Overview>
   <Category>Network:Other</Category>
   <WebUI/>                                                            <!-- steady state has no web UI; seed noVNC is at http://CONTAINER-IP:6080/vnc.html only while SEED_MODE=1 -->
   <TemplateURL>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/templates/reauth-bot.xml</TemplateURL>
@@ -39,8 +39,13 @@
   <Config Name="CALLBACK_URL_MATCH" Target="CALLBACK_URL_MATCH" Default="" Mode="" Description="Optional: substring of the post-consent redirect back to the service (blank = image default /v1/admin/callback)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="TOKEN_ISSUED_FIELD" Target="TOKEN_ISSUED_FIELD" Default="" Mode="" Description="Optional: the monotonic consent field in TOKEN_URL's JSON (blank = image default refresh_issued_at)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
 
-  <!-- Alerts + cadence. -->
-  <Config Name="REAUTH_NTFY_URL" Target="REAUTH_NTFY_URL" Default="" Mode="" Description="Full ntfy topic URL for success/failure pushes (unset = log-only)" Type="Variable" Display="always" Required="false" Mask="false"/>
+  <!-- Alerts + cadence. Ops alerting follows the fleet standard: the ONLY per-container value is
+       this service's own ntfy topic URL; every email setting AND the SMTP password come from the
+       single shared file on the read-only /kw_shared mount below, so moving the inbox or rotating
+       the password is one edit fleet-wide instead of one per container. -->
+  <Config Name="Shared alerting config" Target="/kw_shared" Default="" Mode="ro" Description="READ-ONLY mount of the shared config directory. Set the host path to the directory holding configs/alerting.env (EMAIL_TO, EMAIL_FROM, SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD). Without it the email channel is skipped and only ntfy alerts." Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="ALERT_NTFY_URL" Target="ALERT_NTFY_URL" Default="" Mode="" Description="This service's own ntfy topic as a FULL URL — https://ntfy.example.com/your-topic. A bare topic is refused: every push would die with 'unknown url type'. Blank = no ntfy channel (the bot warns at boot if that leaves it with no channel at all)." Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="ALERT_SELFTEST" Target="ALERT_SELFTEST" Default="" Mode="" Description="Set to 1 and Apply to send ONE test notification on the next start (proves email + ntfy without waiting for a reauth cycle), then clear it. Blank = off." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="REAUTH_INTERVAL_HOURS" Target="REAUTH_INTERVAL_HOURS" Default="96" Mode="" Description="Refresh cadence in hours (~4d; ≥1 retry of margin before the 7-day Schwab wall). The bot also SKIPS the reauth on startup if the consent is already fresh, so a restart never adds a redundant one." Type="Variable" Display="always" Required="false" Mask="false">96</Config>
   <Config Name="REAUTH_RETRY_HOURS" Target="REAUTH_RETRY_HOURS" Default="24" Mode="" Description="Retry interval after a failed run, in hours" Type="Variable" Display="always" Required="false" Mask="false">24</Config>
 

@@ -8,7 +8,7 @@
   <Privileged>false</Privileged>
   <Support/>
   <Project>https://github.com/texasdaddy/keystone</Project>
-  <Overview>Keystone — self-hosted multi-tenant personal financial platform (FastAPI + PostgreSQL 16 + Next.js). Consumes market/account data from Tape via its API (Keystone does not talk to Schwab directly). Neutral template: bridge networking + no baked IP — set network mode / static IP, image tag (:dev or :stable), DB host + password, and secrets at container creation. The DB connection is assembled internally from the discrete DB_* variables (no baked DATABASE_URL).</Overview>
+  <Overview>Keystone — self-hosted multi-tenant personal financial platform (FastAPI + PostgreSQL 16 + Next.js). Consumes market/account data from Tape via its API (Keystone does not talk to Schwab directly). ONE neutral template for dev and prod: at creation set Name (keystone / keystone-dev), image tag (:stable / :dev), network mode / static IP, DB host + password, the Tape base URL, and secrets. The DB connection is assembled internally from the discrete DB_* variables (no baked DATABASE_URL). Start the keystone-db container FIRST; the entrypoint runs migrations, then serves. Deploy check: GET /v1/health reports release/sha plus db and tape reachability.</Overview>
   <Category>Network:Other</Category>
   <WebUI>http://[IP]:[PORT:8000]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/templates/keystone.xml</TemplateURL>
@@ -16,7 +16,7 @@
   <ExtraParams/>
   <PostArgs/>
   <DateInstalled/>
-  <Description>Keystone — multi-tenant personal financial platform. Neutral template; set IP, image tag, DB host/password, and secrets at creation.</Description>
+  <Description>Keystone — multi-tenant personal financial platform. Neutral template; set Name (keystone / keystone-dev), IP, image tag, DB host/password, Tape URL, and secrets at creation.</Description>
 
   <Config Name="HTTP Port" Target="8000" Default="8000" Mode="tcp" Description="App HTTP port (FastAPI/gunicorn)" Type="Port" Display="always" Required="false" Mask="false">8000</Config>
   <Config Name="Data" Target="/data" Default="" Mode="rw" Description="App data (encrypted file vault). REQUIRED - an absolute path on a POOL, NOT the user-share FUSE overlay." Type="Path" Display="always" Required="true" Mask="false"/>
@@ -30,12 +30,24 @@
   <Config Name="DB_PASSWORD" Target="DB_PASSWORD" Default="" Mode="" Description="PostgreSQL password (matches keystone-db POSTGRES_PASSWORD)" Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="DB_NAME" Target="DB_NAME" Default="keystone" Mode="" Description="PostgreSQL database name" Type="Variable" Display="always" Required="true" Mask="false">keystone</Config>
 
-  <!-- App secrets — PROVISIONAL forward-declarations. Keystone's Module 0 (Core) code is not
-       built yet; when it is, its config is the SSOT for the FINAL variable names. Because this is
-       a TemplateURL-tracked template, a later rename merges into an existing container on its Edit
-       page (no recreate). Set all of these at creation; generate strong random values. -->
-  <Config Name="JWT_SECRET_KEY" Target="JWT_SECRET_KEY" Default="" Mode="" Description="PROVISIONAL (reconciles with Module 0 code). Signing secret for JWT access + rotating refresh tokens — ONE key (refresh 'rotation' issues a new token, not a second signing key)." Type="Variable" Display="always" Required="true" Mask="true"/>
-  <Config Name="FILE_ENCRYPTION_KEY" Target="FILE_ENCRYPTION_KEY" Default="" Mode="" Description="PROVISIONAL (reconciles with Module 0 code). AES-256 key for the file vault (personal documents at rest)." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <!-- Tape client — Keystone consumes Tape for ALL market + account data (never Schwab
+       directly). The base URL is per-environment (point a dev keystone at the dev Tape).
+       The client credential pair is the per-service registry entry minted ON THE TAPE SIDE
+       (scopes market,account); until it is minted, health reports tape state but market
+       calls will be refused by an enforcement-enabled Tape. -->
+  <Config Name="TAPE_BASE_URL" Target="TAPE_BASE_URL" Default="" Mode="" Description="Base URL of the Tape deployment THIS instance consumes — e.g. http://&lt;tape-host&gt;:8000 or https://tape-dev.your-domain.example. NOTE: Tape validates the Host header (its TRUSTED_HOSTS variable) — the host/IP in this URL must be on THAT allowlist or Tape answers 400." Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="TAPE_CLIENT_ID" Target="TAPE_CLIENT_ID" Default="" Mode="" Description="Per-service client id registered on the Tape side (the keystone-backend entry; scopes market,account). Blank until minted — Keystone boots fine, but market calls need it once Tape enforces its client registry." Type="Variable" Display="always" Required="false" Mask="false"/>
+  <Config Name="TAPE_CLIENT_SECRET" Target="TAPE_CLIENT_SECRET" Default="" Mode="" Description="Secret paired with TAPE_CLIENT_ID (minted on the Tape side)." Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="TAPE_API_KEY" Target="TAPE_API_KEY" Default="" Mode="" Description="LEGACY shared key honored by pre-enforcement Tape deployments only; leave blank when the client-id pair is set." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+
+  <!-- App secrets. Variable names match the shipped app config (app/config.py is the SSOT);
+       the auth/encryption flows that USE them land with Module 0 (Core) — set strong random
+       values at creation so the container never runs with a guessable secret. Because this is
+       a TemplateURL-tracked template, later additions merge into an existing container on its
+       Edit page (no recreate). -->
+  <Config Name="JWT_SECRET_KEY" Target="JWT_SECRET_KEY" Default="" Mode="" Description="Signing secret for JWT access + rotating refresh tokens — ONE key (refresh 'rotation' issues a new token, not a second signing key)." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="FILE_ENCRYPTION_KEY" Target="FILE_ENCRYPTION_KEY" Default="" Mode="" Description="AES-256 (base64 Fernet) key for the file vault (personal documents at rest)." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="KEYSTONE_API_KEYS" Target="KEYSTONE_API_KEYS" Default="" Mode="" Description="Comma-separated API keys for Keystone's own HTTP surface (frontend / integrations). BLANK = OPEN — acceptable only while nothing but you can reach the container; set before exposing it. Interim mechanism until Module 0 JWT auth replaces it." Type="Variable" Display="advanced" Required="false" Mask="true"/>
   <!-- Per-tenant KMS / key-management vars are intentionally NOT declared: _000 mandates a KMS
        interface but the impl (Vault / TPM / cloud) is an unmade prod-era decision. They merge in
        via the Edit page when the key service is chosen. -->
@@ -46,4 +58,8 @@
   <Config Name="SMTP_USER" Target="SMTP_USER" Default="" Mode="" Description="PROVISIONAL. SMTP username" Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="SMTP_PASSWORD" Target="SMTP_PASSWORD" Default="" Mode="" Description="PROVISIONAL. SMTP password / app password" Type="Variable" Display="advanced" Required="false" Mask="true"/>
   <Config Name="SMTP_FROM" Target="SMTP_FROM" Default="" Mode="" Description="PROVISIONAL. From address for MFA emails" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+
+  <!-- Runtime tuning -->
+  <Config Name="LOG_LEVEL" Target="LOG_LEVEL" Default="info" Mode="" Description="App log level (debug/info/warning/error)" Type="Variable" Display="advanced" Required="false" Mask="false">info</Config>
+  <Config Name="WEB_CONCURRENCY" Target="WEB_CONCURRENCY" Default="2" Mode="" Description="Gunicorn worker count (Keystone scales with workers; no shared-upstream pin like Tape)" Type="Variable" Display="advanced" Required="false" Mask="false">2</Config>
 </Container>

@@ -4,6 +4,11 @@ on:
   pull_request:
   push:
     branches: [main]
+    # THE RELEASE PATH. This repo publishes nothing — Unraid reads the templates straight off
+    # `main` over raw.githubusercontent.com, so merging IS the release. Tags are included so a
+    # tag cut at any commit is scanned too: a tag can point at a commit that never went through
+    # a PR, which is exactly the history no other trigger here would look at.
+    tags: ["v*"]
 
 permissions:
   contents: read
@@ -18,13 +23,76 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The COMMIT-RANGE scan below needs real history; the default shallow checkout has
+          # none, and `git rev-list base..head` on it fails rather than silently scanning zero
+          # commits (the script turns that failure into exit 1 on purpose).
+          fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - name: Self-test the patterns, then scan
+      - name: Self-test the patterns, then scan the working tree
         run: |
           python scripts/check_no_internal_info.py --selftest
           python scripts/check_no_internal_info.py
+      # TWO DIFFERENT QUESTIONS, so two scans. The tree scan above answers "is the leak here
+      # NOW", and it reads `git ls-files` — TRACKED files only. It is blind to a brand-new file
+      # that was never staged, which is how a synthetic internal hostname reached a public
+      # remote: the guard was run before `git add`, found nothing, and the next commit published
+      # it. It is equally blind to a value committed and then deleted, which stays permanently
+      # readable at the commit that added it.
+      #
+      # The range scan reads what each COMMIT added, so it sees both. Catching either before the
+      # merge is the difference between an amend and a history rewrite across every clone.
+      - name: Scan the commits being published
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_HEAD: ${{ github.sha }}
+        run: |
+          set -eu
+          z40=0000000000000000000000000000000000000000
+          if [ "$EVENT" = "pull_request" ]; then
+            range="$PR_BASE..$PR_HEAD"
+          elif [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            # A tag can point at ANY commit, including one that never went through a PR or
+            # `main`. `github.event.before` is the null sha on a tag push, so there is no
+            # "what this push added" to lean on; the meaningful question is what the tag
+            # carries that `main` has not already had reviewed. Fetch the base explicitly
+            # rather than assuming checkout left a remote-tracking ref behind.
+            git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+            range="origin/main..$PUSH_HEAD"
+          elif [ -z "$PUSH_BEFORE" ] || [ "$PUSH_BEFORE" = "$z40" ]; then
+            # The branch was created by this push, so there is no previous tip. Scan the commit
+            # itself rather than reporting clean — "I could not work out a range" must never be
+            # a pass, which is the one failure mode a leak guard cannot have.
+            if git rev-parse --verify -q "${PUSH_HEAD}^" >/dev/null; then
+              range="${PUSH_HEAD}^..${PUSH_HEAD}"
+            else
+              range="$PUSH_HEAD"   # root commit: scan all of it
+            fi
+          else
+            range="$PUSH_BEFORE..$PUSH_HEAD"
+          fi
+          echo "range: $range"
+          python scripts/check_no_internal_info.py --range "$range"
+
+  # The guard's own regression suite. It is the only Python in this repo that has tests, and it
+  # earns them: a leak guard that quietly stops guarding looks exactly like one that works.
+  guard-tests:
+    name: Leak-guard tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install "pytest==8.3.5" "pytest-timeout==2.4.0"
+      # --timeout is not optional: one test builds real git repositories, and a hung test that
+      # emits nothing is indistinguishable from a slow one until the runner's 6-hour limit.
+      - run: python -u -m pytest tests -q --timeout=300
 
   templates:
     name: Templates are well-formed XML

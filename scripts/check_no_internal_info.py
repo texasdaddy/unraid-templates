@@ -466,7 +466,8 @@ def selftest(compiled: list[tuple[str, re.Pattern[str]]]) -> int:
         labels = {label for _, label, _ in hits}
         exercised |= labels
         if want_label not in labels:
-            bad.append(f"caught by the WRONG pattern ({sorted(labels)}, wanted {want_label}): {s!r}")
+            bad.append(f"caught by the WRONG pattern ({sorted(labels)}, "
+                       f"wanted {want_label}): {s!r}")
     for s in _MUST_PASS:
         hits = scan_text(s, compiled)
         if hits:

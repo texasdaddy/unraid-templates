@@ -2,6 +2,12 @@
 # Blocks a commit that would put internal identifying information into this public repo.
 # Opt in per clone (one time):   git config core.hooksPath .githooks
 # CI runs the same two commands, so this is a convenience, not the enforcement point.
-if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+# ⚠️ NOT `command -v python3`. On Windows that FINDS the Microsoft Store app-execution
+# alias — a zero-byte stub that exists on PATH, resolves, and then refuses to run
+# ("Python was not found; run without arguments to install from the Microsoft Store"),
+# so every commit from a Windows clone is blocked by a hook that thinks it found an
+# interpreter. Probing whether the interpreter actually EXECUTES is the test that means
+# something. Same fix as tape's own hooks (audit #2); this repo was the sibling it missed.
+if python3 -c "" >/dev/null 2>&1; then PY=python3; else PY=python; fi
 "$PY" scripts/check_no_internal_info.py --selftest || exit 1
 exec "$PY" scripts/check_no_internal_info.py

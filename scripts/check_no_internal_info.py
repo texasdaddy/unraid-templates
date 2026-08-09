@@ -14,32 +14,50 @@ WHAT COUNTS
     Access policy UUIDs. Documentation ranges (RFC5737) and `example.com`/`.example` are the
     ALLOWED way to write an address or a host in a doc, a comment, or a test.
 
-    ⚠️ THE DENYLIST ITSELF NAMES THE REAL VALUES, and it has to: you cannot match a host
-    codename without writing it down. So this file DOES republish, in one greppable place,
-    the very strings it exists to remove -- and it is the one file the scan skips, so it can
-    never catch itself. That is an accepted, deliberate trade, not an oversight; do not let a
-    reader conclude otherwise. The `_MUST_FAIL` cases likewise use the real codenames and
-    domain -- what makes them safe is not that they are synthetic (they are not) but that
-    they add NO exposure beyond what PATTERNS already carries. Where a case can be defanged
-    without weakening it, it is: `.invalid` hosts (RFC 2606), implausible-but-valid octets,
-    and placeholder UUIDs.
-
-    ⚠️ Corollary, learned the hard way: a COMPILED copy of this file (`__pycache__/*.pyc`)
-    embeds those same literals and is not human-readable, so it is easy to commit by accident.
-    One was found tracked in the public templates repo. The skip below is therefore matched on
-    the EXACT relative path -- an earlier substring match on the filename also matched the
-    `.pyc`, which is precisely how it stayed invisible. Keep `__pycache__/` gitignored.
+    ⚠️ EVERY EXAMPLE IN THIS FILE IS SYNTHETIC. A guard whose self-test carries the real
+    values would republish, in one greppable place, exactly what it exists to remove -- and it
+    is the one file the scan skips, so it could never catch itself. `.invalid` hosts and
+    out-of-range octets exercise the same patterns and leak nothing.
 
 KNOWN LIMITS (state them; do not pretend to coverage)
     Line-based and literal: a value split across lines (implicit string concatenation, a YAML
     folded scalar) or encoded (base64, percent-encoding) is not detected. The guard raises the
     cost of an accidental leak; it is not a control against a determined one.
 
+    `--range` reads each commit's diff against its FIRST parent. For an ordinary commit that is
+    exactly "what this commit added". For a merge it is "everything the merged side brought in",
+    which is redundant when those commits are themselves in the range and is the safe direction
+    to be wrong in — a guard may re-scan, it may not skip. What it does NOT see is a value that
+    was never added as a whole line by any commit in the range (the same line-based limit as
+    above), or history OUTSIDE the range you hand it.
+
+WHY --range EXISTS (the working-tree scan is not enough)
+    Scanning the working tree answers "is the leak here NOW". Pushing publishes HISTORY. A
+    codename committed in one commit and deleted in the next is absent from the tree, passes the
+    tree scan, and is still permanently readable at the earlier commit once the branch is on the
+    remote — which is the expensive case this whole file exists to prevent (it costs a history
+    rewrite and a force-push across every clone). So the tree scan and the range scan answer two
+    different questions and BOTH are run: the tree scan on every commit, the range scan on
+    everything about to reach the remote.
+
+    ⚠️ AND THE TREE SCAN IS BLIND TO A BRAND-NEW FILE. It reads `git ls-files`, which lists
+    TRACKED files only, so a file that does not exist in the index yet is not scanned at all —
+    it is not a hit, it is not "unreadable", it is simply absent from the run that prints "no
+    internal info found". That is how a synthetic internal hostname reached a public remote:
+    the guard was run BEFORE `git add`, reported clean on a tree that did not yet contain the
+    new file, and the very next commit published it. Two consequences, both load-bearing:
+      1. ALWAYS run the tree scan AFTER `git add`, never before. The pre-commit hook is on the
+         right side of that line by construction; a human running it by hand is not.
+      2. The range scan does not care either way — it reads what each COMMIT added, and a new
+         file's first commit adds every one of its lines. It is the layer that actually closes
+         this, which is why it runs on the push path and in CI rather than only locally.
+
 USAGE
     python scripts/check_no_internal_info.py            # scan tracked files, exit 1 on a hit
     python scripts/check_no_internal_info.py --selftest # prove the patterns still bite
+    python scripts/check_no_internal_info.py --range origin/main..HEAD  # scan the COMMITS
 
-    As a pre-commit hook (one-time, per clone):
+    As a pre-commit + pre-push hook (one-time, per clone):
         git config core.hooksPath .githooks
 
 IF IT FIRES ON SOMETHING LEGITIMATE
@@ -55,6 +73,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 # --------------------------------------------------------------------------- the denylist
 # Every entry MUST have at least one deny case and one near-miss allow case in `selftest`;
@@ -101,12 +120,26 @@ ALLOW_LITERALS: tuple[str, ...] = (
 # than used to skip the line: skipping the line meant one `.env.example` mention could hide a
 # real leak sitting beside it, and `.example` matches `.env.example`, which appears in every
 # repo's docs.
+# ⚠️ The two host spans anchor each label with `(?:[\w-]+\.)*` rather than a flat `[\w.-]*`.
+#
+# WHY: `[\w.-]*` overlaps the `\.` that follows it, so every added character doubled the
+# backtracking. Measured on one line of `z`: 4 000 chars 0.29 s, 16 000 chars 4.6 s, 32 000
+# chars 29 s — a 200 KB minified line or a base64 data URI extrapolates to ~19 MINUTES.
+# Survivable while this only ran over a tracked tree; `--range` puts it on the push path and in
+# CI, where a hang is precisely the failure mode the no-silent-hangs directive forbids.
+# Anchored: 16 000 chars in 0.001 s.
+#
+# NOT match-for-match identical, and an earlier version of this comment wrongly said it was:
+# a differential over thousands of strings found cases the anchored form REPORTS and the flat
+# one swallowed (all of the `<label>-example.tld` shape) and ZERO in the other direction. So the
+# change is strictly FAIL-CLOSED, which is the property that matters for a leak guard.
 ALLOW_SPANS: tuple[str, ...] = (
     r"(?<![\w.])192\.0\.2\.\d{1,3}",        # RFC5737 TEST-NET-1
     r"(?<![\w.])198\.51\.100\.\d{1,3}",     # RFC5737 TEST-NET-2
     r"(?<![\w.])203\.0\.113\.\d{1,3}",      # RFC5737 TEST-NET-3
-    r"[\w.-]*\bexample\.(?:com|org|net)\b",  # example.com and friends
-    r"[\w.-]+\.example\b",                  # your-domain.example
+    # example.com and friends, with any number of leading labels
+    r"(?<![\w.-])(?:[\w-]+\.)*example\.(?:com|org|net)\b",
+    r"(?<![\w.-])(?:[\w-]+\.)*[\w-]+\.example\b",   # your-domain.example
     r"\.env\.example\b",
 )
 
@@ -121,13 +154,19 @@ SKIP_SUFFIXES = (".png", ".jpg", ".jpeg", ".ico", ".gif", ".pdf", ".zip", ".gz",
 # bearing copy that the scan therefore skipped in silence. Anything that is not exactly this
 # path gets scanned, and a `.pyc` is deliberately NOT in SKIP_SUFFIXES so it surfaces as
 # unreadable-and-therefore-not-cleared rather than being waved through.
+#
+# ⚠️ BOTH SCANS USE THIS, and they must agree. The range scan gets its paths from the
+# `diff --git a/X b/X` header, which is already repo-relative and posix-separated -- the same
+# shape as the tree scan's `path.relative_to(root).as_posix()`. If the two disagreed about
+# which single file is exempt, one of them would be lying about its coverage.
 SELF_RELPATH = "scripts/check_no_internal_info.py"
 
 _ALLOW_SPAN_RX = re.compile("|".join(ALLOW_SPANS), re.IGNORECASE)
 
 
 def tracked_files(root: Path) -> list[Path]:
-    out = subprocess.run(["git", "ls-files", "-z"], cwd=root, capture_output=True, check=True)
+    out = subprocess.run(["git", "ls-files", "-z"], cwd=root, capture_output=True,
+                         check=True, timeout=_GIT_TIMEOUT_S)
     return [root / p for p in out.stdout.decode("utf-8").split("\0") if p]
 
 
@@ -148,10 +187,233 @@ def scan_text(text: str, compiled: list[tuple[str, re.Pattern[str]]]) -> list[tu
     return hits
 
 
-# Deny cases reproduce shapes that were REAL findings in these repos, and they use the real
-# codenames/domain/name because that is what the patterns match on -- see the module
-# docstring: this file already carries those literals in PATTERNS, so the cases add nothing.
-# Hosts are `.invalid` (RFC 2606) and the addresses are implausible so nothing here resolves.
+# --------------------------------------------------------------- scanning the COMMITS
+# The empty tree. `git diff <EMPTY_TREE> <sha>` is how the very first commit in a repository is
+# diffed, since it has no parent to diff against and `<sha>^` simply fails there.
+_EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+_HUNK_RX = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+# EVERY git call this makes is bounded — `_git` and the fallback re-diff alike. A guard that can
+# hang on the push path is the failure the no-silent-hangs directive forbids, and a wedged git is
+# indistinguishable from a slow one. These are local operations with no network, so the risk is
+# small but not nil: `git diff` can invoke a `.gitattributes` textconv filter that shells out.
+# Generous enough that a large repository is never the reason it fires.
+#
+# ⚠️ An earlier version defined this and then passed it ONLY to the fallback, while the comment
+# claimed everything was bounded — backwards from the risk, since the per-commit `git diff` is
+# the call measured at 15.9 s on a large blob. A guarantee stated and not implemented is worse
+# than one never claimed.
+_GIT_TIMEOUT_S = 120
+
+
+def _git(root: Path, *args: str) -> str:
+    """Run git and return stdout as text.
+
+    `errors="replace"` and not strict: a diff can carry a byte sequence that is not valid UTF-8
+    (a latin-1 file, a half-binary blob git decided to treat as text), and a scanner that DIES on
+    the content it is meant to inspect fails open — the push goes through unscanned. Replacement
+    characters cannot create a false hit: every pattern is ASCII.
+    """
+    out = subprocess.run(["git", *args], cwd=root, capture_output=True, check=True,
+                         timeout=_GIT_TIMEOUT_S)
+    return out.stdout.decode("utf-8", errors="replace")
+
+
+def commits_in_range(root: Path, rev_range: str) -> list[str]:
+    """The commits the range covers, oldest first. Empty is a legitimate answer (nothing new).
+
+    Whitespace-split so multi-token selectors work as well as `A..B` — the pre-push hook needs
+    `<sha> --not --remotes` for a BRAND-NEW branch, which has no remote counterpart to diff
+    against and would otherwise be scanned as zero commits.
+    """
+    return list(reversed(_git(root, "rev-list", *rev_range.split()).split()))
+
+
+class ParsedDiff(NamedTuple):
+    """What one commit's diff contributes: lines we CAN scan, and paths we cannot."""
+
+    added: list[tuple[str, int, str]]   # (path, new-file line number, content)
+    unscannable: list[str]              # paths git served as binary — see `parse_diff`
+
+
+def parse_diff(diff: str) -> ParsedDiff:
+    """Parse a `--unified=0` diff into added lines plus the paths that could not be read.
+
+    Pure, so the parsing can be tested without a repository — the git side of this is two
+    commands and the fiddly part is all here.
+
+    Added lines are the whole question: a value enters the permanent history at the commit that
+    added it, and stays readable there no matter what a later commit does. Removed lines are
+    ignored for the same reason — deleting a leak is exactly what makes it invisible to the tree
+    scan while leaving it in the history.
+
+    ⚠️ THE PATH COMES FROM `diff --git`, NOT FROM `+++ ` (verification finding). Keying on the
+    `--- `/`+++ ` header pair looks sufficient and is not: a REMOVED content line beginning
+    `-- ` renders as `--- …` and an ADDED one beginning `++ ` renders as `+++ …`, so an ordinary
+    pair of prose lines is byte-identical to a file header. Proven against real git output — an
+    added line reading `++ logo.png` made every following line attribute to `logo.png`, which
+    `scan_added` then skipped as a binary asset, and a genuine leak on the next line scanned
+    CLEAN. `in_hunk` closes it structurally: once `@@` has been seen, nothing until the next
+    `diff --git` can be a header, which is exactly git's own grammar.
+
+    ⚠️ A BINARY DIFF CARRIES NO LINES, so it must be REPORTED rather than passed over. The tree
+    scan already refuses to vouch for what it cannot decode (`UNREADABLE as UTF-8 … not scanned,
+    so not cleared`); a UTF-16 file is invisible to both scans otherwise, which is a hole rather
+    than a limit.
+    """
+    added: list[tuple[str, int, str]] = []
+    unscannable: list[str] = []
+    path = ""
+    lineno = 0
+    in_hunk = False
+    deleted = False
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            # `a/X b/X`. Split on " b/" so a path containing a space still resolves; git quotes
+            # genuinely pathological names, and those fall back to the whole tail.
+            tail = line[len("diff --git "):]
+            path = tail.split(" b/", 1)[1] if " b/" in tail else tail
+            in_hunk = False
+            deleted = False
+            continue
+        if not in_hunk and line.startswith("+++ "):
+            raw = line[4:].strip()
+            # `/dev/null` on the new side means the file was DELETED — a deletion adds nothing.
+            path = "" if raw == "/dev/null" else raw.removeprefix("b/")
+            continue
+        if line.startswith("deleted file mode "):
+            # `GIT binary patch` (only emitted under `--binary`, which this never passes) carries
+            # no `/dev/null` marker, so the deletion has to be recognised from the mode line.
+            # `parse_diff` is a documented pure function with its own tests; it should not depend
+            # on its one caller's flags for correctness.
+            deleted = True
+            continue
+        if not in_hunk and (line.startswith("Binary files ") or line == "GIT binary patch"):
+            # ⚠️ A DELETION PUBLISHES NOTHING (verification finding). `Binary files a/x and
+            # /dev/null differ` is a removal, and reporting it would make every commit that
+            # deletes a binary — or the delete half of a binary rename — fail forever. That is
+            # the same trap the removed-lines rule above avoids: a guard that punishes cleanup
+            # is a guard that gets switched off.
+            if path and not deleted and not line.rstrip().endswith("and /dev/null differ"):
+                unscannable.append(path)
+            path = ""
+            continue
+        if not path:
+            continue
+        m = _HUNK_RX.match(line)
+        if m:
+            lineno = int(m.group(1))
+            in_hunk = True
+            continue
+        if in_hunk and line.startswith("+"):
+            added.append((path, lineno, line[1:]))
+            lineno += 1
+    return ParsedDiff(added, unscannable)
+
+
+def added_lines(root: Path, sha: str) -> ParsedDiff:
+    """`parse_diff` over this commit's diff against its FIRST parent, then RESOLVE the paths git
+    served as binary by actually reading them.
+
+    First parent, so a merge reports what its side brought in rather than nothing at all —
+    `git diff <merge> <merge>` is empty, and a merge would otherwise always scan clean.
+
+    ⚠️ "git called it binary" IS NOT "it is unreadable" (verification finding). git says that for
+    a `.gitattributes` `-diff`/`binary` attribute too — standard practice for a generated
+    lockfile, and this repo generates a 99 KB `requirements.txt` — and for UTF-8 text carrying
+    one stray NUL. Reporting those as "not scanned" reddens ordinary work with remediation advice
+    that is simply wrong ("commit the file as UTF-8 text" — it already IS).
+
+    So each flagged path is RE-DIFFED with `--text`, which forces git to emit real hunks, and the
+    result is decoded strictly. Decodes → those are the lines this commit added, scanned like any
+    other. Fails → the content genuinely is not UTF-8, and it stays unscannable so the run
+    refuses to clear it.
+
+    ⚠️ RE-DIFF, NOT RE-READ. The first version of this fetched the whole blob and scanned every
+    line of it. A third verification pass measured what that costs: 15.9 s per commit on a 24 MB
+    `-diff` blob, so a 200-commit PR touching a large lockfile extrapolates to ~50 MINUTES, on
+    the push path and in CI — the hang the no-silent-hangs directive forbids, re-entering through
+    a door I opened while closing another. It also attributed a PRE-EXISTING leak to whichever
+    innocent commit last touched the file, and told the operator to rewrite that one.
+
+    Both faults are the same mistake: the unit of this scan is what a commit ADDED, and reading
+    the blob threw that away. The `--text` diff restores it, and bounds the cost by the change
+    rather than by the file.
+
+    Skipped suffixes are filtered FIRST, so a 100 MB `.png` is never fetched only to be discarded.
+    """
+    try:
+        parent = _git(root, "rev-parse", "--verify", f"{sha}^").strip() or _EMPTY_TREE
+    except subprocess.CalledProcessError:
+        parent = _EMPTY_TREE  # the root commit has no parent
+    parsed = parse_diff(
+        _git(root, "diff", "--unified=0", "--no-color", "--no-renames", parent, sha))
+    pending = [p for p in parsed.unscannable if not _skipped(p)]
+    if not pending:
+        return ParsedDiff(parsed.added, [])
+
+    added = list(parsed.added)
+    still_unreadable: list[str] = []
+    for path in pending:
+        try:
+            raw = subprocess.run(
+                ["git", "diff", "--unified=0", "--no-color", "--no-renames", "--text",
+                 parent, sha, "--", path],
+                cwd=root, capture_output=True, check=True, timeout=_GIT_TIMEOUT_S).stdout
+            text = raw.decode("utf-8")
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, UnicodeDecodeError):
+            # Cannot read it → cannot vouch for it. Fail closed, exactly like the tree scan.
+            still_unreadable.append(path)
+            continue
+        added += parse_diff(text).added
+    return ParsedDiff(added, still_unreadable)
+
+
+def _skipped(path: str) -> bool:
+    """Files both scans decline to read: known binary suffixes, and this scanner's own source
+    (which carries synthetic deny cases by design).
+
+    `path` is repo-relative and posix-separated, so the self-check is an EXACT comparison and
+    not a substring one — see SELF_RELPATH for the `.pyc` that the substring form waved through.
+    """
+    return path == SELF_RELPATH or path.lower().endswith(SKIP_SUFFIXES)
+
+
+def scan_added(sha: str, parsed: ParsedDiff,
+               compiled: list[tuple[str, re.Pattern[str]]]) -> tuple[list[str], list[str]]:
+    """(findings, unscannable) for one commit. Skips the same files the tree scan skips, or the
+    two scans would disagree about what this repository contains."""
+    findings: list[str] = []
+    for path, lineno, content in parsed.added:
+        if _skipped(path):
+            continue
+        for _, label, match in scan_text(content, compiled):
+            findings.append(f"{sha[:10]} {path}:{lineno}: {label}: {match!r}")
+    return findings, [f"{sha[:10]} {p}" for p in parsed.unscannable if not _skipped(p)]
+
+
+class RangeResult(NamedTuple):
+    findings: list[str]
+    unscannable: list[str]
+    commits: int
+
+
+def scan_range(root: Path, rev_range: str,
+               compiled: list[tuple[str, re.Pattern[str]]]) -> RangeResult:
+    """Scan every line added by every commit in `rev_range`."""
+    findings: list[str] = []
+    unscannable: list[str] = []
+    commits = commits_in_range(root, rev_range)
+    for sha in commits:
+        hits, blind = scan_added(sha, added_lines(root, sha), compiled)
+        findings += hits
+        unscannable += blind
+    return RangeResult(findings, unscannable, len(commits))
+
+
+# Deny cases are SYNTHETIC stand-ins for shapes that were real findings in these repos.
+# `.invalid` is reserved by RFC 2606 and `Codename-A` is nobody's host.
 _MUST_FAIL: list[tuple[str, str]] = [
     ("host codename", "deploy it to Titan and check the badge"),
     ("host codename", "the genisys box hosts the reverse proxy"),
@@ -232,13 +494,54 @@ def main(argv: list[str]) -> int:
         return selftest(compiled)
 
     root = Path(subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True,
-                               check=True, text=True).stdout.strip())
+                               check=True, text=True, timeout=_GIT_TIMEOUT_S).stdout.strip())
+
+    if "--range" in argv:
+        i = argv.index("--range")
+        if i + 1 >= len(argv):
+            print("--range needs a revision range, e.g. --range origin/main..HEAD")
+            return 2
+        rev_range = argv[i + 1]
+        try:
+            result = scan_range(root, rev_range, compiled)
+        except subprocess.CalledProcessError as exc:
+            # A range git cannot resolve is NOT a pass. A shallow clone, an unfetched base or a
+            # typo would otherwise scan zero commits and print a clean result — the one failure
+            # mode a guard must never have.
+            print(f"could not scan {rev_range!r}: git exited {exc.returncode}. "
+                  f"Fetch the base ref (CI needs fetch-depth: 0) or check the range.")
+            return 1
+        if result.unscannable:
+            # Same posture as the tree scan's `undecodable` list: a blob this cannot read is a
+            # blob it cannot vouch for. Silence here would be worse than the tree scan, which at
+            # least refuses to clear what it could not decode.
+            print(f"BINARY / UNREADABLE in {len(result.unscannable)} added file(s) - not "
+                  f"scanned, so NOT CLEARED:")
+            for u in result.unscannable:
+                print("  " + u)
+            print("Add a binary suffix to SKIP_SUFFIXES if that is what it is, or commit the "
+                  "file as UTF-8 text.\n")
+        if result.findings:
+            print(f"INTERNAL INFO FOUND in {len(result.findings)} line(s) ADDED by {rev_range} - "
+                  f"this repo is public and pushing publishes HISTORY:\n")
+            for f in result.findings:
+                print("  " + f)
+            print("\nRemoving it in a LATER commit does not help: the value stays readable at "
+                  "the commit that added it. Rewrite the offending commits (git rebase -i / "
+                  "filter-repo) BEFORE pushing, then re-run this.")
+        if result.findings or result.unscannable:
+            return 1
+        print(f"no internal info added across {result.commits} commit(s) in {rev_range}")
+        return 0
+    # ⚠️ TRACKED FILES ONLY (`git ls-files`). A file that is not in the index yet is invisible
+    # here — see the module docstring: run this AFTER `git add`, and rely on the range scan for
+    # the case where nobody did.
     findings: list[str] = []
-    unreadable: list[str] = []
+    undecodable: list[str] = []
     scanned = 0
     for path in tracked_files(root):
         rel = path.relative_to(root).as_posix()
-        if rel == SELF_RELPATH or path.suffix.lower() in SKIP_SUFFIXES:
+        if _skipped(rel):
             continue
         try:
             text = path.read_text(encoding="utf-8")
@@ -246,19 +549,19 @@ def main(argv: list[str]) -> int:
             # Tracked but absent from the worktree. This used to `continue` silently, which
             # is the same "waved it through" shape as the .pyc bug: the blob is still staged
             # and would still be committed, we just could not read it. Not clearing it.
-            unreadable.append(f"{rel} (tracked, but not in the working tree)")
+            undecodable.append(f"{rel} (tracked, but not in the working tree)")
             continue
         except UnicodeDecodeError:
             # NOT silent: a file this scanner cannot read is a file it cannot vouch for.
-            unreadable.append(rel)
+            undecodable.append(rel)
             continue
         scanned += 1
         findings += [f"{rel}:{n}: {label}: {match!r}"
                      for n, label, match in scan_text(text, compiled)]
 
-    if unreadable:
-        print(f"NOT SCANNED, therefore NOT CLEARED ({len(unreadable)}):")
-        for u in unreadable:
+    if undecodable:
+        print(f"NOT SCANNED, therefore NOT CLEARED ({len(undecodable)}):")
+        for u in undecodable:
             print("  " + u)
         print("Add a binary suffix to SKIP_SUFFIXES if that is what it is, or fix the "
               "encoding.\n")
@@ -270,7 +573,7 @@ def main(argv: list[str]) -> int:
               "/mnt/POOL/..., RFC5737 addresses) or take the value from an env Variable.")
         print("If a hit is genuinely legitimate, add the literal to ALLOW_LITERALS in "
               "scripts/check_no_internal_info.py with a comment saying why.")
-    if findings or unreadable:
+    if findings or undecodable:
         return 1
     print(f"no internal info found ({scanned} tracked text files scanned)")
     return 0

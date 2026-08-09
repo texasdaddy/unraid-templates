@@ -515,3 +515,31 @@ def test_the_CI_workflow_runs_BOTH_scans_on_BOTH_paths_with_full_history():
     assert "origin/main" in ci, "the tag path needs a base to diff against"
     # The tree scan must still be there — the two answer different questions.
     assert "--selftest" in ci
+
+
+def test_both_hooks_are_committed_EXECUTABLE():
+    """⭐ GIT SILENTLY SKIPS A HOOK WITHOUT THE EXECUTABLE BIT.
+
+    `.githooks/pre-push` shipped 100644 while `pre-commit` shipped 100755, and nothing noticed:
+    git-for-windows runs a hook with a shebang regardless of the mode bit, so it fired on the
+    workstation that authored it. On Linux — a WSL clone, a container, anywhere else this repo
+    gets worked on — git checks the executable bit and skips the hook WITHOUT A WORD. A guard
+    that is silently not running is worse than one that was never installed, because its absence
+    looks exactly like a pass, which is the failure mode this whole file exists to remove.
+
+    The bit lives in the INDEX, not on disk: core.filemode is false on Windows, so `chmod +x`
+    alone changes nothing that gets committed and the mode looks right locally either way.
+    `git update-index --chmod=+x` is what actually moves it. This reads the index for that
+    reason — checking the worktree would pass while the committed hook stayed inert.
+    """
+    root = _SCRIPT.parents[1]
+    out = subprocess.run(
+        ["git", "ls-files", "-s", ".githooks/pre-commit", ".githooks/pre-push"],
+        cwd=root, capture_output=True, check=True, text=True).stdout.strip().splitlines()
+    assert len(out) == 2, f"expected both hooks to be tracked, got: {out}"
+    for line in out:
+        mode = line.split()[0]
+        name = line.split("\t")[-1]
+        assert mode == "100755", (
+            f"{name} is committed {mode}, so git will silently skip it on Linux. "
+            f"Fix with: git update-index --chmod=+x {name}")

@@ -8,7 +8,7 @@
   <Privileged>false</Privileged>
   <Support/>
   <Project>https://github.com/texasdaddy/keystone</Project>
-  <Overview>Keystone — self-hosted multi-tenant personal financial platform (FastAPI + PostgreSQL 16 + Next.js). Consumes market/account data from Tape via its API (Keystone does not talk to Schwab directly). ONE neutral template for dev and prod: at creation set Name (keystone / keystone-dev), image tag (:stable / :dev), network mode / static IP, DB host + password, the Tape base URL, and secrets. The DB connection is assembled internally from the discrete DB_* variables (no baked DATABASE_URL). Start the keystone-db container FIRST; the entrypoint runs migrations, then serves. Deploy check: GET /v1/health reports release/sha plus db and tape reachability.</Overview>
+  <Overview>Keystone — self-hosted multi-tenant personal financial platform (FastAPI + PostgreSQL 16 + Next.js). Consumes market/account data from Tape via its API (Keystone does not talk to Schwab directly). ONE neutral template for dev and prod: at creation set Name (keystone / keystone-dev), image tag (:stable / :dev), network mode / static IP, DB host + the TWO DB logins (owner DB_* + non-owner APP_DB_*), the Tape base URL, and secrets. TWO DB logins are required (keystone#14): migrations run as the owner (DB_*), the app runs as a non-owner app_role member (APP_DB_*) so row-level security is enforced — the container fails closed if the app login is missing. The DB connection is assembled internally from the discrete variables (no baked DATABASE_URL). Start the keystone-db container FIRST; the entrypoint runs migrations, then serves. Deploy check: GET /v1/health reports release/sha plus db and tape reachability.</Overview>
   <Category>Network:Other</Category>
   <WebUI>http://[IP]:[PORT:8000]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/templates/keystone.xml</TemplateURL>
@@ -21,14 +21,22 @@
   <Config Name="HTTP Port" Target="8000" Default="8000" Mode="tcp" Description="App HTTP port (FastAPI/gunicorn)" Type="Port" Display="always" Required="false" Mask="false">8000</Config>
   <Config Name="Data" Target="/data" Default="" Mode="rw" Description="App data (encrypted file vault). REQUIRED - an absolute path on a POOL, NOT the user-share FUSE overlay." Type="Path" Display="always" Required="true" Mask="false"/>
 
-  <!-- Database connection — discrete variables (INFRASTRUCTURE B.10); the app assembles the
-       connection string internally. Set DB_HOST to the keystone-db container IP + DB_PASSWORD
-       at creation. NO baked DATABASE_URL (that would hardcode the DB IP, violating B.7). -->
-  <Config Name="DB_HOST" Target="DB_HOST" Default="" Mode="" Description="PostgreSQL host — the keystone-db container's IP (set at creation)" Type="Variable" Display="always" Required="true" Mask="false"/>
+  <!-- Database connection — TWO logins (keystone#14). The runtime posture is load-bearing
+       for row-level security: MIGRATIONS run as the OWNER (DB_*), which owns the tables; the
+       APP process connects as a separate NON-owner login (APP_DB_*) that is a member of
+       app_role with NO BYPASSRLS. A single login for both OWNS the tables and BYPASSES every
+       tenant policy — tenant isolation would be OFF. The app assembles both URLs internally
+       from these discrete vars (INFRASTRUCTURE B.10); NO baked DATABASE_URL (that would
+       hardcode the DB IP, B.7). Standup on keystone-db: create the owner role + a NON-owner
+       app_login, then `GRANT app_role TO <app_login>`. The container FAILS CLOSED if DB_HOST
+       is set without APP_DB_USER (it will not run the app as the owner). -->
+  <Config Name="DB_HOST" Target="DB_HOST" Default="" Mode="" Description="PostgreSQL host — the keystone-db container's IP (set at creation). Shared by the owner and app logins." Type="Variable" Display="always" Required="true" Mask="false"/>
   <Config Name="DB_PORT" Target="DB_PORT" Default="5432" Mode="" Description="PostgreSQL port" Type="Variable" Display="always" Required="true" Mask="false">5432</Config>
-  <Config Name="DB_USER" Target="DB_USER" Default="keystone" Mode="" Description="PostgreSQL user" Type="Variable" Display="always" Required="true" Mask="false">keystone</Config>
-  <Config Name="DB_PASSWORD" Target="DB_PASSWORD" Default="" Mode="" Description="PostgreSQL password (matches keystone-db POSTGRES_PASSWORD)" Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="DB_USER" Target="DB_USER" Default="keystone" Mode="" Description="OWNER DB login — owns the tables and runs migrations (alembic). Should be a NON-superuser so FORCE row-level security binds it too." Type="Variable" Display="always" Required="true" Mask="false">keystone</Config>
+  <Config Name="DB_PASSWORD" Target="DB_PASSWORD" Default="" Mode="" Description="Password for the OWNER login DB_USER (matches the role you created on keystone-db)." Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="DB_NAME" Target="DB_NAME" Default="keystone" Mode="" Description="PostgreSQL database name" Type="Variable" Display="always" Required="true" Mask="false">keystone</Config>
+  <Config Name="APP_DB_USER" Target="APP_DB_USER" Default="keystone_app" Mode="" Description="APPLICATION (runtime) DB login — the NON-owner identity gunicorn connects as (keystone#14). Must be a member of app_role with NO BYPASSRLS and must NOT own tables, or RLS is bypassed. Create on keystone-db: CREATE ROLE keystone_app LOGIN PASSWORD '...' NOSUPERUSER INHERIT; GRANT app_role TO keystone_app;" Type="Variable" Display="always" Required="true" Mask="false">keystone_app</Config>
+  <Config Name="APP_DB_PASSWORD" Target="APP_DB_PASSWORD" Default="" Mode="" Description="Password for the APP login APP_DB_USER (the non-owner app_role member). Required whenever DB_HOST is set — the container fails closed without it rather than running as the owner." Type="Variable" Display="always" Required="true" Mask="true"/>
 
   <!-- Tape client — Keystone consumes Tape for ALL market + account data (never Schwab
        directly). The base URL is per-environment (point a dev keystone at the dev Tape).

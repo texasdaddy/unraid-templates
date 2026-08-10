@@ -32,10 +32,17 @@ SHAPE
     would make THIS FILE a finding of the very scanner it tests: the guard skips exactly one
     file, its own source, and the working-tree scan runs on every commit.
 
-    The denied tokens themselves come from `guard`'s decoded table rather than from split-string
-    fragments in this file — see the comment above `_POOL`. `test_guard_source_carries_no_
-    plaintext_token` closes the loop by asserting that the guard's own source, the file the tree
-    scan is structurally unable to clear, carries no decoded token as a literal either.
+    ⭐ THE DENYLIST IS SHAPES ONLY, so there is no longer a real token for this file to avoid
+    naming. It used to hold real values — first as plaintext, then base64-encoded — and both
+    forms shipped those values in a public repo. They now live in a guard kept in the project
+    working directory that is never committed anywhere, and that guard is what runs against the
+    staged tree before every push.
+
+    That relocation is why `test_guard_source_carries_no_plaintext_token` is gone: a repository
+    that no longer knows the real tokens cannot assert their absence, and a test that pretended
+    to would be checking nothing. What CAN be asserted from here is that no real-literal denylist
+    has crept back in at all — see `test_the_guard_carries_no_real_literal_denylist` and
+    `test_the_denylist_is_the_agreed_shape_set`, which pin the structure rather than the values.
 """
 
 from __future__ import annotations
@@ -58,17 +65,21 @@ _spec.loader.exec_module(guard)
 
 COMPILED = [(label, re.compile(rx, re.IGNORECASE)) for label, rx in guard.PATTERNS]
 
-# ⚠️ TAKEN FROM THE GUARD'S DECODED TABLE, NOT WRITTEN OUT. See the module docstring. These used
-# to be split-string fragments (`"rein" + "lie"`), which defeats a grep for the whole token but
-# still ships each half in plaintext and drifts silently if the guard's denylist ever changes.
-# Reading them back from the module under test fixes both: nothing is spelled here, and a token
-# that stopped being denied would break these tests instead of quietly un-testing them.
-# Matches "unraid pool path": `/mnt/` alone does not match, the pattern needs a pool name after
-# it, so neither fragment is a finding on its own.
-_POOL = "/mnt/" + guard._POOL[0]
+# ⚠️ SPLIT FRAGMENTS AGAIN, AND FOR A BETTER REASON THAN THE FIRST TIME.
+#
+# These were fragments (`"rein" + "lie"`), then a read-back from the guard's base64 token table.
+# Both were workarounds for one underlying problem: the denylist held REAL values, so this file
+# could not name a deny case without republishing one. That problem is gone — the denylist is
+# shapes only. Every value below is synthetic.
+#
+# They stay split because THIS FILE IS SCANNED BY THE GUARD. Only
+# `scripts/check_no_internal_info.py` is exempt (SELF_PATH); a test file that spelled a deny case
+# out whole would make the guard fail on its own test suite. Neither fragment matches alone.
+_POOL = "/mnt/" + "apps"
 _LEAK = f"{_POOL}/appdata/example/data"
-# Matches "infra domain". `.invalid` guarantees it resolves nowhere.
-_HOST = f"host-a.{guard._DOMAIN}.invalid"
+# Matches "private lan domain". A `.lan` name is private by definition and resolves nowhere off
+# the network that defines it.
+_HOST = "nas-a." + "lan"
 # Matches "private IPv4 (RFC1918)". Synthetic: .77.77 is not a host on any network here.
 _ADDR = "192.168." + "77.77"
 
@@ -175,7 +186,7 @@ def test_a_leak_in_a_BRAND_NEW_UNTRACKED_file_is_invisible_to_the_tree_scan_and_
     assert result.unscannable == []
     labels = " ".join(result.findings)
     assert "unraid pool path" in labels, f"the pool path was not caught: {result.findings}"
-    assert "infra domain" in labels, f"the hostname was not caught: {result.findings}"
+    assert "private lan domain" in labels, f"the hostname was not caught: {result.findings}"
     assert "private IPv4 (RFC1918)" in labels, f"the address was not caught: {result.findings}"
     assert all("templates/new-service.xml" in f for f in result.findings)
     assert all(head[:10] in f for f in result.findings), (
@@ -217,7 +228,7 @@ def test_the_CLI_catches_the_untracked_file_case_and_exits_1(tmp_path: Path):
     ranged = _cli(repo, "--range", f"{base}..{head}")
     assert ranged.returncode == 1, f"the range scan must fail on this:\n{ranged.stdout}"
     assert "pushing publishes HISTORY" in ranged.stdout
-    assert "infra domain" in ranged.stdout
+    assert "private lan domain" in ranged.stdout
 
 
 # --------------------------------------------------------------- the added-then-deleted case
@@ -359,7 +370,7 @@ def test_the_guards_own_source_is_skipped_in_range_mode_BY_EXACT_PATH_ONLY():
     directions are pinned here, in RANGE mode, because the range scan is the newer of the two
     and the one most likely to be re-derived from a repo that still has the loose form.
     """
-    assert _hits("abc", [(guard.SELF_RELPATH, 5, _LEAK)]) == [], (
+    assert _hits("abc", [(guard.SELF_PATH, 5, _LEAK)]) == [], (
         "the guard's own source must be skipped — it carries synthetic deny cases by design")
     assert _hits("abc", [
         ("scripts/__pycache__/check_no_internal_info.cpython-312.pyc", 5, _LEAK)
@@ -465,12 +476,49 @@ def test_the_CLI_entrypoint_returns_the_exit_codes_CI_and_the_hook_depend_on(tmp
     clean = _cli(repo, "--range", f"{head}..{head}")
     assert clean.returncode == 0, f"an empty range must pass: {clean.stdout}"
 
-    broken = _cli(repo, "--range", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef..HEAD")
+    # An unreachable BASE widens to the head's whole history rather than failing -- see
+    # test_an_unreachable_base_widens_instead_of_redding for why. It must still REPORT the leak
+    # that history contains, which is what this asserts: widening is not a way to pass.
+    widened = _cli(repo, "--range", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef..HEAD")
+    assert "WIDENING" in widened.stdout, (
+        "an unreachable base must say so, not fail silently: " + widened.stdout)
+    assert widened.returncode == 1, (
+        "WIDENING MUST NOT LOSE THE FINDING -- it scans MORE history, not less: " + widened.stdout)
+
+    # An unresolvable HEAD is a different matter: there is nothing to widen TO, so it stays an
+    # error. This is the half of the old contract that must not be relaxed.
+    broken = _cli(repo, "--range", "HEAD..deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
     assert broken.returncode == 1, (
-        "AN UNRESOLVABLE RANGE MUST NOT REPORT CLEAN: " + broken.stdout)
+        "AN UNRESOLVABLE HEAD MUST NOT REPORT CLEAN: " + broken.stdout)
     assert "could not scan" in broken.stdout
 
     assert _cli(repo, "--range").returncode == 2, "a missing argument is a usage error"
+
+@pytest.mark.timeout(300)
+def test_an_unreachable_base_widens_instead_of_redding(tmp_path: Path):
+    """⭐ THE POST-REWRITE RED. After a history rewrite the previous tip stops existing, so the
+    very next push hands CI `github.event.before..HEAD` with a base that is no longer in the
+    repository. The workflow already special-cases the NULL sha (branch creation); it never
+    handled an UNREACHABLE one, so the guard exited 1 on a repository that was in fact clean --
+    and a required check that reds for a reason nobody can act on is a check people route around.
+
+    The repair is deliberately fail-closed: an unreachable base widens to every commit reachable
+    from the head, which is strictly MORE than the named range covered, never less. Here the
+    history is clean, so it passes -- and says plainly that it widened.
+    """
+    repo = tmp_path / "rewritten"
+    _init(repo)
+    (repo / "README.md").write_text("clean\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "clean root, as if just after a rewrite")
+
+    result = _cli(repo, "--range", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef..HEAD")
+    assert result.returncode == 0, (
+        "a clean history behind an unreachable base must PASS, not red: " + result.stdout)
+    assert "WIDENING" in result.stdout, (
+        "the widening has to be announced -- a silent change of scope is its own defect: "
+        + result.stdout)
+    assert "no internal info added" in result.stdout
 
 
 def test_the_selftest_still_passes_through_the_CLI():
@@ -554,50 +602,70 @@ def test_both_hooks_are_committed_EXECUTABLE():
             f"Fix with: git update-index --chmod=+x {name}")
 
 
-def test_guard_source_carries_no_plaintext_token():
-    """The guard's own source must not spell out any token it denies.
+# --------------------------------------------- the denylist must stay free of real values
+#
+# ⛔ WHAT REPLACED `test_guard_source_carries_no_plaintext_token`, AND WHY IT HAD TO GO.
+#
+# That test decoded the guard's base64 token table and asserted no decoded token appeared in the
+# guard's source as a literal. It was the only check that could see past `SELF_PATH`, and it was
+# genuinely load-bearing while the guard still carried real values.
+#
+# It cannot survive the move to a shapes-only denylist, because it depended on the repo knowing
+# the real tokens in order to look for them. The whole point of the change is that the repo does
+# NOT know them any more: plaintext republished them, and base64 still shipped them one `b64decode`
+# away. Keeping a version of that test would mean keeping the values here to test against, which
+# is the leak it was written to detect.
+#
+# So the real-literal assertion moved OUT of this repository, to a guard in the project working
+# directory that is never committed and is run against the staged tree before every push. What
+# these two tests do instead is pin the STRUCTURE: no encoded table, no decoder, and exactly the
+# agreed set of shape patterns. Neither can prove "no real value is present" — nothing inside a
+# repo that does not know the values can — and they are written not to imply otherwise.
 
-    THIS IS THE ONE CHECK NOTHING ELSE CAN MAKE. `SELF_RELPATH` exempts
-    `scripts/check_no_internal_info.py` from the tree scan by exact path, and it has to: the
-    file necessarily contains the denylist, so scanning it would fail on every run. The cost of
-    that exemption is that the guard is structurally blind to itself — a codename retyped into a
-    new deny case, a pool name pasted into a comment, and every scan still prints "no internal
-    info found" while the value sits in a public repo forever. That is not hypothetical: the
-    denylist WAS plaintext here until the history reset, which is exactly why it is base64 now.
+_SHAPE_LABELS = {
+    "private IPv4 (RFC1918)",
+    "cgnat address",
+    "tailnet name",
+    "private lan domain",
+    "unraid pool path",
+    "personal mail address",
+    "uuid (access policy / tenant id)",
+}
 
-    So the assertion is made from outside: decode each token and require that it does not appear
-    as a literal in the source. Encoded forms and interpolations (`{_DOMAIN}`) are invisible to
-    this by construction, which is the point — they are the supported way to reference a token.
 
-    The GitHub account name is deliberately NOT checked. It is in the repo's clone URL and in
-    every icon URL the templates serve, so it is public by construction; ALLOW_LITERALS depends
-    on it being written plainly, and encoding it would break image pulls for no gain.
+def test_the_denylist_is_the_agreed_shape_set():
+    """The denylist is exactly these seven shapes -- no additions, no removals.
+
+    A REMOVAL silently reduces coverage. An ADDITION is the more interesting failure: the way a
+    real value gets back into this file is somebody adding a pattern for one ("host codename",
+    "infra domain"), which is precisely what happened before. Pinning the set means that edit
+    cannot land quietly -- it fails here, and the fix is to put the value in the project-side
+    guard instead.
+    """
+    assert {label for label, _ in guard.PATTERNS} == _SHAPE_LABELS
+
+
+def test_the_guard_carries_no_real_literal_denylist():
+    """No encoded token table, and no decoder to read one.
+
+    The previous design base64-encoded the real tokens and decoded them at import. That defeated
+    a grep and a code search, which is a real improvement over plaintext, but it still SHIPPED the
+    values -- `base64.b64decode` in the same file is the key sitting next to the lock. This test
+    exists so that reintroducing the mechanism fails loudly rather than looking like a hardening
+    step.
+
+    ⚠️ WHAT THIS DOES NOT PROVE. It cannot show that no real value appears anywhere in the guard;
+    a codename typed straight into a comment would pass this and every other test in this file.
+    Only the project-side guard, which holds the actual list, can make that statement -- run it
+    against this repo after `git add` and before pushing. Stated plainly here because a test whose
+    limits are implied gets read as a guarantee it never made.
     """
     src = _SCRIPT.read_text(encoding="utf-8")
-    # ⚠️ POOL NAMES ARE CHECKED ONLY IN `/mnt/<pool>` FORM, and that is not a loophole.
-    # Three of the five are ordinary technical English that this file legitimately contains:
-    # `__pycache__` in the SELF_RELPATH comment, `--not --remotes` in `commits_in_range`, `user`
-    # in half a dozen places. Matching them bare made this test fail on prose that republishes
-    # nothing, and a test that cries wolf gets deleted. What identifies the estate is the PATH —
-    # which is exactly what the "unraid pool path" pattern itself denies, `/mnt/` prefix and all.
-    # The other four tokens are distinctive enough to check bare, so they are.
-    tokens = {
-        "host codename": guard._CODENAME,
-        "unraid pool path": [f"/mnt/{p}" for p in guard._POOL],
-        "infra domain": [guard._DOMAIN],
-        "personal name": [guard._PERSON],
-        "cloudflare access app": [guard._CFAPP],
-    }
-    leaked = [
-        f"{label}: {tok[:2]}... ({len(tok)} chars) appears verbatim in {guard.SELF_RELPATH}"
-        for label, toks in tokens.items()
-        for tok in toks
-        # casefold: the deny patterns are IGNORECASE, so any casing republishes the value
-        if tok.casefold() in src.casefold()
-    ]
-    assert not leaked, (
-        "a denied token is written out in the guard's own source, which is the ONE file the "
-        "tree scan skips — so nothing else would ever report it:\n  " + "\n  ".join(leaked)
-        + "\n\nReference it as an interpolation of the decoded table (_CODENAMES/_DOMAIN/"
-          "_POOLS/_PERSON/_CFAPP) instead of retyping it."
-    )
+    assert "b64decode" not in src, (
+        "the guard decodes an encoded token table again. Encoding does not un-ship a value -- "
+        "put the real list in the project-side guard, which is never committed.")
+    assert not re.search(r"^import base64|^from base64", src, re.MULTILINE), (
+        "the guard imports base64, which it needs only to carry an encoded denylist")
+    for attr in ("_CODENAMES", "_CODENAME", "_DOMAIN", "_POOLS", "_PERSON", "_CFAPP"):
+        assert not hasattr(guard, attr), (
+            f"guard.{attr} is back: that is the decoded real-token table this design removed")

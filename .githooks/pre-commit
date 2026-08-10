@@ -1,0 +1,17 @@
+#!/bin/sh
+# Blocks a commit that would put internal identifying information into this public repo.
+# Opt in per clone (one time):   git config core.hooksPath .githooks
+# CI runs the same two commands, so this is a convenience, not the enforcement point.
+#
+# This runs at COMMIT time, which is after `git add` by construction — so the tree scan below
+# sees newly added files. Run by hand BEFORE staging it would not: `git ls-files` lists tracked
+# files only, and a brand-new file is simply absent from the run that prints "no internal info
+# found". That is how a synthetic internal hostname reached a public remote. `.githooks/pre-push`
+# scans the COMMITS being sent, which is the layer that catches it either way.
+#
+# NOT `command -v python3`: on Windows that finds the Microsoft Store App Execution Alias
+# stub, which then aborts the commit with "Python was not found" and no mention of this
+# guard. Probing with a real invocation picks the interpreter that actually runs.
+if python3 -c "" >/dev/null 2>&1; then PY=python3; else PY=python; fi
+"$PY" scripts/check_no_internal_info.py --selftest || exit 1
+exec "$PY" scripts/check_no_internal_info.py

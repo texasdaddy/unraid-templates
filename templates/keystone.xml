@@ -1,0 +1,83 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>keystone</Name>
+  <Repository>ghcr.io/texasdaddy/keystone:stable</Repository>
+  <Registry>https://github.com/texasdaddy/keystone/pkgs/container/keystone</Registry>
+  <Network>bridge</Network>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support/>
+  <Project>https://github.com/texasdaddy/keystone</Project>
+  <Overview>Keystone — self-hosted multi-tenant personal financial platform (FastAPI + PostgreSQL 16 + Next.js). Consumes market/account data from Tape via its API (Keystone does not talk to Schwab directly). ONE neutral template for dev and prod: at creation set Name (keystone / keystone-dev), image tag (:stable / :dev), network mode / static IP, DB host + the TWO DB logins (owner DB_* + non-owner APP_DB_*), the Tape base URL, and secrets. TWO DB logins are required (keystone#14): migrations run as the owner (DB_*), the app runs as a non-owner app_role member (APP_DB_*) so row-level security is enforced — the container fails closed if the app login is missing. The DB connection is assembled internally from the discrete variables (no baked DATABASE_URL). Start the keystone-db container FIRST; the entrypoint runs migrations, then serves. Deploy check: GET /v1/health reports release/sha plus db and tape reachability.</Overview>
+  <Category>Network:Other</Category>
+  <WebUI>http://[IP]:[PORT:8000]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/templates/keystone.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/icons/keystone.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <DateInstalled/>
+  <Description>Keystone — multi-tenant personal financial platform. Neutral template; set Name (keystone / keystone-dev), IP, image tag, DB host/password, Tape URL, and secrets at creation.</Description>
+
+  <Config Name="HTTP Port" Target="8000" Default="8000" Mode="tcp" Description="App HTTP port (FastAPI/gunicorn)" Type="Port" Display="always" Required="false" Mask="false">8000</Config>
+  <Config Name="Data" Target="/data" Default="" Mode="rw" Description="App data (encrypted file vault). REQUIRED - an absolute path on a POOL, NOT the user-share FUSE overlay." Type="Path" Display="always" Required="true" Mask="false"/>
+
+  <!-- Database connection — TWO logins (keystone#14). The runtime posture is load-bearing
+       for row-level security: MIGRATIONS run as the OWNER (DB_*), which owns the tables; the
+       APP process connects as a separate NON-owner login (APP_DB_*) that is a member of
+       app_role with NO BYPASSRLS. A single login for both OWNS the tables and BYPASSES every
+       tenant policy — tenant isolation would be OFF. The app assembles both URLs internally
+       from these discrete vars (INFRASTRUCTURE B.10); NO baked DATABASE_URL (that would
+       hardcode the DB IP, B.7). Standup on keystone-db: create the owner role + a NON-owner
+       app_login, then `GRANT app_role TO <app_login>`. The container FAILS CLOSED if DB_HOST
+       is set without APP_DB_USER (it will not run the app as the owner). -->
+  <Config Name="DB_HOST" Target="DB_HOST" Default="" Mode="" Description="PostgreSQL host — the keystone-db container's IP (set at creation). Shared by the owner and app logins." Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="DB_PORT" Target="DB_PORT" Default="5432" Mode="" Description="PostgreSQL port" Type="Variable" Display="always" Required="true" Mask="false">5432</Config>
+  <Config Name="DB_USER" Target="DB_USER" Default="keystone" Mode="" Description="OWNER DB login — owns the tables and runs migrations (alembic). Should be a NON-superuser so FORCE row-level security binds it too." Type="Variable" Display="always" Required="true" Mask="false">keystone</Config>
+  <Config Name="DB_PASSWORD" Target="DB_PASSWORD" Default="" Mode="" Description="Password for the OWNER login DB_USER (matches the role you created on keystone-db)." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="DB_NAME" Target="DB_NAME" Default="keystone" Mode="" Description="PostgreSQL database name" Type="Variable" Display="always" Required="true" Mask="false">keystone</Config>
+  <Config Name="APP_DB_USER" Target="APP_DB_USER" Default="keystone_app" Mode="" Description="APPLICATION (runtime) DB login — the NON-owner identity gunicorn connects as (keystone#14). Must be a member of app_role with NO BYPASSRLS and must NOT own tables, or RLS is bypassed. Create on keystone-db: CREATE ROLE keystone_app LOGIN PASSWORD '...' NOSUPERUSER INHERIT; GRANT app_role TO keystone_app;" Type="Variable" Display="always" Required="true" Mask="false">keystone_app</Config>
+  <Config Name="APP_DB_PASSWORD" Target="APP_DB_PASSWORD" Default="" Mode="" Description="Password for the APP login APP_DB_USER (the non-owner app_role member). Required whenever DB_HOST is set — the container fails closed without it rather than running as the owner." Type="Variable" Display="always" Required="true" Mask="true"/>
+
+  <!-- Reverse proxy. Keystone's auth surface is rate-limited per account AND per source
+       IP (keystone#15). Behind a proxy the socket peer is the PROXY, so unless the proxy
+       is named here every visitor shares ONE per-IP bucket — a couple of dozen failed
+       logins from anyone would then 429 the whole login surface — and every audit row
+       records the proxy's address instead of the caller's. X-Forwarded-For is believed
+       ONLY from a listed peer; left blank the header is ignored entirely, which is the
+       correct (and safe) setting for a directly-exposed container, since the header is
+       otherwise caller-supplied and would let an attacker pick their own bucket. -->
+  <Config Name="TRUSTED_PROXIES" Target="TRUSTED_PROXIES" Default="" Mode="" Description="Comma-separated IPs/CIDRs of reverse proxies whose X-Forwarded-For header may be trusted (e.g. the proxy container's address or its subnet). SET THIS if Keystone is reached through a reverse proxy, or per-IP rate limiting collapses into a single shared bucket for every visitor and auth audit rows record the proxy instead of the client. Leave blank when the container is reached directly." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+
+  <!-- Tape client — Keystone consumes Tape for ALL market + account data (never Schwab
+       directly). The base URL is per-environment (point a dev keystone at the dev Tape).
+       The client credential pair is the per-service registry entry minted ON THE TAPE SIDE
+       (scopes market,account); until it is minted, health reports tape state but market
+       calls will be refused by an enforcement-enabled Tape. -->
+  <Config Name="TAPE_BASE_URL" Target="TAPE_BASE_URL" Default="" Mode="" Description="Base URL of the Tape deployment THIS instance consumes — e.g. http://&lt;tape-host&gt;:8000 or https://tape-dev.your-domain.example. NOTE: Tape validates the Host header (its TRUSTED_HOSTS variable) — the host/IP in this URL must be on THAT allowlist or Tape answers 400." Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="TAPE_CLIENT_ID" Target="TAPE_CLIENT_ID" Default="" Mode="" Description="Per-service client id registered on the Tape side (the keystone-backend entry; scopes market,account). Blank until minted — Keystone boots fine, but market calls need it once Tape enforces its client registry." Type="Variable" Display="always" Required="false" Mask="false"/>
+  <Config Name="TAPE_CLIENT_SECRET" Target="TAPE_CLIENT_SECRET" Default="" Mode="" Description="Secret paired with TAPE_CLIENT_ID (minted on the Tape side)." Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="TAPE_API_KEY" Target="TAPE_API_KEY" Default="" Mode="" Description="LEGACY shared key honored by pre-enforcement Tape deployments only; leave blank when the client-id pair is set." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+
+  <!-- App secrets. Variable names match the shipped app config (app/config.py is the SSOT);
+       the auth/encryption flows that USE them land with Module 0 (Core) — set strong random
+       values at creation so the container never runs with a guessable secret. Because this is
+       a TemplateURL-tracked template, later additions merge into an existing container on its
+       Edit page (no recreate). -->
+  <Config Name="JWT_SECRET_KEY" Target="JWT_SECRET_KEY" Default="" Mode="" Description="Signing secret for JWT access + MFA step tokens — ONE key (refresh 'rotation' issues a new token, not a second signing key). MINIMUM 32 characters, ENFORCED: shorter (or blank) and every auth endpoint answers 503 fail-closed. Generate: python -c &quot;import secrets; print(secrets.token_urlsafe(48))&quot;" Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="FILE_ENCRYPTION_KEY" Target="FILE_ENCRYPTION_KEY" Default="" Mode="" Description="AES-256 (base64 Fernet) key for the file vault (personal documents at rest) — also the local KMS service key wrapping stored secrets (TOTP MFA seeds). Blank = MFA enrollment answers 503. Generate: python -c &quot;from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())&quot;" Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="KEYSTONE_API_KEYS" Target="KEYSTONE_API_KEYS" Default="" Mode="" Description="Comma-separated API keys for Keystone's own HTTP surface (frontend / integrations). BLANK = OPEN — acceptable only while nothing but you can reach the container; set before exposing it. Interim mechanism until Module 0 JWT auth replaces it." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <!-- Per-tenant KMS / key-management vars are intentionally NOT declared: _000 mandates a KMS
+       interface but the impl (Vault / TPM / cloud) is an unmade prod-era decision. They merge in
+       via the Edit page when the key service is chosen. -->
+
+  <!-- Email-code MFA (Gmail SMTP). PROVISIONAL names; optional (only for the email MFA method). -->
+  <Config Name="SMTP_HOST" Target="SMTP_HOST" Default="" Mode="" Description="PROVISIONAL. SMTP host for email-code MFA (e.g. smtp.gmail.com)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="SMTP_PORT" Target="SMTP_PORT" Default="587" Mode="" Description="PROVISIONAL. SMTP port" Type="Variable" Display="advanced" Required="false" Mask="false">587</Config>
+  <Config Name="SMTP_USER" Target="SMTP_USER" Default="" Mode="" Description="PROVISIONAL. SMTP username" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="SMTP_PASSWORD" Target="SMTP_PASSWORD" Default="" Mode="" Description="PROVISIONAL. SMTP password / app password" Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="SMTP_FROM" Target="SMTP_FROM" Default="" Mode="" Description="PROVISIONAL. From address for MFA emails" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+
+  <!-- Runtime tuning -->
+  <Config Name="LOG_LEVEL" Target="LOG_LEVEL" Default="info" Mode="" Description="App log level (debug/info/warning/error)" Type="Variable" Display="advanced" Required="false" Mask="false">info</Config>
+  <Config Name="WEB_CONCURRENCY" Target="WEB_CONCURRENCY" Default="2" Mode="" Description="Gunicorn worker count (Keystone scales with workers; no shared-upstream pin like Tape)" Type="Variable" Display="advanced" Required="false" Mask="false">2</Config>
+</Container>

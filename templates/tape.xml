@@ -18,9 +18,12 @@
   THREE DELIBERATE EXCLUSIONS, so their absence reads as a decision rather than an oversight:
     - BACKUP_DIR — represented as the /backups PATH MOUNT below, never as a Variable, because
       the two must never be able to disagree about where dumps land.
-    - The ALERT_* family — owned by the FLEET alerting standard rather than by this service,
-      and configured through the shared file mounted read-only at /kw_shared. They are pending
-      a fleet-wide redesign and are deliberately not surfaced as per-container Variables.
+    - The ALERT_* family (and TAPE_OPS_LOG) — read from the ENVIRONMENT by the shared fleet
+      alerting module, not from the /kw_shared file; only the EMAIL/SMTP keys come from that
+      file. They are owned by the fleet alerting standard rather than by this service and are
+      pending a fleet-wide redesign, so they are deliberately not surfaced per-container here.
+      Until that lands, the ntfy channel is set through NTFY_URL below and email through the
+      /kw_shared mount.
     - TAPE_BUILD_VERSION / _SHA / _TIME — stamped into the image by the release workflow. They
       describe the artifact; setting them by hand would only make /v1/health report a lie.
 
@@ -28,8 +31,13 @@
   as an EMPTY STRING whether or not it was filled in, so the app treats a blank as "use the
   shipped default" for everything here (a deliberate class-wide guard, tape#128) EXCEPT
   BACKUP_TIME, which is Required and fails closed — see its entry. Note that a blank and a
-  SPACE are NOT the same thing: a space is a value, and on a numeric or true/false Variable it
-  stops the container at startup with an error naming the field.
+  SPACE are not always the same thing: on a NUMBER or true/false Variable a space is a value and
+  stops the container at startup with an error naming the field, while on the path, timezone and
+  schedule Variables a space is treated as blank and rescued to the default.
+
+  ⚠️ A blank Variable marked Required does NOT stop the container — Unraid does not enforce
+  that, and the app falls back to its own default. DB_PASSWORD blank connects with the default
+  password rather than failing; set it.
 -->
 <Container version="2">
   <Name>tape</Name>
@@ -164,7 +172,7 @@
 
   <!-- ===== Upstream rate budget ===== -->
   <Config Name="SCHWAB_RATE_PER_MIN" Target="SCHWAB_RATE_PER_MIN" Default="750" Mode="" Description="Total upstream read budget per minute, across every lane. Set against a MEASURED ceiling rather than a documented one: the upstream publishes no rate-limit headers and no retry hint, and rejections were first observed starting around 790 calls a minute, with 705 sustained cleanly. 750 sits below that wall. Also tunable at runtime through the admin API." Type="Variable" Display="advanced" Required="false" Mask="false">750</Config>
-  <Config Name="SCHWAB_BULK_RATE_PER_MIN" Target="SCHWAB_BULK_RATE_PER_MIN" Default="650" Mode="" Description="The slice of the budget above that background and bulk work may use, leaving the remainder as guaranteed headroom for live requests. ⚠️ MUST STAY BELOW SCHWAB_RATE_PER_MIN — a reserve larger than the total would let bulk work consume everything and leave interactive callers no guaranteed share. Both the admin knob and the rate controller refuse that inversion." Type="Variable" Display="advanced" Required="false" Mask="false">650</Config>
+  <Config Name="SCHWAB_BULK_RATE_PER_MIN" Target="SCHWAB_BULK_RATE_PER_MIN" Default="650" Mode="" Description="The slice of the budget above that background and bulk work may use, leaving the remainder as guaranteed headroom for live requests. ⚠️ MUST STAY BELOW SCHWAB_RATE_PER_MIN — a reserve larger than the total would let bulk work consume everything and leave interactive callers no guaranteed share. The runtime admin knob refuses that inversion, but nothing validates it at STARTUP, so a value set here is applied as written — get it right in this field." Type="Variable" Display="advanced" Required="false" Mask="false">650</Config>
   <Config Name="AGG_CACHE_TTL_SECONDS" Target="AGG_CACHE_TTL_SECONDS" Default="900" Mode="" Description="How long the daily aggregate summaries are memoized. The daily cycle invalidates them explicitly, so this only bounds drift from out-of-band writes." Type="Variable" Display="advanced" Required="false" Mask="false">900</Config>
 
   <!-- ===== Access control ===== -->

@@ -34,27 +34,32 @@ by design — fill them in Unraid on import.
 
 The one template here that is not a service: a self-hosted GitHub Actions runner, **one
 instance per repository**. Nothing in it names a repository or a host — `ACCESS_TOKEN`,
-`REPO_URL`, `RUNNER_NAME` and `LABELS` are set per instance. Self-hosted minutes do not
-count against the account's Actions allowance, which is the whole reason to run one.
+`REPO_URL`, `RUNNER_NAME` and `LABELS` are set per instance. On a private repository its
+minutes do not count against the account's Actions allowance, which is the usual reason to
+run one (GitHub-hosted runners are already free for public repos).
 
-Three things are easy to get wrong; all three are spelled out in the template's own
-Overview and field descriptions, which is where an operator actually reads them (Unraid
-renders those and never renders XML comments).
+Three things are easy to get wrong. All three are spelled out in the template's own
+`<Config Description>` fields, which is deliberate: Unraid never renders XML comments, and
+`sync-templates.py` reconciles `<Config>` elements only — so for a container that already
+exists, edits to `<Overview>` never arrive, and a field description is the one place that
+reaches both new and existing instances.
 
 - **Network mode defaults to `host`, deliberately.** The runner drives the *host's* Docker
-  daemon over the mounted socket, so a workflow's service container is never in the
-  runner's network namespace. On `bridge`, a workflow written the GitHub-hosted way — one
-  that talks to its service on `localhost` — cannot find it there even though the service
-  is up and healthy. It is still reachable via the docker bridge gateway, but only after a
-  workflow change; `host` keeps existing workflows working as written. Measured on
-  keystone#43, where the daemon had genuinely published the port (`-p 5432:5432`) and the
-  steps still could not see it.
+  daemon over the mounted socket, so a service container's published port lands in the
+  **host's** network namespace. A bridge-mode container has its own namespace, so its
+  `localhost` is not the host's, and a workflow written the GitHub-hosted way cannot find
+  its service there even though the service is up and healthy. Measured on a real cutover,
+  where the daemon had genuinely published the port (`-p 5432:5432`) and the job's steps
+  still could not see it — so the usual "the port was never published" explanation did not
+  apply. Note the converse still bites: `host` mode does not publish a port the workflow
+  never asked for, and a bare `ports: - 5432` takes a *random* host port.
 - **`RUNNER_NAME` and `LABELS` appear in public workflow logs**, so neither should name the
   machine.
 - **The socket mount is host root.** A workflow running here can do anything the host's
-  daemon can, and can read the PAT out of its own environment. Point a runner only at
-  repositories whose workflow code you control — never at one where a fork pull request can
-  run attacker-authored code.
+  daemon can, and can read the PAT out of `/proc/1/environ` or `docker inspect` (the image
+  un-exports it, so it is not in a step's own environment — but that is not containment).
+  Point a runner only at repositories whose workflow code you control — never at one where
+  a fork pull request can run attacker-authored code.
 
 ## Scripts
 

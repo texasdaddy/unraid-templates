@@ -20,12 +20,27 @@ https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/icons/<name>.
 | reauth-bot | `icons/reauth_bot.png` | `templates/reauth-bot.xml` |
 | keystone | `icons/keystone.png` | `templates/keystone.xml` |
 | keystone-db | `icons/keystone_db.png` | `templates/keystone-db.xml` |
+| github-runner (one instance per repo) | `icons/running-icon-free-vector.png` | `templates/github-runner.xml` |
 
 Every template + icon in this repo must have a row here — keep this table in sync when adding either (the reauth-bot icon was added 2026-07-25 but not listed until 2026-07-27). Scripts have their own manifest under [Scripts](#scripts); the same rule applies there.
 
 ## Templates
 `templates/` holds the Unraid container templates (`<Icon>` pre-set). Secrets are blank
 by design — fill them in Unraid on import.
+
+### `github-runner.xml`
+
+The one template here that is not a service: a self-hosted GitHub Actions runner, one
+instance per repository (set `RUNNER_NAME` and `LABELS` per instance; nothing in the
+template names a repo or a host). Self-hosted minutes do not count against the account's
+Actions allowance, which is the whole reason to run one.
+
+Two things in it are easy to get wrong and are documented in the file itself. **Network
+mode defaults to `host` deliberately** — a runner on `bridge` starts service containers
+on the host and then cannot reach them, because the job's steps run inside the runner's
+own network namespace where `localhost` means something else entirely; the failure looks
+like a healthy service refusing every connection (keystone#43). And **`RUNNER_NAME` and
+`LABELS` appear in public workflow logs**, so neither should name the machine.
 
 **This repo is registered as a template repository on the Unraid host** (`/boot/config/plugins/dockerMan/template-repos`), so Unraid tracks it: the templates appear under **Docker → Add Container** and, because each template carries a `<TemplateURL>` to its raw file, Unraid **merges new `<Config>` variables into an existing container when its Edit page is opened** (no purge/redeploy needed — that's the CA update path; "check for update" only checks the image). GitHub-raw caches ~5 min.
 

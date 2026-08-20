@@ -28,21 +28,33 @@ Every template + icon in this repo must have a row here — keep this table in s
 `templates/` holds the Unraid container templates (`<Icon>` pre-set). Secrets are blank
 by design — fill them in Unraid on import.
 
+**This repo is registered as a template repository on the Unraid host** (`/boot/config/plugins/dockerMan/template-repos`), so Unraid tracks it: the templates appear under **Docker → Add Container** and, because each template carries a `<TemplateURL>` to its raw file, Unraid **merges new `<Config>` variables into an existing container when its Edit page is opened** (no purge/redeploy needed — that's the CA update path; "check for update" only checks the image). GitHub-raw caches ~5 min.
+
 ### `github-runner.xml`
 
-The one template here that is not a service: a self-hosted GitHub Actions runner, one
-instance per repository (set `RUNNER_NAME` and `LABELS` per instance; nothing in the
-template names a repo or a host). Self-hosted minutes do not count against the account's
-Actions allowance, which is the whole reason to run one.
+The one template here that is not a service: a self-hosted GitHub Actions runner, **one
+instance per repository**. Nothing in it names a repository or a host — `ACCESS_TOKEN`,
+`REPO_URL`, `RUNNER_NAME` and `LABELS` are set per instance. Self-hosted minutes do not
+count against the account's Actions allowance, which is the whole reason to run one.
 
-Two things in it are easy to get wrong and are documented in the file itself. **Network
-mode defaults to `host` deliberately** — a runner on `bridge` starts service containers
-on the host and then cannot reach them, because the job's steps run inside the runner's
-own network namespace where `localhost` means something else entirely; the failure looks
-like a healthy service refusing every connection (keystone#43). And **`RUNNER_NAME` and
-`LABELS` appear in public workflow logs**, so neither should name the machine.
+Three things are easy to get wrong; all three are spelled out in the template's own
+Overview and field descriptions, which is where an operator actually reads them (Unraid
+renders those and never renders XML comments).
 
-**This repo is registered as a template repository on the Unraid host** (`/boot/config/plugins/dockerMan/template-repos`), so Unraid tracks it: the templates appear under **Docker → Add Container** and, because each template carries a `<TemplateURL>` to its raw file, Unraid **merges new `<Config>` variables into an existing container when its Edit page is opened** (no purge/redeploy needed — that's the CA update path; "check for update" only checks the image). GitHub-raw caches ~5 min.
+- **Network mode defaults to `host`, deliberately.** The runner drives the *host's* Docker
+  daemon over the mounted socket, so a workflow's service container is never in the
+  runner's network namespace. On `bridge`, a workflow written the GitHub-hosted way — one
+  that talks to its service on `localhost` — cannot find it there even though the service
+  is up and healthy. It is still reachable via the docker bridge gateway, but only after a
+  workflow change; `host` keeps existing workflows working as written. Measured on
+  keystone#43, where the daemon had genuinely published the port (`-p 5432:5432`) and the
+  steps still could not see it.
+- **`RUNNER_NAME` and `LABELS` appear in public workflow logs**, so neither should name the
+  machine.
+- **The socket mount is host root.** A workflow running here can do anything the host's
+  daemon can, and can read the PAT out of its own environment. Point a runner only at
+  repositories whose workflow code you control — never at one where a fork pull request can
+  run attacker-authored code.
 
 ## Scripts
 

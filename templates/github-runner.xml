@@ -1,14 +1,22 @@
 <?xml version="1.0"?>
 <Container version="2">
   <Name>github-runner</Name>
-  <Repository>myoung34/github-runner:latest</Repository>
+  <Repository>myoung34/github-runner:2.336.0-ubuntu-noble</Repository>
   <Registry>https://hub.docker.com/r/myoung34/github-runner</Registry>
   <Network>host</Network>
   <Shell>sh</Shell>
   <Privileged>false</Privileged>
   <Support/>
   <Project>https://github.com/myoung34/docker-github-actions-runner</Project>
-  <Overview>Self-hosted GitHub Actions runner. Minutes on a self-hosted runner do not count against the account's Actions allowance, which is the point of running one: a repository whose CI runs a full test suite against a real database service container is what consumes that allowance. ONE neutral template for the whole fleet — nothing here is specific to a repository or a host. At creation set: ACCESS_TOKEN (a fine-grained PAT with Administration: read+write on the target repo), REPO_URL, RUNNER_NAME, and LABELS. Each instance registers itself on start and appears under the repository's Settings -&gt; Actions -&gt; Runners; a workflow targets it with runs-on: [self-hosted, &lt;one of your LABELS&gt;]. NETWORK MODE IS LOAD-BEARING, see the note on the Docker socket below — the default of host is deliberate, and a bridge runner cannot reach service containers. One runner executes ONE job at a time; add a second instance (a different Name and RUNNER_NAME) for concurrency.</Overview>
+  <Overview>Self-hosted GitHub Actions runner, one instance per repository. Minutes on a self-hosted runner do not count against the account's Actions allowance, which is the reason to run one: a repository whose CI runs a full test suite against a real database service container is what consumes that allowance. The template itself names no repository and no host — set ACCESS_TOKEN, REPO_URL, RUNNER_NAME and LABELS per instance. The runner registers on start and appears under the repository's Settings -&gt; Actions -&gt; Runners; a workflow selects it with runs-on: [self-hosted, &lt;your label&gt;].
+
+TWO THINGS ARE EASY TO GET WRONG.
+
+(1) NETWORK MODE. The default of host is deliberate. This container drives the host's Docker daemon through the mounted socket, so a service container declared by a workflow is created by that daemon and is NOT in this container's network namespace. On bridge, a workflow written the GitHub-hosted way — talking to its service on localhost — cannot reach it there, even though the service is running and healthy; it is reachable via the docker bridge gateway, but only after a workflow change. host makes localhost mean the same thing it means on a GitHub-hosted runner, so existing workflows keep working unchanged. Note also that a service is only published to a host port if the workflow asks: a bare `ports: - 5432` takes a RANDOM host port (read it from job.services.&lt;id&gt;.ports), and a fixed localhost:5432 needs `ports: - 5432:5432`. The cost of host mode is that workflow steps share the host's loopback, so a job can reach anything bound to 127.0.0.1 on the host, including the Unraid webGUI, that a bridge container could not.
+
+(2) SECURITY. The Docker socket mount gives a workflow control of the host's daemon, which is host root, and any job can also read this container's own environment (including ACCESS_TOKEN). Nothing here is a containment boundary and EPHEMERAL does not make one. Run only repositories whose workflow code you control, and do not point a runner at a public repository where a fork pull request can run attacker-authored workflow code.
+
+One runner executes ONE job at a time. For concurrency add a second instance with its own Name, its own RUNNER_NAME, and — if you use the optional work directory — its own directory pair.</Overview>
   <Category>Tools:Utilities</Category>
   <WebUI/>
   <TemplateURL>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/templates/github-runner.xml</TemplateURL>
@@ -16,51 +24,38 @@
   <ExtraParams/>
   <PostArgs/>
   <DateInstalled/>
-  <Description>Self-hosted GitHub Actions runner (neutral template). Set the PAT, the repository URL, a runner name and labels at creation; mount the Docker socket so workflow jobs can build images and start service containers.</Description>
+  <Description>Self-hosted GitHub Actions runner (neutral template, one instance per repository). Set the PAT, repository URL, runner name and labels at creation. Network mode host is deliberate; see the Overview.</Description>
 
-  <!-- ⭐ THE DOCKER SOCKET AND THE NETWORK MODE ARE ONE DECISION, NOT TWO.
-       Mounting the socket lets a job build images and start `services:` containers: the
-       runner asks the HOST's daemon to create them, and the daemon publishes their ports on
-       the HOST.
-       The catch is where the job's own steps run. They run INSIDE this container, so if this
-       container is on `bridge` it has its own network namespace, and `localhost:PORT` in a
-       step means that namespace's loopback — where nothing is listening. A service container
-       comes up perfectly healthy and every connection to it is refused.
-       That is measured, not theoretical (keystone#43): a suite that passes on GitHub-hosted
-       runners returned 5 failures and 106 errors, every one of them
-       `connection to server at "127.0.0.1", port 5432 failed: Connection refused`, while the
-       320 tests needing no database passed — with the log reporting `postgres service is
-       healthy` a minute earlier.
-       `host` is therefore the DEFAULT here, so a workflow written for GitHub-hosted runners
-       keeps working unchanged. Two consequences worth knowing before changing it:
-         1. `host` shares the host's network stack, so a service container's published port
-            occupies that port ON THE HOST for the life of the job. Two host-networked
-            runners running database-backed jobs AT THE SAME TIME collide on it.
-         2. if that collision becomes real, the answer is the optional Work Directory mount
-            below, not a return to `bridge`. -->
-  <Config Name="Docker socket" Target="/var/run/docker.sock" Default="/var/run/docker.sock" Mode="rw" Description="REQUIRED for any workflow that builds an image or declares a services: container. Grants this container control of the host's Docker daemon, which is effectively host root — run this only for repositories whose workflow code you trust, since a workflow can run anything the socket allows. Remove it only if every workflow you run is pure script." Type="Path" Display="always" Required="true" Mask="false">/var/run/docker.sock</Config>
+  <!-- RATIONALE ONLY. Unraid renders Overview, Description and each Config Description; it
+       never renders XML comments, and sync-templates.py reconciles Config elements into the
+       operator's my-*.xml. So every fact an operator must act on lives in those fields above
+       and below, not here.
+       Why host is the default, recorded once: measured on a real cutover (keystone#43), a
+       suite green on GitHub-hosted runners returned 5 failures and 106 errors, every one of
+       them `connection to server at "127.0.0.1", port 5432 failed: Connection refused`, a
+       minute after the runner logged `postgres service is healthy`. The obvious competing
+       explanation, that the port was never published, was ruled out by reading the daemon
+       command the runner issued: it contained `-p 5432:5432`. The port was on the host; the
+       steps simply were not.
+       The image tag is pinned rather than floating: this is the one container in this repo
+       that is effectively host root, so an unreviewed upstream rebuild should not arrive on
+       the next pull. The runner binary self-updates regardless of the image tag. -->
 
-  <!-- Registration. The token is the only secret here and it is never baked into the
-       template: it is entered per instance in Unraid and stored in that container's own
-       config. Use a FINE-GRAINED PAT scoped to the single target repository with
-       Administration: read and write (the permission that mints a runner registration
-       token), not a classic token carrying blanket `repo` scope. -->
-  <Config Name="ACCESS_TOKEN" Target="ACCESS_TOKEN" Default="" Mode="" Description="GitHub Personal Access Token, used ONCE PER START to obtain a short-lived runner registration token. Fine-grained, scoped to the target repository only, with Administration: read and write. It is not the runner's identity — the runner authenticates with its own credential after registering — so this token can be rotated without disturbing an already-registered runner until its next restart." Type="Variable" Display="always" Required="true" Mask="true"/>
-  <Config Name="REPO_URL" Target="REPO_URL" Default="" Mode="" Description="Full URL of the repository this runner serves, e.g. https://github.com/&lt;owner&gt;/&lt;repo&gt; . Must match the scope below: a repo-scoped runner needs a repository URL, an org-scoped one needs the organisation URL." Type="Variable" Display="always" Required="true" Mask="false"/>
-  <Config Name="RUNNER_NAME" Target="RUNNER_NAME" Default="" Mode="" Description="The name this runner registers under, e.g. &lt;runner-name&gt;. It is shown in the repository's runner list AND in the job log of every workflow run — on a PUBLIC repository those logs are world-readable, so choose a name that reveals nothing about the machine (prefer &lt;repo&gt;-runner-1 over anything naming the host). Must be unique within the scope; a second instance needs a different one." Type="Variable" Display="always" Required="true" Mask="false"/>
-  <Config Name="RUNNER_SCOPE" Target="RUNNER_SCOPE" Default="repo" Mode="" Description="What REPO_URL points at: repo (a single repository) or org (every repository in an organisation). Leave at repo unless you deliberately want one runner serving many repositories — an org runner accepts jobs from any of them, so it is only as trustworthy as the least trustworthy workflow in the org." Type="Variable" Display="always" Required="true" Mask="false">repo</Config>
-  <Config Name="LABELS" Target="LABELS" Default="self-hosted" Mode="" Description="Comma-separated labels a workflow selects this runner by, e.g. self-hosted or self-hosted,&lt;repo&gt;. `self-hosted`, `Linux` and `X64` are applied automatically and cannot be removed, so a bare runs-on: self-hosted already reaches every runner you own — give each runner ONE distinguishing label and target runs-on: [self-hosted, &lt;that label&gt;] once you have more than one. Same caution as RUNNER_NAME: labels appear in public workflow logs, so keep them neutral." Type="Variable" Display="always" Required="true" Mask="false">self-hosted</Config>
-  <Config Name="RUNNER_WORKDIR" Target="RUNNER_WORKDIR" Default="/tmp/runner/work" Mode="" Description="Where the runner checks code out INSIDE this container. Leave as-is unless you are also setting the optional Work Directory mount below, in which case the two must agree." Type="Variable" Display="advanced" Required="true" Mask="false">/tmp/runner/work</Config>
+  <Config Name="Docker socket" Target="/var/run/docker.sock" Default="/var/run/docker.sock" Mode="rw" Description="Required for any workflow that builds an image, declares a services: container, or uses an action that shells out to docker (build-push-action, buildx, testcontainers). It grants this container control of the host's Docker daemon, which is equivalent to root on the host: a workflow that runs here can start any container, mount any host path, and read this container's own environment. Mount it only for repositories whose workflow code you control." Type="Path" Display="always" Required="true" Mask="false">/var/run/docker.sock</Config>
 
-  <!-- OPTIONAL, and only for the collision case described above. Bind-mounting the work
-       directory at an IDENTICAL path on the host is what makes `container:` jobs possible:
-       the daemon can then mount the same workspace into a job container, the job joins the
-       per-job network, and it reaches a service by its ALIAS (`postgres:5432`) with no host
-       port published at all, so any number of runners can run database-backed jobs at once.
-       It costs a workflow change (a `container:` key, and service hostnames in place of
-       localhost), which is why it is not the default. The host path and RUNNER_WORKDIR must
-       agree, or the job container mounts an empty directory. -->
-  <Config Name="Work directory (optional)" Target="/tmp/runner" Default="" Mode="rw" Description="OPTIONAL and normally left EMPTY. Set it only to run jobs in a job container (the workflow `container:` key), and then the host path MUST be identical to the container path, with RUNNER_WORKDIR inside it — host /tmp/runner, container /tmp/runner, RUNNER_WORKDIR /tmp/runner/work. A mismatch does not error; the job container silently mounts an empty workspace." Type="Path" Display="advanced" Required="false" Mask="false"/>
-  <Config Name="EPHEMERAL" Target="EPHEMERAL" Default="" Mode="" Description="OPTIONAL. Set to true to make the runner accept exactly ONE job and then deregister, so nothing survives from one job to the next. That is the safer posture for anything running untrusted code, but it needs a restart policy that brings the container back after each job, or the runner simply disappears after one. Leave blank for a persistent runner." Type="Variable" Display="advanced" Required="false" Mask="false"/>
-  <Config Name="RUNNER_GROUP" Target="RUNNER_GROUP" Default="" Mode="" Description="OPTIONAL. Runner group to register into; blank uses Default. Only meaningful for org-scoped runners." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="ACCESS_TOKEN" Target="ACCESS_TOKEN" Default="" Mode="" Description="GitHub Personal Access Token used to mint short-lived runner registration tokens. Fine-grained, scoped to this ONE repository, with Administration: read and write (the permission that mints a registration token) — not a classic token with blanket repo scope. It is used at START to register and again at STOP to deregister, so rotating it while a container is running leaves that runner unable to deregister and a stale offline entry on the repository's runner page; rotate and restart while the old token still works. With EPHEMERAL set it is used on every job, not only at restart. TREAT IT AS EXPOSED TO YOUR WORKFLOWS: Mask hides it in this UI only, Unraid stores it in plain text in the container's template on the flash drive, and any job on this runner can read it from its own environment. A compromised workflow is a compromised PAT." Type="Variable" Display="always" Required="true" Mask="true"/>
+
+  <Config Name="REPO_URL" Target="REPO_URL" Default="" Mode="" Description="Full URL of the repository this runner serves: https://github.com/&lt;owner&gt;/&lt;repo&gt; . This template is repository-scoped only (see RUNNER_SCOPE), so this is always a repository URL." Type="Variable" Display="always" Required="true" Mask="false"/>
+
+  <Config Name="RUNNER_NAME" Target="RUNNER_NAME" Default="" Mode="" Description="The name this runner registers under, e.g. &lt;repo&gt;-runner-1. It appears in the repository's runner list AND in the job log of every workflow run — on a PUBLIC repository those logs are world-readable, so pick a name that reveals nothing about the machine. Must be unique: the runner registers with --replace, so a second instance sharing a name does NOT error, it silently takes over the first one's registration and the two then fight over one identity." Type="Variable" Display="always" Required="true" Mask="false"/>
+
+  <Config Name="LABELS" Target="LABELS" Default="self-hosted" Mode="" Description="Comma-separated labels a workflow selects this runner by. The runner also adds self-hosted, Linux and X64 itself (unless registered with NO_DEFAULT_LABELS, which this template does not expose), and once registered those cannot be deleted from its page. So the shipped default of self-hosted is a placeholder that adds nothing: a bare runs-on: self-hosted already reaches every runner available to that repository. CHANGE IT before you have a second runner — give each one a distinguishing label, e.g. self-hosted,&lt;repo&gt;, and target runs-on: [self-hosted, &lt;that label&gt;]. Labels appear in public workflow logs, so keep them neutral." Type="Variable" Display="always" Required="true" Mask="false">self-hosted</Config>
+
+  <Config Name="RUNNER_SCOPE" Target="RUNNER_SCOPE" Default="repo" Mode="" Description="Leave at repo. The image also accepts org and ent, but those modes ignore REPO_URL and read ORG_NAME / ENTERPRISE_NAME instead, and this template deliberately exposes neither — setting org or ent here produces a confusing registration failure rather than a clear error. An org-wide runner also accepts jobs from every repository in the org, so it is only as trustworthy as the least trustworthy workflow there." Type="Variable" Display="always" Required="true" Mask="false">repo</Config>
+
+  <Config Name="RUNNER_WORKDIR" Target="RUNNER_WORKDIR" Default="/tmp/runner/work" Mode="" Description="Where the runner checks code out INSIDE this container. Leave as-is unless you are also setting the optional work directory mount below, in which case the two must agree and each runner on the host needs its own." Type="Variable" Display="advanced" Required="true" Mask="false">/tmp/runner/work</Config>
+
+  <Config Name="Work directory (optional)" Target="/tmp/runner" Default="" Mode="rw" Description="OPTIONAL, normally left EMPTY. Set it only to run jobs inside a job container (the workflow container: key), which needs the same workspace path to exist on the host and in this container. Then the host path and the container path MUST be the identical string, with RUNNER_WORKDIR inside it. RUNNERS ON ONE HOST MUST NEVER SHARE A WORK DIRECTORY — give each its own trio (container /tmp/runner-1, host &lt;persistent path&gt;/runner-1, RUNNER_WORKDIR /tmp/runner-1/work) or concurrent jobs corrupt each other's checkouts. On Unraid /tmp is RAM-backed, so point the HOST side at persistent storage, not at the host's own /tmp. A path mismatch does not raise a clear error; it usually surfaces as file-not-found failures inside the job container." Type="Path" Display="advanced" Required="false" Mask="false"/>
+
+  <Config Name="EPHEMERAL" Target="EPHEMERAL" Default="" Mode="" Description="OPTIONAL. Set to true to accept exactly ONE job and then deregister; it needs a restart policy that brings the container back, or the runner disappears after one job. What does NOT carry over is the registration. What DOES carry over: this container's filesystem if the same container restarts, any mounted work directory, and every image, volume and build-cache entry the job created on the host daemon. It is not a containment boundary — with the Docker socket mounted a job is host root either way — so it is not what makes running untrusted or fork-pull-request code safe. Nothing here is." Type="Variable" Display="advanced" Required="false" Mask="false"/>
 </Container>

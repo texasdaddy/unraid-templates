@@ -238,10 +238,11 @@ def update_instance(inst_path, tpl_root, backup_dir):
     if unchanged and not (st["kept_flag"] or st["dupes"]):
         print(f"    = {fname:<22} up to date  ({st['retained']} values, nothing to change)")
         return
-    # "metadata refreshed" must be true of a run that actually wrote and actually only
-    # changed metadata. dupes belongs here because merge() DROPS all but the first duplicate,
-    # which is a variable removed; and `unchanged` because nothing was refreshed at all.
-    meta_only = not (st["added"] or st["deleted"] or st["kept_flag"] or st["dupes"]) and not unchanged
+    # "metadata refreshed ... no variables added or removed" must be true of the run that
+    # prints it. dupes belongs in here because merge() DROPS all but the first duplicate,
+    # which IS a variable removed. `unchanged` needs no term of its own: the early return
+    # above only falls through when kept_flag or dupes is set, either of which zeroes this.
+    meta_only = not (st["added"] or st["deleted"] or st["kept_flag"] or st["dupes"])
     if unchanged:
         # nothing to write, but there IS something to say - fall through to the warnings
         print(f"    = {fname:<22} no write needed, but see below")

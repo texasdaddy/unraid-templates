@@ -255,7 +255,9 @@ def test_metadata_refreshed_is_only_claimed_when_that_is_what_happened(sync, ins
     capsys.readouterr()
     sync.update_instance(str(p3), template(desc="SAME"), str(tmp_path / "b3"))
     out = capsys.readouterr().out
-    if "duplicate keys" in out:
-        assert "no variables added or removed" not in out, (
-            "claimed no variables were removed while dropping a duplicate"
-        )
+    # unconditional: guarding this on "duplicate keys" in out meant deleting the dupes
+    # bookkeeping entirely left the whole suite green, with this assertion never running.
+    assert "duplicate keys" in out, "a duplicate-keyed Config must be reported"
+    assert "no variables added or removed" not in out, (
+        "claimed no variables were removed while dropping a duplicate"
+    )

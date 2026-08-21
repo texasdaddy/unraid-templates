@@ -97,11 +97,12 @@ from typing import NamedTuple
 # --------------------------------------------------------------------------- the denylist
 # SHAPES ONLY. See the module docstring: a real literal in this list would make this file the
 # leak. Every entry MUST have at least one deny case in `_MUST_FAIL` and at least one near-miss
-# in `_MUST_PASS` — a shape that looks like it and must NOT fire. `selftest` enforces both
-# halves: it fails on a pattern with no deny case (nothing then proves the pattern still bites)
-# and on any `_MUST_PASS` sample that trips (which is how a pattern widened until it matches
-# ordinary text gets caught). The near-miss half is the one that is easy to skip and the one
-# that catches widening, so add it with the pattern, not later.
+# in `_MUST_PASS` — a shape that looks like it and must NOT fire. What `selftest` actually
+# enforces: it fails on a pattern with no deny case (nothing would then prove the pattern still
+# bites), and it fails on any `_MUST_PASS` sample that trips (which is how a pattern widened
+# until it matches ordinary text gets caught). It CANNOT check that a given pattern has a
+# near-miss, because `_MUST_PASS` is a flat list with no pattern labels — that half is
+# convention, and it is the half that catches widening, so add it with the pattern, not later.
 PATTERNS: list[tuple[str, str]] = [
     # RFC1918. Left-bounded so a decimal doesn't trip it; the right bound must still reject a
     # 5th octet while ALLOWING a sentence-final period — `the host is <addr>.` is the most

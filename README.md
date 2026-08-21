@@ -28,7 +28,7 @@ Every template + icon in this repo must have a row here — keep this table in s
 `templates/` holds the Unraid container templates (`<Icon>` pre-set). Secrets are blank
 by design — fill them in Unraid on import.
 
-**`sync-templates.py` is the only thing that carries a template change toward a container that already exists — and it carries it as far as that container's *saved template*, not into the container itself.** Stock Unraid never merges a template change into an existing container, and that is deliberate rather than a bug: in `emhttp/plugins/dynamix.docker.manager/include/DockerClient.php`, `updateUserTemplate()` opens with `// Don't update templates, but leave code in place for future reference` and returns — on every release from 6.12 to current. Its sibling `downloadTemplates()` became a no-op only in **7.3.0**; on 6.12.x—7.2.x it is live, so registering this repo in `/boot/config/plugins/dockerMan/template-repos` there really does mirror it into `templates-usb` and refresh the *Default templates* list — but that path feeds **new** containers only (and deletes templates it no longer finds), and never touches an existing `my-*.xml`. Templates from this repo appear under **Docker → Add Container** in the *User templates* group because `sync-templates.py` seeds a `my-<name>.xml` for each; `<TemplateURL>` earns its keep by letting that script map an instance back to its template. "Check for update" only checks the image, never the template. **So: edit a template here, run `sync-templates.py`, then open the container's Edit page and press Apply.** The script rewrites `my-<name>.xml`; the container is rebuilt from that file by Apply, and equally by any container **Update** or *force update* — but never on its own. "Check for update" compares the image only.
+**`sync-templates.py` is the only thing that carries a template change toward a container that already exists — and it carries it as far as that container's *saved template*, not into the container itself.** Stock Unraid never merges a template change into an existing container, and that is deliberate rather than a bug: in `emhttp/plugins/dynamix.docker.manager/include/DockerClient.php`, `updateUserTemplate()` opens with `// Don't update templates, but leave code in place for future reference` and returns — on every release from 6.12 to current. Its sibling `downloadTemplates()` became a no-op only in **7.3.0**; on 6.12.x—7.2.x it is live, so registering this repo in `/boot/config/plugins/dockerMan/template-repos` there really does mirror it into `templates-usb` and refresh the *Default templates* list — but that path only populates the Add Container list (and deletes templates it no longer finds); it never touches an existing `my-*.xml`. Templates from this repo appear under **Docker → Add Container** in the *User templates* group because `sync-templates.py` seeds a `my-<name>.xml` for each; `<TemplateURL>` earns its keep by letting that script map an instance back to its template. "Check for update" only checks the image, never the template. **So: edit a template here, run `sync-templates.py`, then open the container's Edit page and press Apply.** The script rewrites `my-<name>.xml`; the container is rebuilt from that file by Apply, and equally by any container **Update** or *force update* — but never on its own. "Check for update" compares the image only.
 
 ### `github-runner.xml`
 
@@ -76,12 +76,11 @@ there is (see above). What follows is orientation, not the reference.
 - **Do not point this runner at a public repository.** A job on it is root in a privileged
   container, and on a public repo anyone can open a fork pull request. If outside
   contributions are in play at all, go to Settings → Actions → General and, under the fork
-  pull-request approval settings, choose **Require approval for all external contributors** (the default is narrower still: first-time contributors new to GitHub); the first-time-contributors default is not enough here.
+  pull-request approval settings, choose **Require approval for all external contributors**. The default — *Require approval for first-time contributors* — is not enough here.
 - **`RUNNER_NAME` is printed in every job log**, so never name it for the machine. A runner's
   full registered label set is not printed the same way, but the labels a job *requests* are
-  shown on the run — that line comes from GitHub's side and appears in the web view rather than in
-  the downloaded log archive — and the `runs-on:` line naming them is in the workflow file,
-  world-readable on a public repo. Same conclusion for labels, by a different route.
+  shown on the run in a `Requested labels` line that GitHub's side emits, and the `runs-on:` line
+  naming them is in the workflow file, world-readable on a public repo. Same conclusion for labels, by a different route.
 - **Known limit, measured:** a container the in-container daemon starts on a bridge network
   may have no return path to the network — on the runner this was measured on, attached to a
   *custom* Unraid network, the outbound SYN was forwarded and source-NATed out correctly and
@@ -89,7 +88,7 @@ there is (see above). What follows is orientation, not the reference.
   Workaround: `docker build --network=host` (inside the runner that means the *runner
   container's* namespace, not the Unraid host's — provided the runner is on Bridge).
   `services:` containers are unaffected. The template ships the plain bridge network, which
-  is the configuration that was *not* tested.
+  is the configuration it was *not* reproduced on.
 
 ## Scripts
 

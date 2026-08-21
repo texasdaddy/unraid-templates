@@ -680,11 +680,11 @@ def test_the_guard_carries_no_real_literal_denylist():
 def test_every_pattern_is_exercised():
     """`PATTERNS` says every entry MUST have a deny case AND a near-miss allow case.
 
-    `selftest()` enforces both halves already, and it is run by
-    `test_the_selftest_still_passes_through_the_CLI` — widening a pattern to `.*` fails it on
-    the `_MUST_PASS` corpus, which I checked rather than assumed. So this test is not the only
-    thing standing between a widened pattern and a green check, and it must not be described
-    as if it were.
+    `selftest()` enforces the deny half per pattern and fails on any `_MUST_PASS` sample that
+    trips, and it is run by `test_the_selftest_still_passes_through_the_CLI` — widening a
+    pattern to `.*` fails it on the corpus, which was checked rather than assumed. What
+    nothing enforces is that a given pattern HAS a near-miss: `_MUST_PASS` is unlabelled, so
+    deleting every near-miss for one pattern leaves selftest green. That half is convention.
 
     What it adds is a named, specific failure inside the suite: selftest reports a wall of
     false-positive lines, this says which pattern label has no deny case. Keep it cheap and

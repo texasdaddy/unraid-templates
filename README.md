@@ -98,12 +98,20 @@ there is (see above). What follows is orientation, not the reference.
 | Script | What it is | Where it runs |
 |---|---|---|
 | `scripts/sync-templates.py` | Reconciles the Unraid host's `my-*.xml` container templates against this repo | Unraid host, via **User Scripts** |
-| `scripts/check_no_internal_info.py` | Public-repo guard: fails on internal-looking **shapes** — RFC1918/CGNAT addresses, `.lan`/`.local`/`*.ts.net` hosts, the real Unraid share roots under `/mnt/` (`apps`, `user`, `cache`, `remotes`, `disks` — an arbitrarily-named pool is NOT matched), freemail addresses, bare UUIDs. It **cannot** see a bare hostname, codename or personal name; those have no shape, and a second guard held outside every repo is what catches them. Both layers are required, and green CI here is not clearance. | CI, on every PR, on push to `main`, and on `v*` tags — see the caveat below |
+| `scripts/check_no_internal_info.py` | Public-repo guard: fails on internal-looking **shapes** — RFC1918/CGNAT addresses, `.lan`/`.local`/`*.ts.net` hosts, the real Unraid share roots under `/mnt/` (`apps`, `user`, `cache`, `remotes`, `disks` — an arbitrarily-named pool is NOT matched), freemail addresses, bare UUIDs. It **cannot** see a bare hostname, codename or personal name; those have no shape, and a second guard held outside every repo is what catches them. Both layers are required, and green CI here is not clearance. | CI, on every PR, on push to `main`, and on `v*` tags — required by branch protection, see below |
 
-> **The guard is advisory, not enforcing.** It runs on every pull request and
-> fails loudly, but `main` has no branch protection and no rulesets, so nothing
-> stops a red run from being merged. Read the check before merging; do not treat
-> a leak as impossible because CI exists.
+> **The guard is enforcing now** (this was the other half of #4). `main` carries
+> branch protection requiring all three checks — `No internal info (public-repo
+> guard)`, `Leak-guard tests`, `Templates are well-formed XML` — with
+> `enforce_admins` on and `strict` (branches must be up to date) set, so a red run
+> cannot be merged, including by the owner.
+>
+> Two consequences worth knowing. **A job's `name:` is the status-check context**,
+> so renaming one of those three jobs does not fail its check — the required
+> context simply never reports and every PR sits BLOCKED with green jobs and
+> nothing to click. And **green CI still is not clearance**: this guard matches
+> shapes only, and a bare hostname, codename or personal name has no shape. That
+> is the project-side guard's job, and it is not run by CI.
 
 ### `sync-templates.py`
 

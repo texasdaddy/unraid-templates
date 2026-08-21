@@ -1,19 +1,22 @@
-"""sync-templates.py must propagate a DESCRIPTION-ONLY template edit.
+"""`sync-templates.py`: what it must write, what it must NOT write, and what it must SAY.
 
-This is the regression test for the bug the templates in this repo were silently built on
-top of. `update_instance` used to decide whether to write by asking whether the variable SET
-had changed:
+Two bugs in one week made this file necessary, and they are the same shape twice over —
+`merge()` computed the right answer and `update_instance` threw part of it away because the
+gate on the write asked the wrong question.
 
-    changed = st["added"] or st["deleted"] or st["kept_flag"]
+1. The gate was ``st["added"] or st["deleted"] or st["kept_flag"]``, so a template edit that
+   changed only a field's Description, Default, Display or Required was discarded. Every
+   operator-facing instruction in this repo lives in a `Description`, so the one edit the
+   templates exist to deliver was the one edit that could not arrive.
+2. Comparing content instead fixed that and broke the drift alarm: a variable the template
+   no longer defines but which still holds a value is copied *verbatim* into `merged`, so the
+   trees compare equal while `kept_flag` is non-empty. The `!! KEPT` line — which three
+   separate documents promise is loud, and which is a migration checklist's only pointer to
+   a mapping the operator must delete by hand — went silent on every run after the first.
 
-`merge()` computed the new metadata correctly and `update_instance` then discarded it, so an
-edit that only changed a field's Description, Default, Display or Required never reached the
-instance. Every operator-facing instruction in this repo lives in a `Description`, so the one
-edit the templates exist to deliver was the one edit that could not arrive.
-
-The two directions both matter, so both are asserted here: a metadata edit MUST be written,
-and an identical template MUST NOT be, because a script that rewrites unconditionally churns
-a backup file (holding the applied secrets) on every run.
+So the assertions below cover the whole surface, not just the bug of the day: writes,
+non-writes, the reported drift, the backup, and delete-as-necessary. Each one was checked by
+mutating `sync-templates.py` and confirming it goes red.
 """
 
 import importlib.util
@@ -25,93 +28,138 @@ import pytest
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "sync-templates.py"
 
-
-def load_sync():
-    spec = importlib.util.spec_from_file_location("sync_templates", SCRIPT)
-    mod = importlib.util.module_from_spec(spec)
-    saved = sys.argv
-    sys.argv = ["sync-templates.py"]          # the module reads argv at import
-    try:
-        spec.loader.exec_module(mod)
-    finally:
-        sys.argv = saved
-    return mod
-
-
-TEMPLATE = """<?xml version="1.0"?>
-<Container version="2">
-  <Name>widget</Name>
-  <Repository>example/widget:1</Repository>
-  <Network>bridge</Network>
-  <TemplateURL>https://example.invalid/templates/widget.xml</TemplateURL>
-  <Config Name="TOKEN" Target="TOKEN" Default="" Mode="" Description="{desc}" Type="Variable" Display="always" Required="true" Mask="true"/>
-</Container>
-"""
-
-INSTANCE = """<?xml version="1.0"?>
-<Container version="2">
-  <Name>widget</Name>
-  <Repository>example/widget:1</Repository>
-  <Network>bridge</Network>
-  <TemplateURL>https://example.invalid/templates/widget.xml</TemplateURL>
-  <Config Name="TOKEN" Target="TOKEN" Default="" Mode="" Description="{desc}" Type="Variable" Display="always" Required="true" Mask="true">s3cret</Config>
-</Container>
-"""
+HEAD = (
+    '<Container version="2"><Name>widget</Name><Repository>example/widget:1</Repository>'
+    '<TemplateURL>https://example.invalid/templates/widget.xml</TemplateURL>'
+)
+TOKEN = (
+    '<Config Name="TOKEN" Target="TOKEN" Default="" Mode="" Description="{desc}" '
+    'Type="Variable" Display="always" Required="true" Mask="true"{tail}'
+)
+# a mapping the template no longer defines, still holding a real value: the drift case
+SOCKET = (
+    '<Config Name="Docker socket" Target="/var/run/docker.sock" Default="" Mode="rw" '
+    'Description="x" Type="Path" Display="always" Required="false" Mask="false">'
+    '/var/run/docker.sock</Config>'
+)
 
 
-def _description(path):
-    return ET.parse(path).getroot().find("Config").get("Description")
+def template(desc="TEXT"):
+    return ET.fromstring(HEAD + TOKEN.format(desc=desc, tail="/>") + "</Container>")
 
 
-def _value(path):
-    return ET.parse(path).getroot().find("Config").text
+def instance_xml(desc="TEXT", extra=""):
+    return HEAD + TOKEN.format(desc=desc, tail=">s3cret</Config>") + extra + "</Container>"
 
 
 @pytest.fixture()
 def sync():
-    return load_sync()
+    spec = importlib.util.spec_from_file_location("sync_templates", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    # Pin it. README tells operators to flip DRY_RUN to True for a rehearsal, and under that
+    # value four of these tests fail and the no-spurious-write one passes VACUOUSLY, because
+    # nothing writes at all. A test suite whose verdict depends on a module constant the docs
+    # invite you to change is not a test suite.
+    mod.DRY_RUN = False
+    return mod
 
 
-def test_a_description_only_edit_reaches_the_instance(sync, tmp_path):
-    """The bug: this used to be silently discarded."""
-    inst = tmp_path / "my-widget.xml"
-    inst.write_text(INSTANCE.format(desc="OLD TEXT"), encoding="utf-8")
-    tpl = ET.fromstring(TEMPLATE.format(desc="NEW TEXT the operator must act on"))
-
-    sync.update_instance(str(inst), tpl, str(tmp_path / "backups"))
-
-    assert _description(inst) == "NEW TEXT the operator must act on", (
-        "a Description-only template edit did not reach the instance"
-    )
-    # the applied value is what must NOT be touched
-    assert _value(inst) == "s3cret"
+@pytest.fixture()
+def inst(tmp_path):
+    def _make(xml):
+        p = tmp_path / "my-widget.xml"
+        p.write_text(xml, encoding="utf-8")
+        return p
+    return _make
 
 
-def test_an_unchanged_template_does_not_rewrite_the_instance(sync, tmp_path):
-    """The other direction: no spurious write, so no needless secret-bearing backup."""
-    inst = tmp_path / "my-widget.xml"
-    inst.write_text(INSTANCE.format(desc="SAME TEXT"), encoding="utf-8")
-    before = inst.read_bytes()
-    tpl = ET.fromstring(TEMPLATE.format(desc="SAME TEXT"))
-    backups = tmp_path / "backups"
+def config_of(path, target="TOKEN"):
+    for c in ET.parse(path).getroot().findall("Config"):
+        if c.get("Target") == target:
+            return c
+    return None
 
-    sync.update_instance(str(inst), tpl, str(backups))
 
-    assert inst.read_bytes() == before, "an unchanged template rewrote the instance"
-    assert not backups.exists() or not list(backups.iterdir()), (
-        "an unchanged template took a backup, which copies the applied secret"
-    )
+# --------------------------------------------------------------------------- bug 1: writes
+
+def test_a_description_only_edit_reaches_the_instance(sync, inst, tmp_path):
+    p = inst(instance_xml(desc="OLD TEXT"))
+    sync.update_instance(str(p), template(desc="NEW TEXT the operator must act on"), str(tmp_path / "b"))
+    assert config_of(p).get("Description") == "NEW TEXT the operator must act on"
+    assert config_of(p).text == "s3cret", "the applied value must survive"
 
 
 @pytest.mark.parametrize("attr,value", [("Display", "advanced"), ("Required", "false"), ("Default", "xyz")])
-def test_other_metadata_edits_also_reach_the_instance(sync, tmp_path, attr, value):
-    """Description is the one that bit us; the gate covered all metadata, so prove the class."""
-    inst = tmp_path / "my-widget.xml"
-    inst.write_text(INSTANCE.format(desc="SAME TEXT"), encoding="utf-8")
-    tpl = ET.fromstring(TEMPLATE.format(desc="SAME TEXT"))
+def test_every_other_metadata_attribute_reaches_the_instance_too(sync, inst, tmp_path, attr, value):
+    """The broken gate saw none of the metadata, so pin the class and not just Description."""
+    p = inst(instance_xml())
+    tpl = template()
     tpl.find("Config").set(attr, value)
+    sync.update_instance(str(p), tpl, str(tmp_path / "b"))
+    assert config_of(p).get(attr) == value
+    assert config_of(p).text == "s3cret"
 
-    sync.update_instance(str(inst), tpl, str(tmp_path / "backups"))
 
-    assert ET.parse(inst).getroot().find("Config").get(attr) == value
-    assert _value(inst) == "s3cret"
+def test_an_unchanged_template_does_not_rewrite_the_instance(sync, inst, tmp_path):
+    """The other direction: an unconditional rewrite would churn a secret-bearing backup."""
+    p = inst(instance_xml())
+    before = p.read_bytes()
+    backups = tmp_path / "b"
+    sync.update_instance(str(p), template(), str(backups))
+    assert p.read_bytes() == before
+    assert not backups.exists() or not list(backups.iterdir())
+
+
+def test_dry_run_writes_nothing_even_when_there_is_a_real_change(sync, inst, tmp_path):
+    p = inst(instance_xml(desc="OLD TEXT"))
+    before = p.read_bytes()
+    sync.DRY_RUN = True
+    sync.update_instance(str(p), template(desc="NEW TEXT"), str(tmp_path / "b"))
+    assert p.read_bytes() == before
+
+
+# ----------------------------------------------------------------- bug 2: the drift alarm
+
+def test_drift_is_reported_even_when_there_is_nothing_to_write(sync, inst, tmp_path, capsys):
+    """The regression: merged == operator, so the content gate returned before warning."""
+    p = inst(instance_xml(extra=SOCKET))
+    sync.update_instance(str(p), template(), str(tmp_path / "b"))
+    out = capsys.readouterr().out
+    assert "KEPT" in out, "a removed-but-valued Config must still be flagged"
+    assert "Docker socket" in out, "the flag must name what drifted"
+    assert "nothing to change" not in out, "it is not 'nothing to change' - there is drift"
+    assert config_of(p, "/var/run/docker.sock") is not None, "drift is kept, never deleted"
+
+
+def test_drift_is_reported_on_every_run_not_just_the_first(sync, inst, tmp_path, capsys):
+    """After the first sync the trees match, which is precisely when the alarm went silent."""
+    p = inst(instance_xml(extra=SOCKET))
+    for run in range(3):
+        capsys.readouterr()
+        sync.update_instance(str(p), template(), str(tmp_path / "b"))
+        assert "KEPT" in capsys.readouterr().out, f"drift went unreported on run {run + 1}"
+
+
+# ------------------------------------------------------------- promises made in the README
+
+def test_a_real_write_is_backed_up_first(sync, inst, tmp_path):
+    """README: 'creates/updates/deletes with timestamped backups'. Nothing was pinning it."""
+    p = inst(instance_xml(desc="OLD TEXT"))
+    backups = tmp_path / "b"
+    sync.update_instance(str(p), template(desc="NEW TEXT"), str(backups))
+    saved = list(backups.iterdir())
+    assert len(saved) == 1, "an overwritten instance must be backed up"
+    assert "OLD TEXT" in saved[0].read_text(encoding="utf-8"), "the backup must hold the PRE-write file"
+
+
+def test_delete_as_necessary_only_deletes_what_is_unused(sync, inst, tmp_path):
+    """`if val == "" or val == default` -> `if True` destroys real operator values silently."""
+    unused = (
+        '<Config Name="Spare" Target="SPARE" Default="d" Mode="" Description="x" '
+        'Type="Variable" Display="always" Required="false" Mask="false">d</Config>'
+    )
+    p = inst(instance_xml(extra=unused + SOCKET))
+    sync.update_instance(str(p), template(), str(tmp_path / "b"))
+    assert config_of(p, "SPARE") is None, "a value still at its default is unused: delete it"
+    assert config_of(p, "/var/run/docker.sock") is not None, "a real value must never be dropped"

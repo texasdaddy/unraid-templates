@@ -669,3 +669,46 @@ def test_the_guard_carries_no_real_literal_denylist():
     for attr in ("_CODENAMES", "_CODENAME", "_DOMAIN", "_POOLS", "_PERSON", "_CFAPP"):
         assert not hasattr(guard, attr), (
             f"guard.{attr} is back: that is the decoded real-token table this design removed")
+
+
+# --------------------------------------------------------------------------------------------
+# Two claims the guard's own comments make about their enforcement. Both named a test by name;
+# neither test existed, so both comments were assertions about a guard's strength that nothing
+# checked — the exact thing this repo treats as a defect rather than a doc nit.
+
+
+def test_every_pattern_is_exercised():
+    """`PATTERNS` says every entry MUST have a deny case AND a near-miss allow case.
+
+    `selftest()` already enforces the deny half (it diffs the exercised labels against
+    `PATTERNS` and fails on any gap). Nothing enforced the allow half, which is the half that
+    catches a pattern widened until it fires on ordinary text: a deny-only case stays green
+    when a pattern becomes `.*`.
+    """
+    deny = {label for label, _ in guard._MUST_FAIL}
+    labels = {label for label, _ in guard.PATTERNS}
+    assert labels - deny == set(), f"pattern(s) with no deny case: {sorted(labels - deny)}"
+
+    compiled = [(label, re.compile(rx, re.IGNORECASE)) for label, rx in guard.PATTERNS]
+    assert guard._MUST_PASS, "no near-miss allow cases at all"
+    for sample in guard._MUST_PASS:
+        hits = guard.scan_text(sample, compiled)
+        assert not hits, (
+            f"a near-miss sample now trips {[h[1] for h in hits]}: a pattern has been widened "
+            f"until it fires on ordinary text — {sample!r}"
+        )
+
+
+def test_the_allow_literals_are_removed_from_a_line():
+    """`_neutralize` is pinned DIRECTLY, because a scan verdict would pass either way.
+
+    Every entry in `ALLOW_LITERALS` is currently inert — none matches any live pattern — so
+    asserting `scan_text` returns clean proves nothing about the neutralisation: it would
+    return clean with `_neutralize` deleted. Assert the transformation itself.
+    """
+    assert guard.ALLOW_LITERALS, "the carve-out list is empty; this test is then vacuous"
+    for lit in guard.ALLOW_LITERALS:
+        line = f"see https://{lit}/unraid-templates for the icon"
+        out = guard._neutralize(line)
+        assert lit not in out, f"_neutralize left {lit!r} in the line"
+        assert "unraid-templates" in out, "_neutralize removed more than the carve-out"

@@ -79,10 +79,11 @@ jobs:
           echo "range: $range"
           python scripts/check_no_internal_info.py --range "$range"
 
-  # The guard's own regression suite. It is the only Python in this repo that has tests, and it
-  # earns them: a leak guard that quietly stops guarding looks exactly like one that works.
+  # The repo's regression suite. It began as the leak guard's alone and now also covers
+  # sync-templates.py, which earns it the same way: a leak guard that quietly stops guarding,
+  # and a sync script that quietly stops syncing, both look exactly like ones that work.
   guard-tests:
-    name: Leak-guard tests
+    name: Guard + sync regression tests
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7

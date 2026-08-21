@@ -225,11 +225,22 @@ def update_instance(inst_path, tpl_root, backup_dir):
     # operator-facing instruction in this repo lives, so the one edit the templates are
     # written to deliver was the one edit that never arrived. Both sides go through the same
     # indent+serialise path so this compares content, not the file's original formatting.
-    if canonical(merged) == canonical(op_root):
+    # kept_flag is the ONE stat this comparison cannot see. A variable the template no longer
+    # defines but which still holds a real value is copied VERBATIM into merged (see merge()),
+    # so merged can equal the operator's tree while drift is sitting right there. Returning on
+    # content alone therefore silenced the loudest warning this script has - and silenced it on
+    # every run after the first, which is exactly when an operator re-runs to check their work.
+    # Drift is reported whether or not there is anything to write. (dupes rides along: it is
+    # likewise computed from the operator's tree and never changes the merged result.)
+    unchanged = canonical(merged) == canonical(op_root)
+    if unchanged and not (st["kept_flag"] or st["dupes"]):
         print(f"    = {fname:<22} up to date  ({st['retained']} values, nothing to change)")
         return
     meta_only = not (st["added"] or st["deleted"] or st["kept_flag"])
-    if DRY_RUN:
+    if unchanged:
+        # nothing to write, but there IS something to say - fall through to the warnings
+        print(f"    = {fname:<22} no write needed, but see below")
+    elif DRY_RUN:
         print(f"    * {fname:<22} would UPDATE")
     else:
         b = backup(inst_path, backup_dir)

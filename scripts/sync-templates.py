@@ -230,13 +230,18 @@ def update_instance(inst_path, tpl_root, backup_dir):
     # so merged can equal the operator's tree while drift is sitting right there. Returning on
     # content alone therefore silenced the loudest warning this script has - and silenced it on
     # every run after the first, which is exactly when an operator re-runs to check their work.
-    # Drift is reported whether or not there is anything to write. (dupes rides along: it is
-    # likewise computed from the operator's tree and never changes the merged result.)
+    # Drift is reported whether or not there is anything to write. dupes rides along in the
+    # condition for safety, though for an operator-side duplicate it is redundant: merge()
+    # keeps only the first of a duplicate-keyed Config, which changes the merged tree, so
+    # `unchanged` is already False.
     unchanged = canonical(merged) == canonical(op_root)
     if unchanged and not (st["kept_flag"] or st["dupes"]):
         print(f"    = {fname:<22} up to date  ({st['retained']} values, nothing to change)")
         return
-    meta_only = not (st["added"] or st["deleted"] or st["kept_flag"])
+    # "metadata refreshed" must be true of a run that actually wrote and actually only
+    # changed metadata. dupes belongs here because merge() DROPS all but the first duplicate,
+    # which is a variable removed; and `unchanged` because nothing was refreshed at all.
+    meta_only = not (st["added"] or st["deleted"] or st["kept_flag"] or st["dupes"]) and not unchanged
     if unchanged:
         # nothing to write, but there IS something to say - fall through to the warnings
         print(f"    = {fname:<22} no write needed, but see below")

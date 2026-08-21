@@ -163,3 +163,99 @@ def test_delete_as_necessary_only_deletes_what_is_unused(sync, inst, tmp_path):
     sync.update_instance(str(p), template(), str(tmp_path / "b"))
     assert config_of(p, "SPARE") is None, "a value still at its default is unused: delete it"
     assert config_of(p, "/var/run/docker.sock") is not None, "a real value must never be dropped"
+
+
+# ------------------------------------------------------- mutations that used to survive
+# A verification round mutated the script and found these still green. Each one breaks a
+# promise the README makes, so each gets the case that proves it bites.
+
+
+def test_the_no_write_path_really_does_not_write_or_back_up(sync, inst, tmp_path):
+    """Drift reporting must not smuggle in a write.
+
+    The drift tests above assert on stdout only. With that alone, making the `unchanged`
+    branch write and back up left the suite green — and the cost is a timestamped copy of a
+    secret-bearing template churned on EVERY run of a drifted instance, which is exactly the
+    accumulation unraid-templates#27 is about.
+    """
+    p = inst(instance_xml(extra=SOCKET))
+    before = p.read_bytes()
+    backups = tmp_path / "b"
+    sync.update_instance(str(p), template(), str(backups))
+    assert p.read_bytes() == before, "the no-write path wrote"
+    assert not backups.exists() or not list(backups.iterdir()), "the no-write path took a backup"
+
+
+def test_an_invalid_merge_result_is_refused_and_the_instance_is_left_alone(sync, inst, tmp_path):
+    """README: 'a merged result is validated before it replaces the original.'
+
+    Deleting the `validate(merged)` call left the whole suite green. The guard exists so a
+    template that would produce a structurally broken instance cannot overwrite a working
+    one — the failure mode being a container Unraid can no longer render or start.
+    """
+    # merge() bases the result on the OPERATOR's tree, so an invalid merge comes from a
+    # damaged instance rather than a damaged template - a truncated my-*.xml, say, or a
+    # half-written file from an interrupted Apply. validate() requires a non-empty
+    # <Repository>; without the guard the script would happily rewrite that file.
+    damaged = instance_xml(desc="OLD TEXT").replace(
+        "<Repository>example/widget:1</Repository>", "<Repository></Repository>"
+    )
+    p = inst(damaged)
+    before = p.read_bytes()
+
+    sync.update_instance(str(p), template(desc="NEW TEXT"), str(tmp_path / "b"))
+
+    assert p.read_bytes() == before, "an invalid merge result overwrote the instance"
+    assert not (tmp_path / "b").exists() or not list((tmp_path / "b").iterdir()), (
+        "a refused merge must not leave a backup either"
+    )
+
+
+def test_dry_run_reports_no_write_rather_than_would_update_when_there_is_nothing_to_write(
+    sync, inst, tmp_path, capsys
+):
+    """Ordering: `if unchanged` must be tested before `elif DRY_RUN`.
+
+    Swapping them made a dry run announce `would UPDATE` for an instance with nothing to
+    write — a rehearsal that misreports what the real run will do is worse than no rehearsal.
+    """
+    p = inst(instance_xml(extra=SOCKET))
+    sync.DRY_RUN = True
+    sync.update_instance(str(p), template(), str(tmp_path / "b"))
+    out = capsys.readouterr().out
+    assert "would UPDATE" not in out, "a dry run claimed it would write when there is nothing to write"
+    assert "KEPT" in out, "a dry run must still report drift"
+
+
+def test_metadata_refreshed_is_only_claimed_when_that_is_what_happened(sync, inst, tmp_path, capsys):
+    """The line says "no variables added or removed" - so it must not print when some were.
+
+    It used to be computed from added/deleted/kept_flag alone, which left two ways to lie:
+    a duplicate-keyed Config, which merge() DROPS (a variable removed), and the no-write
+    path, where nothing was refreshed at all.
+    """
+    # (a) a real metadata-only write: the claim is true and must be made
+    p = inst(instance_xml(desc="OLD TEXT"))
+    sync.update_instance(str(p), template(desc="NEW TEXT"), str(tmp_path / "b"))
+    assert "metadata refreshed" in capsys.readouterr().out
+
+    # (b) nothing written at all: nothing was refreshed, so the claim must not be made
+    p2 = inst(instance_xml(extra=SOCKET))
+    capsys.readouterr()
+    sync.update_instance(str(p2), template(), str(tmp_path / "b2"))
+    out = capsys.readouterr().out
+    assert "metadata refreshed" not in out, "claimed a refresh on a run that wrote nothing"
+
+    # (c) a duplicate is dropped, which IS a variable removed
+    dupe = instance_xml(desc="SAME").replace("</Container>", "") + (
+        '<Config Name="TOKEN" Target="TOKEN" Default="" Mode="" Description="SAME" '
+        'Type="Variable" Display="always" Required="true" Mask="true">other</Config></Container>'
+    )
+    p3 = inst(dupe)
+    capsys.readouterr()
+    sync.update_instance(str(p3), template(desc="SAME"), str(tmp_path / "b3"))
+    out = capsys.readouterr().out
+    if "duplicate keys" in out:
+        assert "no variables added or removed" not in out, (
+            "claimed no variables were removed while dropping a duplicate"
+        )

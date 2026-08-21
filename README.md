@@ -84,7 +84,7 @@ values**:
 
 - **CREATE** — seeds `my-<name>.xml` for any repo template that has no `my-` file yet, so it is ready to pick under *Add Container*.
 - **UPDATE** — for **every live instance** of a template (`my-tape.xml` *and* `my-tape-dev.xml`, `my-tape-db-dev.xml`, …): keeps that instance's applied value for each variable, refreshes the variable's metadata (description, defaults, visibility) from the repo template, and adds variables the template has gained.
-- **DELETE-as-necessary** — drops a variable the template no longer defines **only when it is genuinely unused** (blank, or still at its default). A removed variable that still holds a real, non-default value is **kept and loudly flagged** (`!! KEPT`), because that almost always means the *template* is missing it — repo drift, not an intentional removal. Treat every `!! KEPT` line as a bug in `templates/`.
+- **DELETE-as-necessary** — drops a variable the template no longer defines **only when it is genuinely unused** (blank, or still at its default). A removed variable that still holds a real, non-default value is **kept and loudly flagged** (`!! KEPT`), because that almost always means the *template* is missing it — repo drift, not an intentional removal. Treat a `!! KEPT` line as a bug in `templates/` **unless the template documents it** — a mapping is keyed on its container path, so a template that tells the operator to edit that path (`github-runner.xml`'s optional work directory) reports `KEPT` by design, and re-adds its own placeholder as a second, empty entry each run.
 
 Container-level settings you set per instance — image tag, network/IP, WebUI, Extra
 Params, ports, the container Name — are **always preserved**; only `<Config>`

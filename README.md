@@ -34,18 +34,19 @@ by design — fill them in Unraid on import.
 
 The one template here that is not a service: a self-hosted GitHub Actions runner, **one
 instance per repository**. Nothing in it names a repository or a host — `ACCESS_TOKEN`,
-`REPO_URL`, `RUNNER_NAME` and `LABELS` are set per instance. On a private repository its
-minutes do not count against the account's Actions allowance, which is the usual reason to
-run one (GitHub-hosted runners are already free for public repos).
+`REPO_URL`, `RUNNER_NAME` and `LABELS` are set per instance. Use it on a **private**
+repository, where its minutes do not count against the account's Actions allowance; that is
+the usual reason to run one, since GitHub's *standard* hosted runners are already free for
+public repos.
 
 It runs **its own Docker daemon inside itself** (Docker-in-Docker): `Privileged` on,
-`START_DOCKER_SERVICE=true`, and *no* host socket mounted. That is the whole design, and
-it replaced an earlier host-socket + host-networking version of this template.
+`START_DOCKER_SERVICE=true`, `Network` on Bridge, and *no* host socket mounted. That is the
+whole design, and it replaced an earlier host-socket + host-networking version.
 
 Everything an operator has to act on is in the template's own `<Config Description>`
 fields, which is deliberate: Unraid never renders XML comments, and `sync-templates.py`
 reconciles `<Config>` elements only — so for a container that already exists, edits to
-`<Overview>` never arrive, and a field description is the one place that reaches both new
+`<Overview>` never arrive, and a field description is the one place *prose* reaches both new
 and existing instances. What follows is orientation, not the reference.
 
 - **Why Docker-in-Docker.** Under the socket model the runner asked the *host's* daemon for
@@ -58,23 +59,36 @@ and existing instances. What follows is orientation, not the reference.
   runner running the same workflow collides. An in-container daemon makes the service a
   sibling on a private daemon: `localhost` resolves, nothing is published on the host, and
   N runners never collide.
+- **Three settings have no field of their own**, because Unraid does not express them as
+  `<Config>` entries, so nothing carries an inline description for them: **Network** must be
+  `Bridge`, **Privileged** must be on (both on the container's Edit page, Advanced View),
+  and the container **Name** should match `RUNNER_NAME`. For a container that already
+  exists, *none* of the three is updated by `sync-templates.py` or by Unraid's template
+  merge — set them by hand. This is the step most easily missed when converting an
+  existing host-socket runner, and getting it wrong is silent.
 - **`Privileged` and `START_DOCKER_SERVICE` are one setting in two places.** Both are
-  required. `START_DOCKER_SERVICE` must be the *exact string* `true` — the entrypoint
-  string-compares it and defaults it to `false`, so `True`/`yes`/`1` all mean off. Note
-  this is the opposite of `EPHEMERAL` in the same template, which any non-empty value
-  enables, including `false`.
-- **`RUNNER_NAME` and `LABELS` appear in workflow logs**, world-readable on a public
-  repository, so name and label by *repository*, never by machine.
-- **It is not a containment boundary.** A job here is root in a privileged container.
-  Point a runner only at repositories whose workflow code you control — never at one where
-  a fork pull request can run attacker-authored code without approval.
+  required, and `START_DOCKER_SERVICE` must be the *exact string* `true` — the entrypoint
+  string-compares it and defaults it to `false`, so `True`/`yes`/`1` all mean off. Note this
+  is the opposite of `EPHEMERAL`, which any non-empty value enables, including `false`.
+  Set only one of the pair and nothing complains: the entrypoint never checks that the
+  daemon started, so the runner registers, goes Idle, accepts a job, and *then* every Docker
+  step fails against a runner the UI shows as healthy.
+- **Do not point this runner at a public repository.** A job on it is root in a privileged
+  container, and on a public repo anyone can open a fork pull request. If outside
+  contributions are in play at all, set Settings → Actions → General → *Fork pull request
+  workflows from outside collaborators* to **Require approval for all external
+  contributors**; the first-time-contributors default is not enough here.
+- **`RUNNER_NAME` is printed in every job log**, so never name it for the machine. Labels
+  are *not* printed there — what publishes them is the `runs-on:` line in the workflow file,
+  world-readable on a public repo. Same conclusion, different mechanism.
 - **Known limit, measured:** a container the in-container daemon starts on a bridge network
-  may have no return path to the network — on the runner this was measured on, attached to
-  a *custom* Unraid network, the outbound SYN was forwarded and source-NATed out correctly
-  and no reply ever came back, so a build failed with a DNS error that was not a DNS
-  problem. Workaround: `docker build --network=host` (inside the runner that means the
-  *runner container's* namespace, not the Unraid host's). `services:` containers are
-  unaffected. Whether the plain bridge network avoids it was not tested.
+  may have no return path to the network — on the runner this was measured on, attached to a
+  *custom* Unraid network, the outbound SYN was forwarded and source-NATed out correctly and
+  no reply ever came back, so a build failed with a DNS error that was not a DNS problem.
+  Workaround: `docker build --network=host` (inside the runner that means the *runner
+  container's* namespace, not the Unraid host's — provided the runner is on Bridge).
+  `services:` containers are unaffected. The template ships the plain bridge network, which
+  is the configuration that was *not* tested.
 
 ## Scripts
 
@@ -99,7 +113,7 @@ values**:
 
 - **CREATE** — seeds `my-<name>.xml` for any repo template that has no `my-` file yet, so it is ready to pick under *Add Container*.
 - **UPDATE** — for **every live instance** of a template (`my-tape.xml` *and* `my-tape-dev.xml`, `my-tape-db-dev.xml`, …): keeps that instance's applied value for each variable, refreshes the variable's metadata (description, defaults, visibility) from the repo template, and adds variables the template has gained.
-- **DELETE-as-necessary** — drops a variable the template no longer defines **only when it is genuinely unused** (blank, or still at its default). A removed variable that still holds a real, non-default value is **kept and loudly flagged** (`!! KEPT`), because that almost always means the *template* is missing it — repo drift, not an intentional removal. Treat a `!! KEPT` line as a bug in `templates/`.
+- **DELETE-as-necessary** — drops a variable the template no longer defines **only when it is genuinely unused** (blank, or still at its default). A removed variable that still holds a real, non-default value is **kept and loudly flagged** (`!! KEPT`), because that almost always means the *template* is missing it — repo drift, not an intentional removal. Treat a `!! KEPT` line as a bug in `templates/` — **except during a deliberate migration**, when it is the script telling you a mapping is still on your container. Converting a `github-runner` off the host-socket design is the case that exists today: a `!! KEPT` line naming the Docker socket or the old work directory means delete that mapping in the Unraid UI, **not** put it back in the template.
 
 Container-level settings you set per instance — image tag, network/IP, WebUI, Extra
 Params, ports, the container Name — are **always preserved**; only `<Config>`

@@ -1,7 +1,9 @@
-# Python bytecode. NOT merely noise here: a compiled copy of
-# scripts/check_no_internal_info.py embeds the guard's denylist literals -- the real host
-# codenames, infra domain and personal name -- in a binary nobody reads in review. One was
-# tracked in this PUBLIC repo before this file existed. Keep it that way.
+# Python bytecode. NOT merely noise here. When the guard still carried a real denylist, a
+# compiled copy of scripts/check_no_internal_info.py embedded those literals -- host
+# codenames, the infra domain, a personal name -- in a binary nobody reads in review, and one
+# was tracked in this PUBLIC repo before this file existed. The guard is shapes-only now and
+# the tests pin that, so the specific leak is gone; the rule stays, because a .pyc of anything
+# here is still an unreviewable binary in a public tree.
 __pycache__/
 *.pyc
 *.pyo

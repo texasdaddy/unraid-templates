@@ -96,10 +96,13 @@ from typing import NamedTuple
 
 # --------------------------------------------------------------------------- the denylist
 # SHAPES ONLY. See the module docstring: a real literal in this list would make this file the
-# leak. Every entry MUST have at least one deny case and one near-miss allow case in `selftest`;
-# `test_every_pattern_is_exercised` in tests/test_leak_guard_range.py enforces that, because a
-# pattern with no case can be deleted or broken and the green check will still say "the patterns
-# bite".
+# leak. Every entry MUST have at least one deny case in `_MUST_FAIL` and at least one near-miss
+# in `_MUST_PASS` — a shape that looks like it and must NOT fire. What `selftest` actually
+# enforces: it fails on a pattern with no deny case (nothing would then prove the pattern still
+# bites), and it fails on any `_MUST_PASS` sample that trips (which is how a pattern widened
+# until it matches ordinary text gets caught). It CANNOT check that a given pattern has a
+# near-miss, because `_MUST_PASS` is a flat list with no pattern labels — that half is
+# convention, and it is the half that catches widening, so add it with the pattern, not later.
 PATTERNS: list[tuple[str, str]] = [
     # RFC1918. Left-bounded so a decimal doesn't trip it; the right bound must still reject a
     # 5th octet while ALLOWING a sentence-final period — `the host is <addr>.` is the most
@@ -593,6 +596,13 @@ _MUST_PASS: list[str] = [
     # string is a real fixture in one of the fleet repos; if someone re-adds `.internal` to the
     # denylist, this case fails and says why rather than reddening that repo's CI mysteriously.
     'DATABASE_URL=postgresql://u:p@db.internal:5432/app',
+    # near-misses for the five patterns that had none. Each is a shape that LOOKS like its
+    # pattern and must not fire, which is what fails if that pattern is ever widened.
+    "cgnat neighbours 100.63.255.254 and 100.128.0.1 are outside the range",
+    'import helper from "./net.ts" then re-export',
+    "store it under /mnt/POOL/appdata/runner-REPO/docker",
+    "contact noreply@example.com or support@github.com",
+    "pinned action SHA 3d3c42e5aac5ba805825da76410c181273ba90b1",
     # The reason ALLOW_SPANS neutralizes a SPAN and not the LINE: a permitted token must not
     # grant amnesty to a real leak sharing the line with it.
 ]

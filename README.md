@@ -20,6 +20,7 @@ https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/icons/<name>.
 | reauth-bot | `icons/reauth_bot.png` | `templates/reauth-bot.xml` |
 | keystone | `icons/keystone.png` | `templates/keystone.xml` |
 | keystone-db | `icons/keystone_db.png` | `templates/keystone-db.xml` |
+| github-runner (one instance per repo) | `icons/running-icon-free-vector.png` | `templates/github-runner.xml` |
 
 Every template + icon in this repo must have a row here — keep this table in sync when adding either (the reauth-bot icon was added 2026-07-25 but not listed until 2026-07-27). Scripts have their own manifest under [Scripts](#scripts); the same rule applies there.
 
@@ -28,6 +29,37 @@ Every template + icon in this repo must have a row here — keep this table in s
 by design — fill them in Unraid on import.
 
 **This repo is registered as a template repository on the Unraid host** (`/boot/config/plugins/dockerMan/template-repos`), so Unraid tracks it: the templates appear under **Docker → Add Container** and, because each template carries a `<TemplateURL>` to its raw file, Unraid **merges new `<Config>` variables into an existing container when its Edit page is opened** (no purge/redeploy needed — that's the CA update path; "check for update" only checks the image). GitHub-raw caches ~5 min.
+
+### `github-runner.xml`
+
+The one template here that is not a service: a self-hosted GitHub Actions runner, **one
+instance per repository**. Nothing in it names a repository or a host — `ACCESS_TOKEN`,
+`REPO_URL`, `RUNNER_NAME` and `LABELS` are set per instance. On a private repository its
+minutes do not count against the account's Actions allowance, which is the usual reason to
+run one (GitHub-hosted runners are already free for public repos).
+
+Three things are easy to get wrong. All three are spelled out in the template's own
+`<Config Description>` fields, which is deliberate: Unraid never renders XML comments, and
+`sync-templates.py` reconciles `<Config>` elements only — so for a container that already
+exists, edits to `<Overview>` never arrive, and a field description is the one place that
+reaches both new and existing instances.
+
+- **Network mode defaults to `host`, deliberately.** The runner drives the *host's* Docker
+  daemon over the mounted socket, so a service container's published port lands in the
+  **host's** network namespace. A bridge-mode container has its own namespace, so its
+  `localhost` is not the host's, and a workflow written the GitHub-hosted way cannot find
+  its service there even though the service is up and healthy. Measured on a real cutover,
+  where the daemon had genuinely published the port (`-p 5432:5432`) and the job's steps
+  still could not see it — so the usual "the port was never published" explanation did not
+  apply. Note the converse still bites: `host` mode does not publish a port the workflow
+  never asked for, and a bare `ports: - 5432` takes a *random* host port.
+- **`RUNNER_NAME` and `LABELS` appear in public workflow logs**, so neither should name the
+  machine.
+- **The socket mount is host root.** A workflow running here can do anything the host's
+  daemon can, and can read the PAT out of `/proc/1/environ` or `docker inspect` (the image
+  un-exports it, so it is not in a step's own environment — but that is not containment).
+  Point a runner only at repositories whose workflow code you control — never at one where
+  a fork pull request can run attacker-authored code.
 
 ## Scripts
 
@@ -52,7 +84,7 @@ values**:
 
 - **CREATE** — seeds `my-<name>.xml` for any repo template that has no `my-` file yet, so it is ready to pick under *Add Container*.
 - **UPDATE** — for **every live instance** of a template (`my-tape.xml` *and* `my-tape-dev.xml`, `my-tape-db-dev.xml`, …): keeps that instance's applied value for each variable, refreshes the variable's metadata (description, defaults, visibility) from the repo template, and adds variables the template has gained.
-- **DELETE-as-necessary** — drops a variable the template no longer defines **only when it is genuinely unused** (blank, or still at its default). A removed variable that still holds a real, non-default value is **kept and loudly flagged** (`!! KEPT`), because that almost always means the *template* is missing it — repo drift, not an intentional removal. Treat every `!! KEPT` line as a bug in `templates/`.
+- **DELETE-as-necessary** — drops a variable the template no longer defines **only when it is genuinely unused** (blank, or still at its default). A removed variable that still holds a real, non-default value is **kept and loudly flagged** (`!! KEPT`), because that almost always means the *template* is missing it — repo drift, not an intentional removal. Treat a `!! KEPT` line as a bug in `templates/` **unless the template documents it** — a mapping is keyed on its container path, so a template that tells the operator to edit that path (`github-runner.xml`'s optional work directory) reports `KEPT` by design, and re-adds its own placeholder as a second, empty entry each run.
 
 Container-level settings you set per instance — image tag, network/IP, WebUI, Extra
 Params, ports, the container Name — are **always preserved**; only `<Config>`

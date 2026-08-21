@@ -240,8 +240,9 @@ def update_instance(inst_path, tpl_root, backup_dir):
         return
     # "metadata refreshed ... no variables added or removed" must be true of the run that
     # prints it. dupes belongs in here because merge() DROPS all but the first duplicate,
-    # which IS a variable removed. `unchanged` needs no term of its own: the early return
-    # above only falls through when kept_flag or dupes is set, either of which zeroes this.
+    # which IS a variable removed. `unchanged` needs no term of its own: when unchanged is
+    # true the early return above only falls through if kept_flag or dupes is set, and either
+    # of those already zeroes this.
     meta_only = not (st["added"] or st["deleted"] or st["kept_flag"] or st["dupes"])
     if unchanged:
         # nothing to write, but there IS something to say - fall through to the warnings
@@ -301,21 +302,21 @@ def main():
     if not os.path.isdir(TEMPLATES_USER):
         sys.exit(f"error: templates dir not found: {TEMPLATES_USER}")
 
-    api_ok = True
+    # Report the REASON. This is step 0 of the runner conversion, and an unauthenticated
+    # api.github.com is rate-limited to 60 requests/hour per IP — "network/API" alone sends
+    # the operator looking at their firewall instead of at a 403 that clears by itself.
     try:
         all_repo = list_repo_templates()
+        why = ""
     except Exception as e:
-        api_ok = False
-        all_repo = []
+        all_repo, why = [], f" ({e})"
     if not all_repo:
-        sys.exit(f"error: could not list repo templates from {REPO}@{BRANCH} "
-                 f"(network/API). Nothing changed.")
+        sys.exit(f"error: could not list repo templates from {REPO}@{BRANCH}"
+                 f"{why or ' (empty listing)'}. Nothing changed.")
 
     banner = "DRY-RUN — writes NOTHING (validate me, then install the DRY_RUN=False version)" \
         if DRY_RUN else "LIVE — will create/update/delete with backups"
     print(f"sync-templates  repo={REPO}@{BRANCH}  dir={TEMPLATES_USER}")
-    if not api_ok:
-        print("  ! repo listing via API failed")
     print(f"mode: {banner}\ntemplates: {', '.join(all_repo)}\n")
 
     instances_by_tpl, unmapped = discover_instances(TEMPLATES_USER, all_repo, naming_fallback=True)

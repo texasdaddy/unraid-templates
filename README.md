@@ -1,7 +1,8 @@
 # unraid-templates
 
-Public Unraid Docker templates + icons for the Keystone self-hosted stack
-(**Tape**, **CEF Tracker**, and later **Keystone**). Public so Unraid can fetch icons
+Public Unraid Docker templates + icons for the self-hosted stack
+(**Tape**, **CEF Tracker**, **Keystone**, **reauth-bot**, and a **github-runner** template
+used by all of them). Public so Unraid can fetch icons
 anonymously via `raw.githubusercontent.com`; the application source stays in its own
 private repos.
 
@@ -28,7 +29,7 @@ Every template + icon in this repo must have a row here — keep this table in s
 `templates/` holds the Unraid container templates (`<Icon>` pre-set). Secrets are blank
 by design — fill them in Unraid on import.
 
-**`sync-templates.py` is the only thing that carries a template change toward a container that already exists — and it carries it as far as that container's *saved template*, not into the container itself.** Stock Unraid never merges a template change into an existing container, and that is deliberate rather than a bug: in `emhttp/plugins/dynamix.docker.manager/include/DockerClient.php`, `updateUserTemplate()` opens with `// Don't update templates, but leave code in place for future reference` and returns — on every release from 6.12 to current. Its sibling `downloadTemplates()` became a no-op only in **7.3.0**; on 6.12.x—7.2.x it is live, so registering this repo in `/boot/config/plugins/dockerMan/template-repos` there really does mirror it into `templates-usb` and refresh the *Default templates* list — but that path only populates the Add Container list (and deletes templates it no longer finds); it never touches an existing `my-*.xml`. Templates from this repo appear under **Docker → Add Container** in the *User templates* group because `sync-templates.py` seeds a `my-<name>.xml` for each; `<TemplateURL>` earns its keep by letting that script map an instance back to its template. "Check for update" only checks the image, never the template. **So: edit a template here, run `sync-templates.py`, then open the container's Edit page and press Apply.** The script rewrites `my-<name>.xml`; the container is rebuilt from that file by Apply, and equally by any container **Update** or *force update* — but never on its own. "Check for update" compares the image only.
+**`sync-templates.py` is the only thing that carries a template change toward a container that already exists — and it carries it as far as that container's *saved template*, not into the container itself.** Stock Unraid never merges a template change into an existing container, and that is deliberate rather than a bug: in `emhttp/plugins/dynamix.docker.manager/include/DockerClient.php`, `updateUserTemplate()` opens with `// Don't update templates, but leave code in place for future reference` and returns — on every release from 6.12 to current. Its sibling `downloadTemplates()` became a no-op only in **7.3.0**; on 6.12.x—7.2.x it is live, so registering this repo in `/boot/config/plugins/dockerMan/template-repos` there really does mirror it into `templates-usb` and refresh the *Default templates* list — but that path only populates the Add Container list (and deletes templates it no longer finds); it never touches an existing `my-*.xml`. Templates from this repo appear under **Docker → Add Container** in the *User templates* group because `sync-templates.py` seeds a `my-<name>.xml` for each; `<TemplateURL>` earns its keep by letting that script map an instance back to its template. **So: edit a template here, run `sync-templates.py`, then open the container's Edit page and press Apply.** The script rewrites `my-<name>.xml`; the container is rebuilt from that file by Apply, and equally by any container **Update** or *force update* — but never on its own. "Check for update" compares the image only.
 
 ### `github-runner.xml`
 
@@ -97,7 +98,7 @@ there is (see above). What follows is orientation, not the reference.
 | Script | What it is | Where it runs |
 |---|---|---|
 | `scripts/sync-templates.py` | Reconciles the Unraid host's `my-*.xml` container templates against this repo | Unraid host, via **User Scripts** |
-| `scripts/check_no_internal_info.py` | Public-repo guard: fails on internal-looking **shapes** — RFC1918/CGNAT addresses, `.lan`/`.local`/`*.ts.net` hosts, `/mnt/<pool>` paths, freemail addresses, bare UUIDs. It **cannot** see a bare hostname, codename or personal name; those have no shape, and a second guard held outside every repo is what catches them. Both layers are required, and green CI here is not clearance. | CI, on every PR, on push to `main`, and on `v*` tags — see the caveat below |
+| `scripts/check_no_internal_info.py` | Public-repo guard: fails on internal-looking **shapes** — RFC1918/CGNAT addresses, `.lan`/`.local`/`*.ts.net` hosts, the real Unraid share roots under `/mnt/` (`apps`, `user`, `cache`, `remotes`, `disks` — an arbitrarily-named pool is NOT matched), freemail addresses, bare UUIDs. It **cannot** see a bare hostname, codename or personal name; those have no shape, and a second guard held outside every repo is what catches them. Both layers are required, and green CI here is not clearance. | CI, on every PR, on push to `main`, and on `v*` tags — see the caveat below |
 
 > **The guard is advisory, not enforcing.** It runs on every pull request and
 > fails loudly, but `main` has no branch protection and no rulesets, so nothing

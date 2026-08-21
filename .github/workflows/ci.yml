@@ -82,8 +82,16 @@ jobs:
   # The repo's regression suite. It began as the leak guard's alone and now also covers
   # sync-templates.py, which earns it the same way: a leak guard that quietly stops guarding,
   # and a sync script that quietly stops syncing, both look exactly like ones that work.
+  #
+  # ⚠️ DO NOT RENAME THIS JOB. `name:` is the status-check CONTEXT, and `main`'s branch
+  # protection lists "Leak-guard tests" as a required check. Renaming it does not fail the
+  # check — the required context simply never reports, and every PR sits BLOCKED with three
+  # green jobs and no explanation. (Learned the hard way: this job was briefly renamed to
+  # describe its widened scope, and the PR doing it could not be merged.) The scope now
+  # exceeds the name; that is a cosmetic cost and this is not, so the name stays until the
+  # protection rule is changed to match, which is a repo-settings change and not a code one.
   guard-tests:
-    name: Guard + sync regression tests
+    name: Leak-guard tests
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7

@@ -184,6 +184,13 @@ def merge(operator_root, template_root):
     return merged, stats
 
 
+def canonical(root):
+    """Serialise a template tree the way atomic_write would, for content comparison."""
+    r = copy.deepcopy(root)
+    ET.indent(r, space="  ")
+    return ET.tostring(r, encoding="utf-8")
+
+
 def atomic_write(path, root):
     ET.indent(root, space="  ")
     tmp = path + ".tmp"
@@ -212,10 +219,16 @@ def update_instance(inst_path, tpl_root, backup_dir):
     if err:
         print(f"    ! {fname:<22} SKIP — merged result invalid ({err}); left untouched")
         return
-    changed = st["added"] or st["deleted"] or st["kept_flag"]
-    if not changed:
-        print(f"    = {fname:<22} up to date  ({st['retained']} values, no var changes)")
+    # Compare the SEMANTIC result, not the variable set. Gating on added/deleted/kept meant a
+    # template edit that changed only a field's Description, Default, Display or Required was
+    # computed correctly by merge() and then thrown away — and a Description is where every
+    # operator-facing instruction in this repo lives, so the one edit the templates are
+    # written to deliver was the one edit that never arrived. Both sides go through the same
+    # indent+serialise path so this compares content, not the file's original formatting.
+    if canonical(merged) == canonical(op_root):
+        print(f"    = {fname:<22} up to date  ({st['retained']} values, nothing to change)")
         return
+    meta_only = not (st["added"] or st["deleted"] or st["kept_flag"])
     if DRY_RUN:
         print(f"    * {fname:<22} would UPDATE")
     else:
@@ -223,6 +236,8 @@ def update_instance(inst_path, tpl_root, backup_dir):
         atomic_write(inst_path, merged)
         print(f"    * {fname:<22} UPDATED   (backup: {os.path.basename(b)})")
     print(f"        values kept   : {st['retained']}")
+    if meta_only:
+        print("        metadata refreshed (descriptions/defaults/visibility); no variables added or removed")
     if st["added"]:
         print(f"        added         : {', '.join(st['added'])}")
     if st["deleted"]:

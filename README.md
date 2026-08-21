@@ -28,7 +28,7 @@ Every template + icon in this repo must have a row here — keep this table in s
 `templates/` holds the Unraid container templates (`<Icon>` pre-set). Secrets are blank
 by design — fill them in Unraid on import.
 
-**`sync-templates.py` is the only thing that updates an existing container.** Stock Unraid does *not* merge template changes into one, and it is worth knowing this is deliberate rather than a bug: in `emhttp/plugins/dynamix.docker.manager/include/DockerClient.php`, `updateUserTemplate()` opens with `// Don't update templates, but leave code in place for future reference` and returns, and `downloadTemplates()` does the same — so the `template-repos` registration under `/boot/config/plugins/dockerMan/` is inert, and a `<TemplateURL>` buys nothing on its own. (Both are still no-ops on master.) Templates from this repo appear under **Docker → Add Container** in the *User templates* group because `sync-templates.py` seeds a `my-<name>.xml` for each one; `<TemplateURL>` earns its keep by letting that script map an instance back to the template it came from. "Check for update" only checks the image, never the template. **So: edit a template here, then run `sync-templates.py` — nothing else propagates it.**
+**`sync-templates.py` is the only thing that carries a template change toward a container that already exists — and it carries it as far as that container's *saved template*, not into the container itself.** Stock Unraid never merges a template change into an existing container, and that is deliberate rather than a bug: in `emhttp/plugins/dynamix.docker.manager/include/DockerClient.php`, `updateUserTemplate()` opens with `// Don't update templates, but leave code in place for future reference` and returns — on every release from 6.12 to current. Its sibling `downloadTemplates()` became a no-op only in **7.3.0**; on 6.12.x—7.2.x it is live, so registering this repo in `/boot/config/plugins/dockerMan/template-repos` there really does mirror it into `templates-usb` and refresh the *Default templates* list — but that path feeds **new** containers only (and deletes templates it no longer finds), and never touches an existing `my-*.xml`. Templates from this repo appear under **Docker → Add Container** in the *User templates* group because `sync-templates.py` seeds a `my-<name>.xml` for each; `<TemplateURL>` earns its keep by letting that script map an instance back to its template. "Check for update" only checks the image, never the template. **So: edit a template here, run `sync-templates.py`, then open the container's Edit page and press Apply — the script rewrites `my-<name>.xml`, and only Apply rebuilds the container from it.**
 
 ### `github-runner.xml`
 
@@ -47,8 +47,8 @@ Everything an operator has to act on is in the template's own `<Config Descripti
 fields, which is deliberate: Unraid never renders XML comments, and `sync-templates.py`
 reconciles `<Config>` elements only — so for a container that already exists, edits to
 `<Overview>` never arrive, and a field description is the one place *prose* reaches both new
-and existing instances — via `sync-templates.py`, which is the only mechanism that does (see
-above). What follows is orientation, not the reference.
+and existing instances — via `sync-templates.py` followed by an Apply, which is the only route
+there is (see above). What follows is orientation, not the reference.
 
 - **Why Docker-in-Docker.** Under the socket model the runner asked the *host's* daemon for
   a workflow's `services:` container, so the published port landed in the **host's** network
@@ -75,13 +75,13 @@ above). What follows is orientation, not the reference.
   step fails against a runner the UI shows as healthy.
 - **Do not point this runner at a public repository.** A job on it is root in a privileged
   container, and on a public repo anyone can open a fork pull request. If outside
-  contributions are in play at all, set Settings → Actions → General → *Fork pull request
-  workflows from outside collaborators* to **Require approval for all external
-  contributors**; the first-time-contributors default is not enough here.
+  contributions are in play at all, go to Settings → Actions → General and, under the fork
+  pull-request approval settings, choose **Require approval for all external contributors**; the first-time-contributors default is not enough here.
 - **`RUNNER_NAME` is printed in every job log**, so never name it for the machine. A runner's
   full registered label set is not printed the same way, but the labels a job *requests* are
-  shown on the run, and the `runs-on:` line naming them is in the workflow file, world-readable
-  on a public repo. Same conclusion for labels, by a different route.
+  shown on the run — that line comes from GitHub's side and appears in the web view rather than in
+  the downloaded log archive — and the `runs-on:` line naming them is in the workflow file,
+  world-readable on a public repo. Same conclusion for labels, by a different route.
 - **Known limit, measured:** a container the in-container daemon starts on a bridge network
   may have no return path to the network — on the runner this was measured on, attached to a
   *custom* Unraid network, the outbound SYN was forwarded and source-NATed out correctly and
@@ -135,7 +135,7 @@ parameter, never a second script:
 The committed copy is the **live** version (`DRY_RUN = False`). To validate a change
 first, flip the constant to `True`, run it, review the output, then flip it back.
 
-**Install as an Unraid User Script:** *Settings → User Scripts → Add New Script*,
+**Install as an Unraid User Script:** *Settings → User Utilities → User Scripts → Add New Script*,
 name it `sync-templates`, paste the file in as the script body, and run it with
 *Run Script* (leave it unscheduled — it is a deliberate, on-demand action, not a
 cron job). Requires python3 ≥ 3.9; stdlib only, no dependencies to install.

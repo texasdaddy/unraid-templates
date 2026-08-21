@@ -28,7 +28,7 @@ Every template + icon in this repo must have a row here — keep this table in s
 `templates/` holds the Unraid container templates (`<Icon>` pre-set). Secrets are blank
 by design — fill them in Unraid on import.
 
-**This repo is registered as a template repository on the Unraid host** (`/boot/config/plugins/dockerMan/template-repos`), so Unraid tracks it: the templates appear under **Docker → Add Container** and, because each template carries a `<TemplateURL>` to its raw file, Unraid **merges new `<Config>` variables into an existing container when its Edit page is opened** (no purge/redeploy needed — that's the CA update path; "check for update" only checks the image). GitHub-raw caches ~5 min.
+**`sync-templates.py` is the only thing that updates an existing container.** Stock Unraid does *not* merge template changes into one, and it is worth knowing this is deliberate rather than a bug: in `emhttp/plugins/dynamix.docker.manager/include/DockerClient.php`, `updateUserTemplate()` opens with `// Don't update templates, but leave code in place for future reference` and returns, and `downloadTemplates()` does the same — so the `template-repos` registration under `/boot/config/plugins/dockerMan/` is inert, and a `<TemplateURL>` buys nothing on its own. (Both are still no-ops on master.) Templates from this repo appear under **Docker → Add Container** in the *User templates* group because `sync-templates.py` seeds a `my-<name>.xml` for each one; `<TemplateURL>` earns its keep by letting that script map an instance back to the template it came from. "Check for update" only checks the image, never the template. **So: edit a template here, then run `sync-templates.py` — nothing else propagates it.**
 
 ### `github-runner.xml`
 
@@ -47,7 +47,8 @@ Everything an operator has to act on is in the template's own `<Config Descripti
 fields, which is deliberate: Unraid never renders XML comments, and `sync-templates.py`
 reconciles `<Config>` elements only — so for a container that already exists, edits to
 `<Overview>` never arrive, and a field description is the one place *prose* reaches both new
-and existing instances. What follows is orientation, not the reference.
+and existing instances — via `sync-templates.py`, which is the only mechanism that does (see
+above). What follows is orientation, not the reference.
 
 - **Why Docker-in-Docker.** Under the socket model the runner asked the *host's* daemon for
   a workflow's `services:` container, so the published port landed in the **host's** network
@@ -59,12 +60,11 @@ and existing instances. What follows is orientation, not the reference.
   runner running the same workflow collides. An in-container daemon makes the service a
   sibling on a private daemon: `localhost` resolves, nothing is published on the host, and
   N runners never collide.
-- **Three settings have no field of their own**, because Unraid does not express them as
-  `<Config>` entries, so nothing carries an inline description for them: **Network** must be
-  `Bridge`, **Privileged** must be on (both on the container's Edit page, Advanced View),
-  and the container **Name** should match `RUNNER_NAME`. For a container that already
-  exists, *none* of the three is updated by `sync-templates.py` or by Unraid's template
-  merge — set them by hand. This is the step most easily missed when converting an
+- **Three settings have no `<Config>` field of their own**, so their instructions ride inside
+  other fields' descriptions: **Network** (must be `Bridge`) and **Privileged** (must be on)
+  in `START_DOCKER_SERVICE`, and the container **Name** in `RUNNER_NAME`. For a container
+  that already exists, *none* of the three is updated by `sync-templates.py` or by Unraid's
+  template merge — set them by hand. This is the step most easily missed when converting an
   existing host-socket runner, and getting it wrong is silent.
 - **`Privileged` and `START_DOCKER_SERVICE` are one setting in two places.** Both are
   required, and `START_DOCKER_SERVICE` must be the *exact string* `true` — the entrypoint
@@ -78,9 +78,10 @@ and existing instances. What follows is orientation, not the reference.
   contributions are in play at all, set Settings → Actions → General → *Fork pull request
   workflows from outside collaborators* to **Require approval for all external
   contributors**; the first-time-contributors default is not enough here.
-- **`RUNNER_NAME` is printed in every job log**, so never name it for the machine. Labels
-  are *not* printed there — what publishes them is the `runs-on:` line in the workflow file,
-  world-readable on a public repo. Same conclusion, different mechanism.
+- **`RUNNER_NAME` is printed in every job log**, so never name it for the machine. A runner's
+  full registered label set is not printed the same way, but the labels a job *requests* are
+  shown on the run, and the `runs-on:` line naming them is in the workflow file, world-readable
+  on a public repo. Same conclusion for labels, by a different route.
 - **Known limit, measured:** a container the in-container daemon starts on a bridge network
   may have no return path to the network — on the runner this was measured on, attached to a
   *custom* Unraid network, the outbound SYN was forwarded and source-NATed out correctly and
@@ -97,7 +98,7 @@ and existing instances. What follows is orientation, not the reference.
 | Script | What it is | Where it runs |
 |---|---|---|
 | `scripts/sync-templates.py` | Reconciles the Unraid host's `my-*.xml` container templates against this repo | Unraid host, via **User Scripts** |
-| `scripts/check_no_internal_info.py` | Public-repo guard: fails if an operator host, IP, pool path or personal name is committed | CI, on every PR — see the caveat below |
+| `scripts/check_no_internal_info.py` | Public-repo guard: fails on internal-looking **shapes** — RFC1918/CGNAT addresses, `.lan`/`.local`/`*.ts.net` hosts, `/mnt/<pool>` paths, freemail addresses, bare UUIDs. It **cannot** see a bare hostname, codename or personal name; those have no shape, and a second guard held outside every repo is what catches them. Both layers are required, and green CI here is not clearance. | CI, on every PR, on push to `main`, and on `v*` tags — see the caveat below |
 
 > **The guard is advisory, not enforcing.** It runs on every pull request and
 > fails loudly, but `main` has no branch protection and no rulesets, so nothing

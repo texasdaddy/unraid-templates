@@ -1,0 +1,53 @@
+<?xml version="1.0"?>
+<!--
+  the-desk — daily order-sizing worksheet + investment-monitoring dashboard (Flask; its own
+  repo: github.com/texasdaddy/the-desk). Self-contained image built by that repo's CI → GHCR.
+  Deploys the Unraid way: UI import → set TAPE_BASE_URL + credentials → Apply.
+  LIVE ONLY. The dashboard assembles from Tape on every page load and caches nothing. /data
+  is the ONLY volume and holds ONE file — the notifier's "which tier did I last see, which
+  LTCG crossings have I already pinged" bookkeeping.
+
+  ⭐ TAPE MUST SERVE THE PORTFOLIO SURFACE (/v1/portfolio/positions|accounts|lots|plan|review)
+  FOR THIS TO SHOW ANYTHING BEYOND PRICES. Those endpoints did not exist as of 2026-08-23.
+  Until they do, the dashboard renders named gap panels naming each missing endpoint. That is
+  intended: nothing is ever substituted for data Tape cannot serve.
+-->
+<Container version="2">
+  <Name>the-desk</Name>
+  <Repository>ghcr.io/texasdaddy/the-desk:stable</Repository>
+  <Registry>https://github.com/texasdaddy/the-desk/pkgs/container/the-desk</Registry>
+  <Network>bridge</Network>                                          <!-- neutral default; pick br0 + a fixed IP in the UI if you prefer. -->
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support/>
+  <Project>https://github.com/texasdaddy/the-desk</Project>
+  <Overview>The Desk — the morning order-sizing worksheet. Sizes each recurring buy from where a position's 30-day average sits in its 52-week range (top third 1x, middle 2x, bottom third 3x of a per-position daily base), and shows accounts, a taxable-lot LTCG exit ladder, the Monte Carlo trend against the retirement band, and the rules registry. Every displayed number traces to the live payload plus a rule id; the tool never decides — all orders are hand-placed. LIVE ONLY: every page load reads Tape and nothing is cached, so when Tape is down there is no worksheet rather than a stale one. Requires TAPE_BASE_URL plus either TAPE_CLIENT_ID/TAPE_CLIENT_SECRET or the legacy TAPE_API_KEY. NOTE: beyond prices, this needs Tape's /v1/portfolio/* surface, which did not exist as of 2026-08-23 — until it ships the dashboard shows gap panels naming each missing endpoint, and substitutes nothing. Notifications fire on exactly two events — a band tier change and a lot entering the 30-day LTCG window — and only if NTFY_URL is set; every ping is also recorded, so nothing is lost when notifications are off.</Overview>
+  <Category>Productivity: Network:Other</Category>
+  <WebUI>http://[IP]:[PORT:5057]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/templates/the-desk.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/icons/the-desk.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <DateInstalled/>
+  <Description>The Desk — daily order-sizing worksheet and investment-monitoring dashboard (Flask).</Description>
+
+  <Config Name="HTTP Port" Target="5057" Default="5057" Mode="tcp" Description="App HTTP port" Type="Port" Display="always" Required="false" Mask="false">5057</Config>
+  <Config Name="Data" Target="/data" Default="" Mode="rw" Description="The only persistent volume, holding one file: notifier-state.json (which tier each symbol was last seen at, and which LTCG crossings have already pinged). No portfolio data is ever written here — the dashboard is live-only. Lose it and the next notification pass re-establishes tiers with no TIER change badges and may re-send one LTCG ping; nothing else is affected. REQUIRED - an absolute path on a POOL." Type="Path" Display="always" Required="true" Mask="false"/>
+
+  <Config Name="TAPE_BASE_URL" Target="TAPE_BASE_URL" Default="" Mode="" Description="Base URL of the Tape API, e.g. https://tape.example.com (no trailing path). REQUIRED — the dashboard has no other data source and caches nothing. Without it the container still starts and serves a page, but that page reports that Tape is unconfigured and names the variables to set." Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="TAPE_CLIENT_ID" Target="TAPE_CLIENT_ID" Default="" Mode="" Description="Tape API client id (X-Client-Id), market-scoped. Register a client dedicated to The Desk via Tape's /v1/admin/clients so it can be rotated or revoked without touching anything else. Set together with TAPE_CLIENT_SECRET." Type="Variable" Display="always" Required="false" Mask="false"/>
+  <Config Name="TAPE_CLIENT_SECRET" Target="TAPE_CLIENT_SECRET" Default="" Mode="" Description="Tape API client secret (X-Client-Secret). Set together with TAPE_CLIENT_ID." Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="TAPE_API_KEY" Target="TAPE_API_KEY" Default="" Mode="" Description="LEGACY shared key (X-API-Key), used only while Tape's client registry flag is off. Prefer TAPE_CLIENT_ID/TAPE_CLIENT_SECRET. Setting both is safe — Tape ignores the key in registry mode, so the same container works either side of the cutover." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+
+  <Config Name="NTFY_URL" Target="NTFY_URL" Default="" Mode="" Description="Full ntfy topic URL, e.g. https://ntfy.example.com/my-topic. Blank = no push notifications; the two events are still recorded and shown under SINCE LAST LOOK. Treat this URL as a secret: anyone holding it can read and publish to the topic." Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="NTFY_TOKEN" Target="NTFY_TOKEN" Default="" Mode="" Description="Bearer token for a protected ntfy topic (optional)." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+
+  <Config Name="TZ" Target="TZ" Default="America/Chicago" Mode="" Description="Container timezone. Drives the notification cron below and the dates written into events. Set it to your own zone or the evening pass will fire at the wrong hour." Type="Variable" Display="always" Required="false" Mask="false">America/Chicago</Config>
+  <Config Name="DESK_NOTIFY_CRON" Target="DESK_NOTIFY_CRON" Default="30 17 * * mon-fri" Mode="" Description="When to run the NOTIFICATION pass, as a 5-field cron in the container's TZ. This does NOT feed the dashboard — the page is live and never waits on it. It exists because a tier CHANGE is only visible to something that was awake to see the previous tier. Default 17:30 Mon-Fri, after the close. A missed pass is not chased; the next one picks up whatever moved. USE NAMED DAYS (mon-fri), never numbers: the scheduler counts 0 as Monday, so a crontab-style 1-5 fires Tue-Sat — dropping Monday and adding a day with no close." Type="Variable" Display="advanced" Required="false" Mask="false">30 17 * * mon-fri</Config>
+  <Config Name="DESK_NOTIFY_ON_BOOT" Target="DESK_NOTIFY_ON_BOOT" Default="true" Mode="" Description="Also run the notification pass at container start. Leave true unless you are debugging; it seeds the tier baseline so the first scheduled pass has something to compare against. It does not affect what the dashboard displays." Type="Variable" Display="advanced" Required="false" Mask="false">true</Config>
+
+  <Config Name="DESK_STALE_AMBER_HOURS" Target="DESK_STALE_AMBER_HOURS" Default="24" Mode="" Description="rule stale-1: price age at which the banner turns amber (AGING). Sizes are still shown." Type="Variable" Display="advanced" Required="false" Mask="false">24</Config>
+  <Config Name="DESK_STALE_RED_HOURS" Target="DESK_STALE_RED_HOURS" Default="72" Mode="" Description="rule stale-1: price age at which the banner turns red (STALE) and every computed buy size is WITHHELD — no verdict from stale data. Must be greater than the amber threshold." Type="Variable" Display="advanced" Required="false" Mask="false">72</Config>
+
+  <Config Name="DESK_LOG_LEVEL" Target="DESK_LOG_LEVEL" Default="INFO" Mode="" Description="INFO (default) or DEBUG. Credentials are never logged at any level." Type="Variable" Display="advanced" Required="false" Mask="false">INFO</Config>
+</Container>

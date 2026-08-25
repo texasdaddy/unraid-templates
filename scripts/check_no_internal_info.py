@@ -327,12 +327,17 @@ ALLOW_LITERALS: tuple[str, ...] = (
 # that precisely on purpose: it is not a proof over all possible inputs, and a comment claiming
 # one would be the kind of unverified strength claim this file exists to keep out.
 #
-# ⚠️ The host spans are LEFT-BOUNDED and anchor each label with `(?:[\w-]+\.)*`, rather than
-# leading with a bare `[\w.-]*` as this file used to. An unbounded leading `[\w.-]*` overlaps the
-# `\.` that follows it AND can start at every position in a run of word characters, so the cost
-# is quadratic in line length: 2 000 chars 0.06 s, 4 000 chars 0.21 s, 8 000 chars 0.84 s,
-# 16 000 chars 3.40 s — a clean 4x per doubling. Bounded and anchored, 16 000 chars complete in
-# 0.0005 s.
+# ⚠️ The host spans are LEFT-BOUNDED, rather than leading with a bare `[\w.-]*` as this file used
+# to. An unbounded leading `[\w.-]*` overlaps the `\.` that follows it AND can start at every
+# position in a run of word characters, so the cost is quadratic in line length: 2 000 chars
+# 0.06 s, 4 000 chars 0.21 s, 8 000 chars 0.84 s, 16 000 chars 3.40 s — a clean 4x per doubling.
+# Bounded, 16 000 chars complete in 0.0005 s.
+#
+# (This paragraph used to add "and anchor each label with `(?:[\w-]+\.)*`", describing an
+# "anchored body" that no longer exists anywhere in the file — the leading-label group was
+# REMOVED entirely, which is what the block above says. A leftover half-sentence from a
+# superseded design reads as a description of the current one; the surviving lesson is the LEFT
+# BOUND, not the anchoring.)
 #
 # ⚠️ THE LEFT BOUND IS WHAT MATTERS, and it is easy to mis-attribute: adding `(?<![\w.-])` to the
 # OLD flat body also makes it linear, so a "revert" that keeps the bound looks like evidence that
@@ -509,7 +514,10 @@ def tracked_files(root: Path) -> list[Path]:
     """
     out = subprocess.run(["git", "ls-files", "-z"], cwd=root, capture_output=True,
                          check=True, timeout=_GIT_TIMEOUT_S)
-    seen = dict.fromkeys(p for p in out.stdout.decode("utf-8").split("\0") if p)
+    # `errors="replace"`, matching `gitlinks` and `_git`. This decode was STRICT while both its
+    # peers were lenient, so a tracked path that is not valid UTF-8 — ordinary on Linux, where a
+    # filename is bytes — crashed the scan with a traceback instead of producing a verdict.
+    seen = dict.fromkeys(p for p in out.stdout.decode("utf-8", errors="replace").split("\0") if p)
     return [root / p for p in seen]
 
 
@@ -1200,8 +1208,11 @@ def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
     # Submodule entries, resolved once. See `gitlinks` for why they cannot be told apart from a
     # staged-but-deleted file by catching exceptions.
     submodules = gitlinks(root)
-    # Paths whose staged content differs from the worktree — one git call for the whole repo.
+    # Paths whose staged content differs from the worktree, and their blobs — two git calls for
+    # the whole repository, however many files are mid-edit. See `staged_texts` for why that
+    # matters: per-file it was 78 s on a 1000-file working tree, on the pre-commit path.
     mid_edit = staged_differs(root)
+    staged_blobs = staged_texts(root, sorted(mid_edit))
     for path in tracked_files(root):
         rel = path.relative_to(root).as_posix()
         if _skipped(rel, root):
@@ -1247,9 +1258,9 @@ def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
                      for n, label, match in scan_text(text, compiled, rel)]
         # ...and, when the two differ, what the COMMIT will actually contain. See `staged_differs`.
         if rel in mid_edit:
-            staged = staged_text(root, rel)
+            staged = staged_blobs.get(rel)
             if staged is None:
-                undecodable.append(f"{rel} (its STAGED content is not UTF-8)")
+                undecodable.append(f"{rel} (its STAGED content could not be read)")
             elif staged != text:
                 findings += [f"{rel} [STAGED]:{n}: {label}: {match!r}"
                              for n, label, match in scan_text(staged, compiled, rel)]
@@ -1319,15 +1330,89 @@ def staged_differs(root: Path) -> set[str]:
     they differ: the worktree (is the leak here NOW) and the staged blob (what the commit will
     CONTAIN). Neither answers the other's question.
 
-    One `git diff` for the whole repository, so the per-file blob read is paid only for the
-    handful of files actually mid-edit.
+    One `git diff` for the whole repository, and the blobs are then read in ONE
+    `cat-file --batch` (see `staged_texts`) rather than one git process per file.
+
+    Unmerged paths are excluded: they have no stage-0 entry, so asking for `:<path>` fails and got
+    reported as unreadable on a conflict whose content is perfectly clean. See `unmerged_paths`.
+
+    KNOWN LIMIT: a path marked `--assume-unchanged` or `skip-worktree` is invisible to `git diff`,
+    so a leak staged under one is not seen by THIS layer. The push-path range scan still catches
+    it, and nothing saw it before either — so it is not a regression, but it is a limit of this
+    layer rather than a property of the guard, and it is written down instead of assumed.
     """
     try:
-        return {p for p in _git(root, "diff", "--name-only", "-z").split("\0") if p}
-    except subprocess.CalledProcessError:
-        # No index to compare (a bare or brand-new repo). The worktree scan still runs; this only
-        # ever ADDS coverage, so failing to determine it is not a reason to fail the scan.
+        differs = {p for p in _git(root, "diff", "--name-only", "-z").split("\0") if p}
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        # No index to compare (a bare or brand-new repo), or git took too long. The worktree scan
+        # still runs; this only ever ADDS coverage, so failing to determine it is not a reason to
+        # fail the whole scan. ⚠️ `TimeoutExpired` is NOT a `CalledProcessError`, so leaving it out
+        # of this tuple contradicted the sentence above and aborted the entire scan.
         return set()
+    return differs - unmerged_paths(root)
+
+
+def unmerged_paths(root: Path) -> set[str]:
+    """Paths in an unresolved merge conflict — they have NO stage-0 entry.
+
+    `git cat-file blob :<path>` FAILS on one of these ("is in the index, but not at stage 0"),
+    which the staged read turned into "its STAGED content is not UTF-8": a false RED on a conflict
+    that leaks nothing, pointing the operator at an encoding problem that does not exist. `git
+    commit` refuses while a conflict is unresolved so the hook itself never fires, but a manual
+    run and a CI tree scan taken mid-merge both hit it.
+    """
+    try:
+        out = _git(root, "ls-files", "-u", "-z")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return set()
+    return {entry.partition("\t")[2] for entry in out.split("\0") if "\t" in entry}
+
+
+def staged_texts(root: Path, paths: list[str]) -> dict[str, str | None]:
+    """The INDEX content of each path, decoded — or None where it cannot be read.
+
+    ⚡ ONE GIT PROCESS FOR ALL OF THEM, not one per file. The first version called `git cat-file`
+    per path at ~75 ms each, so an ordinary "reformat the tree, then commit a subset" state with
+    1000 modified files made the PRE-COMMIT HOOK take 78 SECONDS (measured; a clean tree is 3 s).
+    That is exactly the hang this file's no-silent-hangs rule forbids, and it is the SAME mistake
+    `added_lines` already carries a comment about avoiding — the unit of work was right and the
+    way of fetching it was not. The same 1000 blobs through `--batch` take 0.56 s.
+
+    The `--batch` protocol: one request per input line, and per request either
+    `<sha> <type> <size>` + newline + that many bytes + a newline, or `<rev> missing` + newline.
+    Responses come back in the order asked, which is what lets them be zipped back to their paths.
+    """
+    # A path containing a newline cannot be expressed in a line-based protocol. Vanishingly rare,
+    # and fail-closed: it stays None, i.e. reported as unreadable rather than silently skipped.
+    askable = [p for p in paths if "\n" not in p]
+    result: dict[str, str | None] = {p: None for p in paths}
+    if not askable:
+        return result
+    stdin = "".join(f":{p}\n" for p in askable).encode("utf-8")
+    try:
+        out = subprocess.run(["git", "cat-file", "--batch"], cwd=root, input=stdin,
+                             capture_output=True, check=True, timeout=_GIT_TIMEOUT_S).stdout
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return result
+    pos = 0
+    for path in askable:
+        nl = out.find(b"\n", pos)
+        if nl == -1:
+            break
+        header, pos = out[pos:nl], nl + 1
+        parts = header.split(b" ")
+        if len(parts) != 3 or parts[1] != b"blob":
+            continue            # `<rev> missing`, or a tree/tag where a blob was expected
+        try:
+            size = int(parts[2])
+        except ValueError:
+            break               # the stream is not the shape we think; stop rather than mis-slice
+        blob, pos = out[pos:pos + size], pos + size + 1
+        try:
+            result[path] = blob.decode("utf-8")
+        except UnicodeDecodeError:
+            result[path] = None
+    return result
 
 
 def is_shallow(root: Path) -> bool:
@@ -1355,15 +1440,15 @@ def _scan_commits(root: Path, rev_range: str,
         return 1
     rev_range, widened = widen_unreachable_base(root, rev_range)
     if widened:
-        print(widened)
+        print(_ascii(widened))
     try:
         result = scan_range(root, rev_range, compiled)
     except subprocess.CalledProcessError as exc:
         # A range git cannot resolve is NOT a pass. A shallow clone, an unfetched base or a typo
         # would otherwise scan zero commits and print a clean result — the one failure mode a
         # guard must never have.
-        print(f"could not scan {rev_range!r}: git exited {exc.returncode}. "
-              f"Fetch the base ref (CI needs fetch-depth: 0) or check the range.")
+        print(_ascii(f"could not scan {rev_range!r}: git exited {exc.returncode}. ")
+              + "Fetch the base ref (CI needs fetch-depth: 0) or check the range.")
         return 1
     if result.unscannable:
         # Same posture as the tree scan's `undecodable` list: a blob this cannot read is a blob
@@ -1375,8 +1460,13 @@ def _scan_commits(root: Path, rev_range: str,
         print("Add a binary suffix to SKIP_SUFFIXES if that is what it is, or commit the "
               "file as UTF-8 text.\n")
     if result.findings:
-        print(f"INTERNAL INFO FOUND in {len(result.findings)} place(s) published by {rev_range} "
-              f"- this repo is public and pushing publishes HISTORY:\n")
+        # ⚠️ `_ascii` HERE TOO. This is the line that ANNOUNCES a real leak, and with a non-ASCII
+        # branch name in `rev_range` it died mid-sentence under a hook's cp1252 stdout — the guard
+        # crashing at the exact moment it had something to say. The finding LIST was made
+        # ASCII-safe and these three `rev_range` sites were missed: the instance, not the class.
+        print(_ascii(f"INTERNAL INFO FOUND in {len(result.findings)} place(s) published by "
+                     f"{rev_range} ")
+              + "- this repo is public and pushing publishes HISTORY:\n")
         for f in result.findings:
             print("  " + _ascii(f))
         print("\nRemoving it in a LATER commit does not help: the value stays readable at "

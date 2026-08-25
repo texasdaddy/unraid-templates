@@ -1171,6 +1171,101 @@ def test_a_leak_STAGED_then_cleaned_in_the_worktree_is_still_caught(tmp_path: Pa
 
 
 @pytest.mark.timeout(300)
+def test_the_staged_side_is_read_in_ONE_git_process_not_one_per_file(tmp_path: Path) -> None:
+    """⛔ A PRE-COMMIT HOOK MAY NOT TAKE A MINUTE. The first version spawned `git cat-file` per
+    modified path at ~75 ms each, so an ordinary "reformat the tree, commit a subset" state with
+    1000 modified files took 78 SECONDS on every commit — the hang this file's own rule forbids,
+    and the identical mistake `added_lines` documents avoiding.
+
+    Pinned by COUNTING PROCESSES, not by wall-clock: a timing threshold on a shared runner is its
+    own flake, and the property that matters is "one batch, not one per file". 60 files would be
+    60 spawns under the old design.
+    """
+    repo = tmp_path / "manydirty"
+    _init(repo)
+    for i in range(60):
+        (repo / f"f{i:03d}.txt").write_text(f"clean line {i}\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    for i in range(60):
+        (repo / f"f{i:03d}.txt").write_text(f"edited line {i}\n", encoding="utf-8")
+
+    mid = guard.staged_differs(repo)
+    assert len(mid) == 60, f"precondition: all 60 should be mid-edit, got {len(mid)}"
+
+    calls = []
+    real = subprocess.run
+
+    def counting(cmd, *a, **kw):
+        if isinstance(cmd, list) and len(cmd) > 1 and cmd[1] == "cat-file":
+            calls.append(cmd)
+        return real(cmd, *a, **kw)
+
+    guard.subprocess.run = counting
+    try:
+        blobs = guard.staged_texts(repo, sorted(mid))
+    finally:
+        guard.subprocess.run = real
+
+    assert len(calls) == 1, (
+        f"{len(calls)} `git cat-file` processes for 60 files — the staged read is per-file again, "
+        f"which is 75 ms each on the commit path")
+    assert len(blobs) == 60 and all(v is not None for v in blobs.values())
+    assert blobs["f007.txt"] == "clean line 7\n", "the batch responses were mis-zipped to paths"
+
+
+@pytest.mark.timeout(300)
+def test_an_unresolved_merge_conflict_does_not_redden_a_clean_tree(tmp_path: Path) -> None:
+    """⛔ A FALSE-RED THE STAGED READ INTRODUCED. An unmerged path has NO stage-0 entry, so
+    `git cat-file blob :<path>` fails — and that was reported as "its STAGED content is not
+    UTF-8": red on a conflict that leaks nothing, blaming an encoding problem that does not exist.
+    """
+    repo = tmp_path / "conflictclean"
+    _init(repo)
+    f = repo / "a.txt"
+    f.write_text("base\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-q", "-m", "base")
+    _git(repo, "checkout", "-q", "-b", "other")
+    f.write_text("theirs, perfectly clean\n", encoding="utf-8")
+    _git(repo, "commit", "-q", "-am", "theirs")
+    _git(repo, "checkout", "-q", "main")
+    f.write_text("ours, also clean\n", encoding="utf-8")
+    _git(repo, "commit", "-q", "-am", "ours")
+    subprocess.run(["git", "merge", "other"], cwd=repo, capture_output=True)  # expected conflict
+
+    assert "a.txt" in guard.unmerged_paths(repo), "precondition: the path is unmerged"
+    proc = _run_guard(repo)
+    assert proc.returncode == 0, (
+        f"an unresolved conflict with entirely clean content reddened the tree: {proc.stdout}")
+
+
+@pytest.mark.timeout(300)
+def test_a_non_ascii_REVISION_RANGE_does_not_crash_the_announcement(tmp_path: Path) -> None:
+    """⚠️ THE SAME CLASS AS THE PATH CRASH, in the three sites the first fix missed.
+
+    `rev_range` is interpolated into the line that ANNOUNCES a finding, so with a non-ASCII branch
+    name the guard died mid-sentence at the exact moment it had something to report. Fixing the
+    finding LIST and not these was the instance rather than the class.
+    """
+    repo = tmp_path / "cjkbranch"
+    _init(repo)
+    _git(repo, "checkout", "-q", "-b", "feature/日本-branch")
+    (repo / "leak.txt").write_text(f"AGENT={_ADDR}\n", encoding="utf-8")
+    _git(repo, "add", "leak.txt")
+    _git(repo, "commit", "-q", "-m", "leak")
+
+    proc = subprocess.run(
+        [sys.executable, str(_SCRIPT), "--repo", str(repo), "--range", "feature/日本-branch"],
+        capture_output=True, timeout=300,
+        env={**os.environ, "PYTHONIOENCODING": "cp1252"})
+    assert b"Traceback" not in proc.stderr, (
+        f"the range scan CRASHED while announcing a finding: "
+        f"{proc.stderr.decode('utf-8', 'replace')}")
+    assert proc.returncode == 1, proc.stdout
+    assert b"INTERNAL INFO FOUND" in proc.stdout, proc.stdout
+
+
+@pytest.mark.timeout(300)
 def test_an_ordinary_unstaged_edit_of_a_clean_file_does_not_redden(tmp_path: Path) -> None:
     """The other direction: reading both sides must not invent findings. An ordinary mid-edit
     tree — index and worktree differing, both clean — has to stay green, or every developer with

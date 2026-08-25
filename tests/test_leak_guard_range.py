@@ -135,6 +135,21 @@ def _init(repo: Path) -> None:
     _git(repo, "init", "-q", "-b", "main")
 
 
+def _merge_expecting_conflict(repo: Path, branch: str) -> None:
+    """Merge `branch`, tolerating the non-zero exit a conflict produces.
+
+    ⚠️ THE IDENTITY FLAGS ARE LOAD-BEARING, and leaving them off passed locally and failed on CI.
+    A bare `git merge` is refused outright where no global `user.email` is configured — which is
+    every CI runner — so the merge never happened, no conflict state existed, and the test either
+    failed on its precondition or, worse, PASSED VACUOUSLY because the thing it was counting was
+    never created. `_git` injects an identity but uses `check=True`, and a conflicting merge exits
+    non-zero by design, so this is the one git call that needs both.
+    """
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "merge", branch],
+        cwd=repo, capture_output=True, timeout=120)
+
+
 # ------------------------------------------------------------------ THE regression (untracked)
 
 
@@ -1090,7 +1105,16 @@ def test_a_conflicted_path_is_scanned_and_reported_ONCE(tmp_path: Path) -> None:
     _git(repo, "checkout", "-q", "main")
     f.write_text(f"HOST={_HOST}\n", encoding="utf-8")
     _git(repo, "commit", "-q", "-am", "ours")
-    subprocess.run(["git", "merge", "other"], cwd=repo, capture_output=True)  # expected conflict
+    _merge_expecting_conflict(repo, "other")
+
+    # ⛔ PRECONDITION, because without it this test PASSES VACUOUSLY. If the merge did not actually
+    # conflict — as happened on CI, where a bare `git merge` is refused for want of a configured
+    # identity — then `c.txt` has ONE index entry for the ordinary reason and the count below is
+    # trivially 1, proving nothing about deduplication. Assert the multi-stage state exists first.
+    stages = _git(repo, "ls-files", "-u", "--", "c.txt").strip().splitlines()
+    assert len(stages) > 1, (
+        f"the merge left no duplicate index stages, so there is nothing to deduplicate and this "
+        f"test would prove nothing: {stages}")
 
     tracked = [p.name for p in guard.tracked_files(repo)]
     assert tracked.count("c.txt") == 1, (
@@ -1210,7 +1234,13 @@ def test_the_staged_side_is_read_in_ONE_git_process_not_one_per_file(tmp_path: P
         f"{len(calls)} `git cat-file` processes for 60 files — the staged read is per-file again, "
         f"which is 75 ms each on the commit path")
     assert len(blobs) == 60 and all(v is not None for v in blobs.values())
-    assert blobs["f007.txt"] == "clean line 7\n", "the batch responses were mis-zipped to paths"
+    # ⚠️ NEWLINE-AGNOSTIC. `Path.write_text` translates `\n` to CRLF on Windows, so what the blob
+    # holds depends on the machine's `core.autocrlf` — an exact-content assertion here passes or
+    # fails by environment rather than by behaviour, which is the same class as a clock-dependent
+    # test. What this case is actually about is that response N came back attached to path N.
+    assert blobs["f007.txt"].rstrip("\r\n") == "clean line 7", (
+        f"the batch responses were mis-zipped to paths: f007 got {blobs['f007.txt']!r}")
+    assert blobs["f042.txt"].rstrip("\r\n") == "clean line 42", blobs["f042.txt"]
 
 
 @pytest.mark.timeout(300)
@@ -1231,7 +1261,7 @@ def test_an_unresolved_merge_conflict_does_not_redden_a_clean_tree(tmp_path: Pat
     _git(repo, "checkout", "-q", "main")
     f.write_text("ours, also clean\n", encoding="utf-8")
     _git(repo, "commit", "-q", "-am", "ours")
-    subprocess.run(["git", "merge", "other"], cwd=repo, capture_output=True)  # expected conflict
+    _merge_expecting_conflict(repo, "other")
 
     assert "a.txt" in guard.unmerged_paths(repo), "precondition: the path is unmerged"
     proc = _run_guard(repo)

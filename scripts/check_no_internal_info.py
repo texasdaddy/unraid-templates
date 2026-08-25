@@ -231,8 +231,16 @@ PATTERNS: list[tuple[str, str]] = [
     # `unraid pool path`, whose pool list is fixed) and the environment-variable form
     # `%SystemDrive%\Users\<name>` are the same leak in different clothes.
     #
-    # `\\+` and not `\\{1,2}`: a path can be escaped more than twice (a JSON string inside a
-    # shell string), and `C:\\\Users\\\operator` walked through a two-backslash cap.
+    # ⚠️ `[\\/]+` FOR THE SEPARATOR — one class, both characters, any run length. This was got
+    # wrong TWICE in the same place, each repair closing only the half in front of it:
+    #   1. `\\{1,2}` capped backslashes at two, so `C:\\\Users\\\operator` (a JSON string inside a
+    #      shell string) walked through.
+    #   2. `(?:\\+|/)` fixed exactly that and left the forward-slash side at ONE, and forbade
+    #      mixing — so `C://Users/operator`, `/mnt/c//Users/operator` and
+    #      `file:///C://Users//operator` all walked through instead.
+    # A separator is a RUN of either character; writing it as one class is the form that has no
+    # remaining half. (Doubled slashes are not exotic: they come from naive path joining and from
+    # `file://` URLs.)
     #
     # KNOWN LIMITS, stated rather than half-covered (all three are also in the module docstring):
     #   * a UNC path (`\\<host>\<share>`) names a host and is NOT matched. Its shape — two
@@ -243,7 +251,7 @@ PATTERNS: list[tuple[str, str]] = [
     #   * percent-encoded separators (`C:%5CUsers%5Coperator`) are not matched — the same
     #     encoding limit the docstring already declares for base64 and percent-encoding.
     ("windows profile path",
-     r"(?<![\w])(?:[A-Za-z]:|/mnt/[a-z]|%\w+%)(?:\\+|/)Users(?:\\+|/)"
+     r"(?<![\w])(?:[A-Za-z]:|/mnt/[a-z]|%\w+%)[\\/]+Users[\\/]+"
      r"(?!(?:Public|Default|Default User|All Users)(?![\w.-]))[\w.-]+"),
 ]
 
@@ -303,10 +311,17 @@ ALLOW_LITERALS: tuple[str, ...] = (
 # One DNS label is not one CHARACTER-CLASS run, and that gap is where both bugs lived.
 #
 # So NO entry carries a leading label at all. `your-domain.example` is permitted by matching the
-# `.example` SUFFIX; the label in front is simply not part of the span. That costs nothing — with
-# the current denylist these spans suppress nothing whatsoever (no deny pattern can match INSIDE
-# an RFC5737 address or an `example.*` suffix) and they are retained as a deliberate carve-out
-# for a future pattern that would. `_MUST_FAIL_ADJACENT` pins the class, one case per label, and
+# `.example` SUFFIX; the label in front is simply not part of the span.
+#
+# ⚠️ AND THE ALLOWLIST IS NOT INERT. This comment used to say these spans "suppress nothing
+# whatsoever (no deny pattern can match INSIDE an RFC5737 address or an `example.*` suffix)" —
+# which enumerates two of the three span families and silently omits the third: `.env[.q].local`
+# contains a `private lan domain` match BY CONSTRUCTION, and suppression genuinely fires there.
+# That false half is exactly what made an unbounded version of that span read as harmless. The
+# same sentence appeared in `scan_text`'s docstring and was corrected there first; leaving the
+# copy here is how a corrected claim un-corrects itself. Treat the carve-out as live machinery.
+#
+# `_MUST_FAIL_ADJACENT` pins the class, one case per label, and
 # `test_no_permitted_span_overlaps_the_leak_in_any_curated_amnesty_case` asserts the invariant
 # behind it — that no permitted span OVERLAPS the leak — over exactly those curated cases. Stated
 # that precisely on purpose: it is not a proof over all possible inputs, and a comment claiming
@@ -472,10 +487,30 @@ def _exempt(label: str, rel_path: str) -> bool:
     return any(lb == label and rx.search(rel_path) for lb, rx in _PATH_EXEMPT_RX)
 
 
+def _ascii(s: str) -> str:
+    """A form safe to `print` from a git hook.
+
+    ⚠️ STDOUT IS A PIPE THERE, so Python falls back to the locale encoding (cp1252 on these
+    workstations) and a non-ASCII character raises UnicodeEncodeError mid-verdict. The file's own
+    rule is "ASCII ONLY in anything PRINTED" — but that was applied to the hand-written messages
+    and not to the interpolated PATHS, so one tracked file with an accented or CJK name crashed
+    the scan just as it was listing the finding. Exit stayed 1, so it failed closed; the operator
+    simply never got to see WHICH file leaked.
+    """
+    return s.encode("ascii", "backslashreplace").decode("ascii")
+
+
 def tracked_files(root: Path) -> list[Path]:
+    """Every tracked path, DEDUPLICATED.
+
+    `git ls-files -z` lists an unmerged (conflicted) path once per index stage, so a file in a
+    conflict was scanned two or three times and every finding in it printed as many times — which
+    reads as several separate leaks. `dict.fromkeys` keeps first-seen order.
+    """
     out = subprocess.run(["git", "ls-files", "-z"], cwd=root, capture_output=True,
                          check=True, timeout=_GIT_TIMEOUT_S)
-    return [root / p for p in out.stdout.decode("utf-8").split("\0") if p]
+    seen = dict.fromkeys(p for p in out.stdout.decode("utf-8").split("\0") if p)
+    return [root / p for p in seen]
 
 
 def _permitted_spans(line: str) -> list[tuple[int, int]]:
@@ -1165,6 +1200,8 @@ def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
     # Submodule entries, resolved once. See `gitlinks` for why they cannot be told apart from a
     # staged-but-deleted file by catching exceptions.
     submodules = gitlinks(root)
+    # Paths whose staged content differs from the worktree — one git call for the whole repo.
+    mid_edit = staged_differs(root)
     for path in tracked_files(root):
         rel = path.relative_to(root).as_posix()
         if _skipped(rel, root):
@@ -1208,18 +1245,26 @@ def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
         scanned += 1
         findings += [f"{rel}:{n}: {label}: {match!r}"
                      for n, label, match in scan_text(text, compiled, rel)]
+        # ...and, when the two differ, what the COMMIT will actually contain. See `staged_differs`.
+        if rel in mid_edit:
+            staged = staged_text(root, rel)
+            if staged is None:
+                undecodable.append(f"{rel} (its STAGED content is not UTF-8)")
+            elif staged != text:
+                findings += [f"{rel} [STAGED]:{n}: {label}: {match!r}"
+                             for n, label, match in scan_text(staged, compiled, rel)]
 
     if undecodable:
         print(f"UNREADABLE as UTF-8 ({len(undecodable)}) - not scanned, so not cleared:")
         for u in undecodable:
-            print("  " + u)
+            print("  " + _ascii(u))
         print("If it is binary, add its suffix to SKIP_SUFFIXES; if it is text, fix the "
               "encoding; if it is staged-but-deleted, re-stage it so the scan sees what the "
               "commit will contain.\n")
     if findings:
         print(f"INTERNAL INFO FOUND in {len(findings)} place(s) - this repo is public:\n")
         for f in findings:
-            print("  " + f)
+            print("  " + _ascii(f))
         print("\nReplace with a placeholder (<your-unraid-host>, your-domain.example, "
               "/mnt/POOL/..., RFC5737 addresses) or take the value from an env Variable.")
         print("If a hit is genuinely legitimate, add the literal to ALLOW_LITERALS in "
@@ -1253,6 +1298,36 @@ def staged_text(root: Path, rel: str) -> str | None:
         return raw.decode("utf-8")
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, UnicodeDecodeError):
         return None
+
+
+def staged_differs(root: Path) -> set[str]:
+    """Tracked paths whose INDEX content differs from the worktree.
+
+    ⭐ THE SIBLING OF THE STAGED-BUT-DELETED HOLE, and the same mechanism: the tree scan reads the
+    WORKTREE, while a commit records the INDEX. Deletion was only the loudest case of that gap.
+    Stage a leak, then clean the worktree copy WITHOUT re-staging, and the tree scan reads the
+    tidy version and reports clean — while the commit carries the leak:
+
+        git add cfg.txt                 # cfg.txt holds an internal host
+        printf 'AGENT=...example\\n' > cfg.txt   # cleaned, NOT re-staged
+        check_no_internal_info.py       # "no internal info found", exit 0
+        git commit                      # the leak is committed
+
+    The range scan catches it on the push path, so nothing reaches the remote while that layer
+    runs — but the pre-commit layer said CLEAN, and a guard that clears what it did not read is
+    the one failure mode this file may not have. So the tree scan now reads BOTH sides whenever
+    they differ: the worktree (is the leak here NOW) and the staged blob (what the commit will
+    CONTAIN). Neither answers the other's question.
+
+    One `git diff` for the whole repository, so the per-file blob read is paid only for the
+    handful of files actually mid-edit.
+    """
+    try:
+        return {p for p in _git(root, "diff", "--name-only", "-z").split("\0") if p}
+    except subprocess.CalledProcessError:
+        # No index to compare (a bare or brand-new repo). The worktree scan still runs; this only
+        # ever ADDS coverage, so failing to determine it is not a reason to fail the scan.
+        return set()
 
 
 def is_shallow(root: Path) -> bool:
@@ -1296,14 +1371,14 @@ def _scan_commits(root: Path, rev_range: str,
         print(f"BINARY / UNREADABLE in {len(result.unscannable)} added file(s) - not "
               f"scanned, so NOT CLEARED:")
         for u in result.unscannable:
-            print("  " + u)
+            print("  " + _ascii(u))
         print("Add a binary suffix to SKIP_SUFFIXES if that is what it is, or commit the "
               "file as UTF-8 text.\n")
     if result.findings:
         print(f"INTERNAL INFO FOUND in {len(result.findings)} place(s) published by {rev_range} "
               f"- this repo is public and pushing publishes HISTORY:\n")
         for f in result.findings:
-            print("  " + f)
+            print("  " + _ascii(f))
         print("\nRemoving it in a LATER commit does not help: the value stays readable at "
               "the commit that added it. Rewrite the offending commits (git rebase -i / "
               "filter-repo) BEFORE pushing, then re-run this.")

@@ -48,6 +48,7 @@ SHAPE
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import subprocess
 import sys
@@ -1046,6 +1047,56 @@ def test_a_trailing_glob_IS_a_known_false_positive_and_is_recorded_as_one() -> N
         "unraid-templates#32.")
 
 
+@pytest.mark.timeout(300)
+def test_a_non_ascii_path_does_not_CRASH_the_verdict(tmp_path: Path) -> None:
+    """⚠️ The guard's own rule is "ASCII ONLY in anything PRINTED", and it was applied to the
+    hand-written messages but not to the interpolated PATHS.
+
+    From a git hook stdout is a pipe, so Python falls back to the locale encoding (cp1252 here)
+    and one tracked file with an accented or CJK name raised UnicodeEncodeError mid-verdict —
+    just as it was listing the finding. It failed CLOSED (exit stayed 1), so this is robustness
+    rather than a bypass; the cost is that the operator never learns WHICH file leaked.
+    """
+    repo = tmp_path / "unicode"
+    _init(repo)
+    (repo / "café-日.md").write_text(f"AGENT={_ADDR}\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+
+    proc = subprocess.run(
+        [sys.executable, str(_SCRIPT), "--repo", str(repo)],
+        capture_output=True, timeout=300,
+        env={**os.environ, "PYTHONIOENCODING": "cp1252"})
+    assert proc.returncode == 1, f"the leak was not caught: {proc.stdout!r} {proc.stderr!r}"
+    assert b"Traceback" not in proc.stderr, (
+        f"the scan CRASHED while printing the finding instead of reporting it: "
+        f"{proc.stderr.decode('utf-8', 'replace')}")
+    assert b"private IPv4" in proc.stdout, proc.stdout
+
+
+@pytest.mark.timeout(300)
+def test_a_conflicted_path_is_scanned_and_reported_ONCE(tmp_path: Path) -> None:
+    """`git ls-files -z` lists an unmerged path once PER INDEX STAGE, so a file in a conflict was
+    scanned two or three times and each finding printed as many times — which reads as several
+    separate leaks in different places."""
+    repo = tmp_path / "conflict"
+    _init(repo)
+    f = repo / "c.txt"
+    f.write_text("base\n", encoding="utf-8")
+    _git(repo, "add", "c.txt")
+    _git(repo, "commit", "-q", "-m", "base")
+    _git(repo, "checkout", "-q", "-b", "other")
+    f.write_text(f"AGENT={_ADDR}\n", encoding="utf-8")
+    _git(repo, "commit", "-q", "-am", "theirs")
+    _git(repo, "checkout", "-q", "main")
+    f.write_text(f"HOST={_HOST}\n", encoding="utf-8")
+    _git(repo, "commit", "-q", "-am", "ours")
+    subprocess.run(["git", "merge", "other"], cwd=repo, capture_output=True)  # expected conflict
+
+    tracked = [p.name for p in guard.tracked_files(repo)]
+    assert tracked.count("c.txt") == 1, (
+        f"a conflicted path is listed once per index stage and was not deduplicated: {tracked}")
+
+
 def test_the_delete_then_match_pass_is_gone_and_must_not_come_back() -> None:
     """`_neutralize` WAS the bug: deletion is what let a permitted token consume its neighbours.
 
@@ -1089,6 +1140,50 @@ def test_a_staged_then_deleted_file_is_REPORTED_not_silently_skipped(tmp_path: P
     # this path" sent them looking by hand.
     assert "staged.txt:1" in proc.stdout, proc.stdout
     assert "private lan domain" in proc.stdout, proc.stdout
+
+
+@pytest.mark.timeout(300)
+def test_a_leak_STAGED_then_cleaned_in_the_worktree_is_still_caught(tmp_path: Path) -> None:
+    """⭐ THE SIBLING OF THE STAGED-BUT-DELETED HOLE — same mechanism, quieter shape.
+
+    Deletion was only the loudest way for the index and the worktree to disagree. Stage a leak,
+    then tidy the worktree copy WITHOUT re-staging: the tree scan reads the tidy version, reports
+    CLEAN, and the commit carries the leak. The range scan catches it on the push path, but the
+    pre-commit layer had already said clean — and a guard that clears what it did not read is the
+    one failure mode this file may not have.
+    """
+    repo = tmp_path / "stagedmod"
+    _init(repo)
+    cfg = repo / "cfg.txt"
+    cfg.write_text(f"AGENT_URL=http://{_HOST}:9999/mcp\n", encoding="utf-8")
+    _git(repo, "add", "cfg.txt")
+    # Clean the WORKTREE only. The index still holds the leak, and so will the commit.
+    cfg.write_text("AGENT_URL=http://your-host.example:9999/mcp\n", encoding="utf-8")
+
+    assert _HOST in _git(repo, "show", ":cfg.txt"), "precondition: the index still holds it"
+    assert _HOST not in cfg.read_text(encoding="utf-8"), "precondition: the worktree is clean"
+
+    proc = _run_guard(repo)
+    assert proc.returncode == 1, (
+        f"a leak that is STAGED but tidied in the worktree scanned CLEAN — the tree scan is "
+        f"reading the worktree instead of what the commit will contain: {proc.stdout}")
+    assert "STAGED" in proc.stdout and "cfg.txt" in proc.stdout, proc.stdout
+
+
+@pytest.mark.timeout(300)
+def test_an_ordinary_unstaged_edit_of_a_clean_file_does_not_redden(tmp_path: Path) -> None:
+    """The other direction: reading both sides must not invent findings. An ordinary mid-edit
+    tree — index and worktree differing, both clean — has to stay green, or every developer with
+    unstaged work sees red."""
+    repo = tmp_path / "midedit"
+    _init(repo)
+    cfg = repo / "cfg.txt"
+    cfg.write_text("first version, perfectly clean\n", encoding="utf-8")
+    _git(repo, "add", "cfg.txt")
+    cfg.write_text("second version, also clean\n", encoding="utf-8")
+
+    proc = _run_guard(repo)
+    assert proc.returncode == 0, f"an ordinary unstaged edit reddened the tree: {proc.stdout}"
 
 
 @pytest.mark.timeout(300)
@@ -1404,6 +1499,36 @@ def test_ordinary_windows_paths_do_NOT_fire(sample: str) -> None:
 def test_the_other_spellings_of_a_windows_profile_path_are_caught(sample: str) -> None:
     labels = {label for _, label, _ in guard.scan_text(sample, COMPILED)}
     assert "windows profile path" in labels, f"{sample!r} walks through -> {labels}"
+
+
+@pytest.mark.parametrize("sample", [
+    # ⭐ THE SEPARATOR CLASS, closed properly this time. `\\{1,2}` capped backslashes at two;
+    # `(?:\\+|/)` fixed that and left the forward-slash side at ONE and forbade mixing. Each of
+    # these walked through one of those two half-repairs.
+    "cache = " + "C://Users/" + "operator" + "/AppData",
+    "cache = " + "C:/Users//" + "operator",
+    "cache = " + "/mnt/c//Users/" + "operator",
+    "cache = " + "%SystemDrive%//Users//" + "operator",
+    "url = " + "file:///C://Users//" + "operator" + "/AppData/Local",
+    "cache = " + "C:\\/Users/" + "operator",
+    "cache = " + "C:/\\Users\\" + "operator",
+    "cache = " + "C:\\\\\\Users\\\\\\" + "operator",
+])
+def test_every_separator_spelling_of_a_windows_profile_path_is_caught(sample: str) -> None:
+    labels = {label for _, label, _ in guard.scan_text(sample, COMPILED)}
+    assert "windows profile path" in labels, f"{sample!r} walks through -> {labels}"
+
+
+@pytest.mark.parametrize("sample", [
+    # The separator widening must not start firing on ordinary text containing "/Users/".
+    "GET /Users/me HTTP/1.1",
+    "see https://example.com/Users/profile",
+    "macOS home is /Users/ci-runner/work",
+    "cd /Users/shared",
+])
+def test_the_separator_widening_did_NOT_start_firing_on_ordinary_paths(sample: str) -> None:
+    hits = guard.scan_text(sample, COMPILED)
+    assert not hits, f"false positive after widening the separator: {sample!r} -> {hits}"
 
 
 def test_svg_and_other_text_formats_are_NEVER_skipped() -> None:

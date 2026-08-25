@@ -928,6 +928,36 @@ def test_no_permitted_span_overlaps_the_leak_in_any_curated_amnesty_case() -> No
                     f"how the delete-then-match design failed open")
 
 
+def test_the_containment_index_answers_exactly_what_a_linear_scan_would() -> None:
+    """The index replaced an O(matches x spans) scan that took 31 s on one 176 KB line. Speed is
+    only worth having if the answer is unchanged, so both halves are pinned here.
+
+    ⭐ THE NO-MERGING PROPERTY IS THE SAFETY ONE. Merging overlapping spans into one wider
+    interval is the obvious way to make this fast, and it would let TWO permitted tokens jointly
+    cover a leak that NEITHER contains — a fresh amnesty hole opened for performance. Containment
+    must always be satisfiable by a SINGLE span.
+    """
+    # An EARLIER, wider span must still be found for a match that begins after a LATER, narrower
+    # span starts. This is what the running maximum is for; a plain "last span wins" fails it.
+    starts, best = guard._containment_index([(0, 20), (5, 8)])
+    assert guard._contained(starts, best, 6, 15), (
+        "a match inside the wide span (0,20) was not found because a narrower span starts before "
+        "it — the index has forgotten the earlier span's extent")
+
+    # ⛔ Two spans that TOGETHER cover (5,15) but neither of which contains it.
+    starts, best = guard._containment_index([(0, 10), (8, 20)])
+    assert not guard._contained(starts, best, 5, 15), (
+        "two permitted spans were allowed to JOINTLY grant amnesty to a leak neither of them "
+        "contains — the spans are being merged, which reopens the amnesty hole")
+
+    # The ordinary cases.
+    starts, best = guard._containment_index([(4, 9)])
+    assert guard._contained(starts, best, 4, 9), "an exactly-coincident span must contain"
+    assert not guard._contained(starts, best, 3, 9), "a match starting BEFORE the span"
+    assert not guard._contained(starts, best, 4, 10), "a match ending AFTER the span"
+    assert not guard._contained(*guard._containment_index([]), 0, 1), "no spans, no containment"
+
+
 def test_a_permitted_span_may_only_start_mid_word_if_it_cannot_contain_a_leak() -> None:
     """⭐⭐ THE INVARIANT THAT WOULD HAVE CAUGHT THE `.env...local` BYPASS, stated generally.
 

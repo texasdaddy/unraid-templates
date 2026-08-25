@@ -1225,6 +1225,33 @@ def test_a_non_ascii_REVISION_RANGE_does_not_crash_the_announcement(tmp_path: Pa
 
 
 @pytest.mark.timeout(300)
+def test_a_CLEAN_non_ascii_revision_range_does_not_crash_either(tmp_path: Path) -> None:
+    """⚠️ THE SUCCESS PATH, which the first `_ascii` repair missed.
+
+    There are FOUR sites interpolating `rev_range`; three carry a failure or a finding and one
+    reports success. Fixing only the first three left a perfectly CLEAN scan on a branch with a
+    non-ASCII name dying with a traceback — a guard that crashes when it has nothing to report is
+    the purest form of the false-red it exists to prevent. Same instance-not-class shape, on the
+    same fix, twice.
+    """
+    repo = tmp_path / "cjkclean"
+    _init(repo)
+    _git(repo, "checkout", "-q", "-b", "feature/日本-clean")
+    (repo / "ok.txt").write_text("nothing internal here\n", encoding="utf-8")
+    _git(repo, "add", "ok.txt")
+    _git(repo, "commit", "-q", "-m", "clean")
+
+    proc = subprocess.run(
+        [sys.executable, str(_SCRIPT), "--repo", str(repo), "--range", "feature/日本-clean"],
+        capture_output=True, timeout=300,
+        env={**os.environ, "PYTHONIOENCODING": "cp1252"})
+    assert b"Traceback" not in proc.stderr, (
+        f"a CLEAN range scan crashed while reporting success: "
+        f"{proc.stderr.decode('utf-8', 'replace')}")
+    assert proc.returncode == 0, f"{proc.stdout!r} {proc.stderr!r}"
+
+
+@pytest.mark.timeout(300)
 def test_a_leak_STAGED_then_TIDIED_is_a_STATED_LIMIT_of_the_tree_scan(tmp_path: Path) -> None:
     """⚠️ AN HONEST PIN OF A KNOWN GAP — not a claim that it is fine. Issue #33.
 

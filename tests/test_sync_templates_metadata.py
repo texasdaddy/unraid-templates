@@ -261,3 +261,178 @@ def test_metadata_refreshed_is_only_claimed_when_that_is_what_happened(sync, ins
     assert "no variables added or removed" not in out, (
         "claimed no variables were removed while dropping a duplicate"
     )
+
+
+# =============================================================================================
+# unraid-templates#27 — backups were a byte-for-byte PLAINTEXT copy of every masked value.
+#
+# `Mask="true"` only tells the Unraid web form to render a password box; the XML on the flash
+# drive stores the value in cleartext regardless. So `shutil.copy2` wrote one more cleartext copy
+# of every API token and PAT on every write, and nothing ever pruned them. RED before / GREEN
+# after: on the previous script `test_a_masked_value_is_REDACTED_in_the_backup` fails outright.
+# =============================================================================================
+
+# A masked field with NO value, and an ordinary unmasked one — the two negative directions.
+EMPTY_SECRET = (
+    '<Config Name="SPARE_KEY" Target="SPARE_KEY" Default="" Mode="" Description="x" '
+    'Type="Variable" Display="always" Required="false" Mask="true"></Config>'
+)
+SECRET = "s3cret"       # the value `instance_xml()` puts in the Mask="true" TOKEN field
+
+
+def _backups(d):
+    return sorted(p for p in d.iterdir() if p.name.endswith(".bak"))
+
+
+def test_a_masked_value_is_REDACTED_in_the_backup(sync, inst, tmp_path):
+    """⭐ THE ISSUE. The backup must not be a cleartext copy of the operator's PAT."""
+    p = inst(instance_xml(desc="OLD TEXT"))
+    backups = tmp_path / "b"
+    assert SECRET in p.read_text(encoding="utf-8"), "precondition: the instance holds a secret"
+
+    sync.update_instance(str(p), template(desc="NEW TEXT"), str(backups))
+
+    saved = _backups(backups)
+    assert len(saved) == 1, "an overwritten instance must still be backed up"
+    text = saved[0].read_text(encoding="utf-8")
+    assert SECRET not in text, (
+        "the backup still holds the masked value in PLAINTEXT — this is unraid-templates#27")
+    assert sync.REDACTED in text, "the masked field should be marked as redacted, not dropped"
+
+
+def test_the_LIVE_instance_keeps_its_secret(sync, inst, tmp_path):
+    """⛔ THE REGRESSION REDACTION COULD EASILY SHIP: redacting the file being backed UP.
+
+    `backup()` parses its own tree, so the live instance must be untouched. Redacting it would
+    destroy the running container's credentials on the next sync — far worse than the leak.
+    """
+    p = inst(instance_xml(desc="OLD TEXT"))
+    sync.update_instance(str(p), template(desc="NEW TEXT"), str(tmp_path / "b"))
+    assert config_of(p).text == SECRET, (
+        "the sync REDACTED the live instance — the operator's real value is gone")
+
+
+def test_an_unmasked_value_is_preserved_in_the_backup(sync, inst, tmp_path):
+    """The negative direction. "Nothing sensitive survives" is equally true of a backup that
+    blanks EVERYTHING, and such a backup restores nothing."""
+    # A real metadata change, so the write path (and therefore the backup) actually runs.
+    p = inst(instance_xml(desc="OLD TEXT", extra=SOCKET))
+    backups = tmp_path / "b"
+    sync.update_instance(str(p), template(desc="NEW TEXT"), str(backups))
+    saved = _backups(backups)
+    assert saved, "precondition: a backup was taken"
+    text = saved[0].read_text(encoding="utf-8")
+    assert "/var/run/docker.sock" in text, "an unmasked value must survive into the backup"
+    assert "OLD TEXT" in text, "the backup must still hold the PRE-write metadata"
+    assert text.count(sync.REDACTED) == 1, "exactly the one masked field should be redacted"
+
+
+def test_an_EMPTY_masked_field_is_not_marked_as_holding_a_secret(sync, inst, tmp_path):
+    """Redacting an empty field would claim it held a value it never had, which misleads an
+    operator reading a backup to see what was configured."""
+    root = ET.fromstring(instance_xml(extra=EMPTY_SECRET))
+    assert sync.redact_secrets(root) == 1, "only the ONE non-empty masked value is redacted"
+    spare = [c for c in root.findall("Config") if c.get("Target") == "SPARE_KEY"][0]
+    assert not (spare.text or "").strip(), "an empty masked field must stay empty"
+
+
+def test_a_file_that_cannot_be_backed_up_safely_is_NOT_overwritten(sync, tmp_path, capsys):
+    """⛔ NO BACKUP, NO WRITE — and no falling back to a plaintext copy.
+
+    A fallback that did the unsafe thing whenever the safe one failed would reintroduce #27 on
+    exactly the malformed files nobody inspects.
+    """
+    p = tmp_path / "my-widget.xml"
+    p.write_text("<Container><Name>x</Name>", encoding="utf-8")  # truncated: unparseable
+    backups = tmp_path / "b"
+    with pytest.raises(sync.BackupUnsafe):
+        sync.backup(str(p), str(backups))
+    assert not backups.exists() or not _backups(backups), "an unsafe backup was written anyway"
+
+
+def test_the_one_time_clear_out_redacts_backups_previous_versions_already_wrote(sync, tmp_path):
+    """⭐ Fixing `backup()` stops NEW cleartext copies and does nothing about the pile already on
+    the flash drive, which is where every secret this script has ever seen currently sits."""
+    backups = tmp_path / "b"
+    backups.mkdir()
+    old = backups / "my-widget.xml.20260101-000000.bak"
+    old.write_text(instance_xml(), encoding="utf-8")
+    assert SECRET in old.read_text(encoding="utf-8"), "precondition: plaintext accumulation"
+
+    files, values, unparseable = sync.redact_existing_backups(str(backups))
+
+    assert (files, values, unparseable) == (1, 1, [])
+    assert SECRET not in old.read_text(encoding="utf-8"), "the pre-existing plaintext survived"
+    assert sync.REDACTED in old.read_text(encoding="utf-8")
+
+
+def test_the_clear_out_is_idempotent(sync, tmp_path):
+    """A second run must find nothing left to do — otherwise every run reports a clear-out it did
+    not perform, and the operator cannot tell when the accumulation is actually gone."""
+    backups = tmp_path / "b"
+    backups.mkdir()
+    (backups / "my-widget.xml.20260101-000000.bak").write_text(instance_xml(), encoding="utf-8")
+    sync.redact_existing_backups(str(backups))
+    assert sync.redact_existing_backups(str(backups)) == (0, 0, [])
+
+
+def test_an_unparseable_backup_is_REPORTED_and_never_silently_deleted(sync, tmp_path):
+    """It may well hold a secret, and only the operator can say whether it is worth keeping.
+    Deleting the operator's data to make a report look clean is the wrong trade."""
+    backups = tmp_path / "b"
+    backups.mkdir()
+    broken = backups / "my-widget.xml.20260101-000000.bak"
+    broken.write_text("<Container><Name>x</Name>", encoding="utf-8")
+
+    files, values, unparseable = sync.redact_existing_backups(str(backups))
+
+    assert (files, values) == (0, 0)
+    assert len(unparseable) == 1 and "my-widget.xml" in unparseable[0]
+    assert broken.exists(), "an unparseable backup was deleted rather than reported"
+
+
+def test_prune_keeps_the_newest_N_and_never_borrows_from_another_instance(sync, tmp_path):
+    """Grouped PER INSTANCE: a container synced often must not evict the only backup another
+    container has. The stamp format makes a lexicographic sort chronological."""
+    backups = tmp_path / "b"
+    backups.mkdir()
+    for i in range(sync.KEEP_BACKUPS + 3):
+        (backups / f"my-noisy.xml.202601{i + 1:02d}-000000.bak").write_text("<Container/>",
+                                                                            encoding="utf-8")
+    (backups / "my-quiet.xml.20260101-000000.bak").write_text("<Container/>", encoding="utf-8")
+
+    dropped = sync.prune_backups(str(backups))
+
+    assert len(dropped) == 3, f"expected the 3 oldest noisy backups to go, got {dropped}"
+    assert all(d.startswith("my-noisy") for d in dropped), dropped
+    kept = {p.name for p in _backups(backups)}
+    assert "my-quiet.xml.20260101-000000.bak" in kept, "the quiet instance lost its only backup"
+    assert len([k for k in kept if k.startswith("my-noisy")]) == sync.KEEP_BACKUPS
+    # The OLDEST are the ones dropped, not an arbitrary three.
+    assert "my-noisy.xml.20260101-000000.bak" in dropped
+    assert "my-noisy.xml.20260113-000000.bak" in kept
+
+
+def test_dry_run_neither_rewrites_nor_deletes_a_backup(sync, tmp_path):
+    """The DRY_RUN contract is 'writes NOTHING'. It covers the backup dir too — and this is the
+    run an operator uses to decide whether to trust the clear-out at all."""
+    backups = tmp_path / "b"
+    backups.mkdir()
+    plain = backups / "my-widget.xml.20260101-000000.bak"
+    plain.write_text(instance_xml(), encoding="utf-8")
+    for i in range(sync.KEEP_BACKUPS + 2):
+        (backups / f"my-noisy.xml.202601{i + 1:02d}-000000.bak").write_text("<Container/>",
+                                                                            encoding="utf-8")
+    before = {p.name: p.read_bytes() for p in _backups(backups)}
+
+    sync.DRY_RUN = True
+    try:
+        files, values, _ = sync.redact_existing_backups(str(backups))
+        dropped = sync.prune_backups(str(backups))
+    finally:
+        sync.DRY_RUN = False
+
+    assert (files, values) == (1, 1), "dry-run must still REPORT what it would redact"
+    assert len(dropped) == 2, "dry-run must still report what it would prune"
+    assert {p.name: p.read_bytes() for p in _backups(backups)} == before, (
+        "DRY_RUN wrote to or deleted from the backup directory")

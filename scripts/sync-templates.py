@@ -27,6 +27,18 @@ DRY-RUN vs LIVE  —  the ONLY switch is the DRY_RUN constant below.
                      first, timestamped, under templates-user/.template-sync-backups/;
                      writes are atomic; a result is validated before it replaces
                      the original).
+
+BACKUPS AND SECRETS  (unraid-templates#27)
+  `Mask="true"` is a UI setting only -- it makes the Unraid web form render a
+  password box. The XML on the flash drive holds the value in PLAINTEXT either
+  way. So a backup is written with every masked value REDACTED, and the first
+  run also redacts the backups previous versions already wrote. Backups are
+  pruned to the newest KEEP_BACKUPS per instance.
+
+  What that means for a restore: the structure and every non-secret value come
+  back in full; a masked value must be re-entered. It is not a real loss --
+  merge() copies applied values across verbatim, so a merge cannot damage a
+  secret, and the backup is there for a bad merge.
   Workflow: run the dry-run version -> review -> when it is correct, install the
   version with DRY_RUN = False. Never a parameter, never a second script.
 ------------------------------------------------------------------------------
@@ -46,7 +58,6 @@ DRY_RUN = False    # LIVE — creates/updates/deletes with timestamped backups. 
 import copy
 import json
 import os
-import shutil
 import sys
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -60,6 +71,27 @@ TEMPLATES_USER  = "/boot/config/plugins/dockerMan/templates-user"
 BACKUP_SUBDIR   = ".template-sync-backups"
 UA              = "sync-templates (unraid)"
 TIMEOUT         = 30
+
+# ----------------------------------------------------------------------------- secrets
+# ⭐ WHAT REPLACES A MASKED VALUE IN A BACKUP (unraid-templates#27).
+#
+# `Mask="true"` is a UI affordance ONLY — it tells the Unraid web form to render the field as a
+# password box. The XML on the flash drive stores the value in PLAINTEXT regardless. So the old
+# `shutil.copy2` backup wrote a byte-for-byte cleartext copy of every API token, PAT and password
+# in the instance, and did it on EVERY write, and never pruned. A flash drive that anyone with
+# physical access can read then accumulated one more cleartext copy of each secret per run.
+#
+# The backup exists to recover from a bad merge, and the value of a secret is not what it
+# recovers: `merge()` copies every applied value across VERBATIM (`new_c.text = op_by_key[k].text`)
+# and keeps a template-removed variable verbatim too, so a merge cannot corrupt a secret in the
+# first place. What a restore actually needs is the STRUCTURE and the non-secret values, and those
+# are preserved in full. A masked value is re-entered from wherever it came from.
+REDACTED = "***REDACTED***"
+
+# How many backups to keep per instance file. The old code kept every backup forever, which is
+# half of what #27 is about: even redacted, an unbounded pile of timestamped XML on a flash drive
+# is just accumulation. The newest are the ones with any recovery value.
+KEEP_BACKUPS = 10
 
 
 # ----------------------------------------------------------------------------- http
@@ -198,12 +230,120 @@ def atomic_write(path, root):
     os.replace(tmp, path)
 
 
+class BackupUnsafe(Exception):
+    """The instance could not be backed up in REDACTED form, so it is not backed up at all.
+
+    Raised rather than falling back to a plaintext copy. A fallback that quietly did the unsafe
+    thing when the safe one failed would reintroduce #27 on exactly the malformed files nobody
+    looks at, and "it only leaks sometimes" is not a fix.
+    """
+
+
+def redact_secrets(root):
+    """Blank every `Mask="true"` value on `root`, IN PLACE. Returns how many were redacted.
+
+    Only a NON-EMPTY value is replaced: marking an empty field would claim it held a secret when
+    it did not, and an operator reading a backup to see what was set would be misled.
+
+    `findall("Config")` is direct children only — the same view `merge()` reconciles, so the two
+    cannot disagree about which elements exist.
+    """
+    n = 0
+    for c in root.findall("Config"):
+        if (c.get("Mask") or "").strip().lower() == "true" and (c.text or "").strip():
+            c.text = REDACTED
+            n += 1
+    return n
+
+
 def backup(path, backup_dir):
+    """Copy `path` aside before it is overwritten, with every masked value REDACTED.
+
+    Returns (dest, n_redacted). Raises BackupUnsafe if the file cannot be parsed — see the class.
+
+    ⚠️ RE-SERIALISED, NOT COPIED. The backup is written through the same indent+serialise path as
+    the live file, so it is not byte-identical to the original: it loses any XML declaration and
+    is re-indented. That costs nothing to a restore — it is exactly the form `atomic_write` gives
+    the live file anyway — and it is what makes redaction possible at all.
+    """
+    try:
+        tree = ET.parse(path)
+    except ET.ParseError as e:
+        raise BackupUnsafe(f"{os.path.basename(path)}: {e}") from e
+    n = redact_secrets(tree.getroot())
     os.makedirs(backup_dir, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     dest = os.path.join(backup_dir, f"{os.path.basename(path)}.{stamp}.bak")
-    shutil.copy2(path, dest)
-    return dest
+    atomic_write(dest, tree.getroot())
+    return dest, n
+
+
+# ----------------------------------------------------------------------------- backup hygiene
+def _backup_files(backup_dir):
+    """Every `<instance>.<stamp>.bak` in the backup dir, oldest first."""
+    if not os.path.isdir(backup_dir):
+        return []
+    return sorted(f for f in os.listdir(backup_dir) if f.endswith(".bak"))
+
+
+def redact_existing_backups(backup_dir):
+    """ONE-TIME CLEAR-OUT of the plaintext accumulation already on the flash drive.
+
+    Fixing `backup()` stops NEW cleartext copies; it does nothing about the pile already written,
+    which is where every secret this script has ever seen is currently sitting. Each existing
+    `.bak` is rewritten in redacted form, ATOMICALLY (tmp + `os.replace`) so an interrupted run
+    cannot truncate one.
+
+    Rewritten rather than deleted: a backup is the operator's data and the recoverable part of it
+    — the structure and every non-secret value — is exactly what deleting would throw away.
+
+    Returns (n_redacted_files, n_values, unparseable). An unparseable `.bak` is REPORTED, never
+    silently deleted and never assumed safe: it may well hold a secret, and only the operator can
+    say whether it is worth keeping.
+
+    Idempotent — a second run finds nothing left to redact, because a redacted value no longer
+    differs from the marker.
+    """
+    redacted_files, redacted_values, unparseable = 0, 0, []
+    for fname in _backup_files(backup_dir):
+        full = os.path.join(backup_dir, fname)
+        try:
+            tree = ET.parse(full)
+        except ET.ParseError as e:
+            unparseable.append(f"{fname} ({e})")
+            continue
+        root = tree.getroot()
+        n = sum(1 for c in root.findall("Config")
+                if (c.get("Mask") or "").strip().lower() == "true"
+                and (c.text or "").strip() not in ("", REDACTED))
+        if not n:
+            continue
+        redacted_files += 1
+        redacted_values += n
+        if not DRY_RUN:
+            redact_secrets(root)
+            atomic_write(full, root)
+    return redacted_files, redacted_values, unparseable
+
+
+def prune_backups(backup_dir):
+    """Keep the newest KEEP_BACKUPS per instance file; drop the rest. Returns what was dropped.
+
+    Grouped per instance rather than over the directory as a whole, so a container synced often
+    cannot evict the only backup another container has. The stamp is `%Y%m%d-%H%M%S`, so a plain
+    lexicographic sort IS chronological.
+    """
+    groups = {}
+    for fname in _backup_files(backup_dir):
+        # `my-tape.xml.20260824-221030.bak` -> `my-tape.xml`
+        groups.setdefault(fname.rsplit(".", 2)[0], []).append(fname)
+    dropped = []
+    for _, files in sorted(groups.items()):
+        for fname in sorted(files)[:-KEEP_BACKUPS] if len(files) > KEEP_BACKUPS else []:
+            dropped.append(fname)
+            if not DRY_RUN:
+                os.remove(os.path.join(backup_dir, fname))
+    return dropped
 
 
 # ----------------------------------------------------------------------------- per-instance
@@ -250,9 +390,17 @@ def update_instance(inst_path, tpl_root, backup_dir):
     elif DRY_RUN:
         print(f"    * {fname:<22} would UPDATE")
     else:
-        b = backup(inst_path, backup_dir)
+        # ⛔ NO BACKUP, NO WRITE. If the pre-write copy cannot be made SAFELY, the instance is
+        # left exactly as it was: the alternative is either overwriting with no way back, or
+        # falling back to the plaintext copy that #27 exists to remove.
+        try:
+            b, masked = backup(inst_path, backup_dir)
+        except BackupUnsafe as e:
+            print(f"    ! {fname:<22} SKIP — could not back it up safely ({e}); left untouched")
+            return
         atomic_write(inst_path, merged)
-        print(f"    * {fname:<22} UPDATED   (backup: {os.path.basename(b)})")
+        note = f", {masked} masked value(s) REDACTED" if masked else ""
+        print(f"    * {fname:<22} UPDATED   (backup: {os.path.basename(b)}{note})")
     print(f"        values kept   : {st['retained']}")
     if meta_only:
         print("        metadata refreshed (descriptions/defaults/visibility); no variables added or removed")
@@ -321,6 +469,27 @@ def main():
 
     instances_by_tpl, unmapped = discover_instances(TEMPLATES_USER, all_repo, naming_fallback=True)
     backup_dir = os.path.join(TEMPLATES_USER, BACKUP_SUBDIR)
+
+    # BEFORE anything else touches the backup dir. Every `.bak` written before this release is a
+    # cleartext copy of whatever secrets that instance held, and this is the run that clears
+    # them; doing it first means a crash later still leaves the flash drive better than it was.
+    files, values, unparseable = redact_existing_backups(backup_dir)
+    if files:
+        print(f"{'would redact' if DRY_RUN else 'REDACTED'} {values} masked value(s) across "
+              f"{files} pre-existing backup(s) in {BACKUP_SUBDIR}/ (unraid-templates#27: "
+              f"`Mask` is a UI setting, so these were stored in PLAINTEXT)")
+    if unparseable:
+        print(f"! {len(unparseable)} backup(s) could not be parsed, so could NOT be redacted - "
+              f"they may still hold secrets in plaintext. Review and delete them by hand:")
+        for u in unparseable:
+            print("    " + u)
+    dropped = prune_backups(backup_dir)
+    if dropped:
+        print(f"{'would prune' if DRY_RUN else 'pruned'} {len(dropped)} backup(s) beyond the "
+              f"newest {KEEP_BACKUPS} per instance")
+    if files or unparseable or dropped:
+        print()
+
     for name in all_repo:
         process_template(name, instances_by_tpl, backup_dir)
         print()

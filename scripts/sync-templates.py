@@ -58,6 +58,7 @@ DRY_RUN = False    # LIVE — creates/updates/deletes with timestamped backups. 
 import copy
 import json
 import os
+import re
 import sys
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -239,21 +240,98 @@ class BackupUnsafe(Exception):
     """
 
 
+def _is_masked(c):
+    return (c.get("Mask") or "").strip().lower() == "true"
+
+
+def _masked_configs(root):
+    """Every masked <Config> anywhere under `root`.
+
+    `iter` and NOT `findall`: `findall("Config")` is direct children only, so a masked <Config>
+    nested one level down was skipped entirely. Over-reaching costs nothing here — this only ever
+    runs against a BACKUP copy, where redacting one element too many is harmless and missing one
+    is the bug.
+    """
+    return [c for c in root.iter("Config") if _is_masked(c)]
+
+
+def _masked_names(root):
+    """Every Name/Target a masked <Config> goes by — the keys the <Environment> mirror uses."""
+    names = set()
+    for c in _masked_configs(root):
+        for key in (c.get("Name"), c.get("Target")):
+            if (key or "").strip():
+                names.add(key.strip())
+    return names
+
+
+def _mirrored_secrets(root):
+    """The <Environment><Variable><Value> elements that mirror a masked <Config>.
+
+    ⭐ dockerMan WRITES EACH VARIABLE TWICE. Alongside the <Config> elements this script
+    reconciles, `my-*.xml` carries a legacy
+
+        <Environment><Variable><Value>s3cret</Value><Name>TOKEN</Name></Variable></Environment>
+
+    block holding the SAME value. `merge()` deepcopies the operator tree and only reconciles
+    <Config>, so that block is preserved verbatim — which meant redacting the <Config> half left
+    the secret sitting in the <Environment> half, in cleartext, in every backup, while the run
+    reported the value redacted. Both agents that reviewed this reproduced it independently.
+
+    Matched by NAME against the masked <Config> set rather than by any flag of its own: the
+    <Variable> element carries no `Mask` attribute, so the <Config> is the only place that says
+    whether the value is a secret.
+    """
+    secret_names = _masked_names(root)
+    found = []
+    for var in root.iter("Variable"):
+        name = (var.findtext("Name") or "").strip()
+        if name and name in secret_names:
+            value = var.find("Value")
+            if value is not None:
+                found.append(value)
+    return found
+
+
+def _element_holds_a_secret(el):
+    """Does this element still carry an unredacted value?
+
+    ⚠️ CHILD ELEMENTS COUNT, and missing that was a silent leak. `el.text` is only the text BEFORE
+    the first child, so on `<Config Mask="true">pre<b>SECRET</b></Config>` setting `el.text` alone
+    left the secret sitting in the child — while the run COUNTED the field as redacted and
+    reported the file clean. Worse, the idempotence check then saw a redacted `text` and never
+    looked at that file again, so the value was permanently classified as cleared. A false "this
+    is now safe" is worse than no clear-out at all.
+    """
+    if (el.text or "").strip() not in ("", REDACTED):
+        return True
+    return len(el) > 0
+
+
 def redact_secrets(root):
-    """Blank every `Mask="true"` value on `root`, IN PLACE. Returns how many were redacted.
+    """Blank every masked value on `root`, IN PLACE. Returns how many were redacted.
 
-    Only a NON-EMPTY value is replaced: marking an empty field would claim it held a secret when
-    it did not, and an operator reading a backup to see what was set would be misled.
-
-    `findall("Config")` is direct children only — the same view `merge()` reconciles, so the two
-    cannot disagree about which elements exist.
+    Covers BOTH places dockerMan stores a variable: the <Config> element and its <Environment>
+    mirror. Only a field that actually HOLDS something is touched — marking an empty one would
+    claim it held a secret when it did not, and an operator reading a backup to see what was
+    configured would be misled.
     """
     n = 0
-    for c in root.findall("Config"):
-        if (c.get("Mask") or "").strip().lower() == "true" and (c.text or "").strip():
-            c.text = REDACTED
-            n += 1
+    for el in _masked_configs(root) + _mirrored_secrets(root):
+        if not _element_holds_a_secret(el):
+            continue
+        for child in list(el):      # the child elements are content too
+            el.remove(child)
+        el.text = REDACTED
+        n += 1
     return n
+
+
+def count_secrets(root):
+    """How many masked values `root` still holds. The exact converse of `redact_secrets`, so the
+    reported count and the work actually done cannot drift apart."""
+    return sum(1 for el in _masked_configs(root) + _mirrored_secrets(root)
+               if _element_holds_a_secret(el))
 
 
 def backup(path, backup_dir):
@@ -272,15 +350,44 @@ def backup(path, backup_dir):
         raise BackupUnsafe(f"{os.path.basename(path)}: {e}") from e
     n = redact_secrets(tree.getroot())
     os.makedirs(backup_dir, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    dest = os.path.join(backup_dir, f"{os.path.basename(path)}.{stamp}.bak")
+    dest = _unused_backup_path(backup_dir, os.path.basename(path))
     atomic_write(dest, tree.getroot())
     return dest, n
 
 
+def _unused_backup_path(backup_dir, base):
+    """A backup path that does not already exist.
+
+    ⚠️ THE STAMP IS ONE-SECOND RESOLUTION, so two backups of the same instance in the same second
+    collided and the second SILENTLY REPLACED the first. That is a backup destroying a backup —
+    the one thing this file must not do, now that the backup is the whole recovery story.
+
+    The counter goes INSIDE the stamp segment (`...-2`) rather than after `.bak`, so the name
+    still matches `_BAK_RX` and stays prunable. Ordering between two backups taken in the same
+    second is arbitrary, which is fine: they are simultaneous. Ordering against OTHER seconds is
+    preserved, which is what "keep the newest N" actually depends on.
+    """
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    dest = os.path.join(backup_dir, f"{base}.{stamp}.bak")
+    n = 1
+    while os.path.exists(dest):
+        n += 1
+        dest = os.path.join(backup_dir, f"{base}.{stamp}-{n}.bak")
+    return dest
+
+
 # ----------------------------------------------------------------------------- backup hygiene
+# `<instance>.<YYYYmmdd-HHMMSS>[-<n>].bak` — the shape THIS script writes, and the only shape it
+# will ever delete. `rsplit(".", 2)` was doing this job by position and got it wrong for anything
+# else in the directory: an operator's `my-tape.xml.BEFORE-MIGRATION.bak` landed in the same group
+# as the real backups, and since letters sort after digits it counted as the NEWEST — so the three
+# genuine timestamped backups were pruned and the hand-named file became immortal.
+_BAK_RX = re.compile(r"^(?P<inst>.+)\.(?P<stamp>\d{8}-\d{6}(?:-\d+)?)\.bak$")
+
+
 def _backup_files(backup_dir):
-    """Every `<instance>.<stamp>.bak` in the backup dir, oldest first."""
+    """Every `.bak` in the backup dir, oldest first. Absent dir is a legitimate answer (a first
+    run happens before anything creates it)."""
     if not os.path.isdir(backup_dir):
         return []
     return sorted(f for f in os.listdir(backup_dir) if f.endswith(".bak"))
@@ -304,42 +411,74 @@ def redact_existing_backups(backup_dir):
     Idempotent — a second run finds nothing left to redact, because a redacted value no longer
     differs from the marker.
     """
-    redacted_files, redacted_values, unparseable = 0, 0, []
+    redacted_files, redacted_values, unreadable = 0, 0, []
     for fname in _backup_files(backup_dir):
         full = os.path.join(backup_dir, fname)
         try:
             tree = ET.parse(full)
         except ET.ParseError as e:
-            unparseable.append(f"{fname} ({e})")
+            unreadable.append((fname, str(e)))
+            continue
+        except OSError as e:
+            unreadable.append((fname, f"could not be read: {e}"))
             continue
         root = tree.getroot()
-        n = sum(1 for c in root.findall("Config")
-                if (c.get("Mask") or "").strip().lower() == "true"
-                and (c.text or "").strip() not in ("", REDACTED))
+        n = count_secrets(root)
         if not n:
             continue
+        if not DRY_RUN:
+            try:
+                redact_secrets(root)
+                atomic_write(full, root)
+            except OSError as e:
+                # ⛔ ONE BAD FILE MUST NOT ABORT THE SYNC. An uncaught OSError here (a full flash
+                # drive, a read-only mount) propagated out of main() BEFORE a single template was
+                # processed, so a disk problem in the housekeeping step silently became "the sync
+                # does nothing". Report it and carry on with the rest.
+                unreadable.append((fname, f"could not be rewritten: {e}"))
+                _discard(full + ".tmp")   # atomic_write's partial file, if it got that far
+                continue
         redacted_files += 1
         redacted_values += n
-        if not DRY_RUN:
-            redact_secrets(root)
-            atomic_write(full, root)
-    return redacted_files, redacted_values, unparseable
+    return redacted_files, redacted_values, unreadable
 
 
-def prune_backups(backup_dir):
+def _discard(path):
+    """Remove a leftover temp file, best-effort. It is redacted content, not a leak — but nothing
+    else ever cleans it up, since `_backup_files` only matches `.bak`."""
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def prune_backups(backup_dir, protected=()):
     """Keep the newest KEEP_BACKUPS per instance file; drop the rest. Returns what was dropped.
 
     Grouped per instance rather than over the directory as a whole, so a container synced often
     cannot evict the only backup another container has. The stamp is `%Y%m%d-%H%M%S`, so a plain
     lexicographic sort IS chronological.
+
+    ⛔ TWO THINGS THIS WILL NOT DELETE, both of which it used to:
+      * anything whose name is not the `<instance>.<stamp>.bak` shape THIS script writes. A file
+        an operator dropped in here by hand is not ours to remove, and treating it as a backup
+        also corrupted the ordering — see `_BAK_RX`.
+      * anything in `protected`. `redact_existing_backups` reports an unparseable `.bak` and
+        promises the operator it is left for them to review; pruning it three lines later in
+        `main()` deleted the very file the same run told them to go and look at, and printed its
+        name while doing so.
     """
     groups = {}
     for fname in _backup_files(backup_dir):
-        # `my-tape.xml.20260824-221030.bak` -> `my-tape.xml`
-        groups.setdefault(fname.rsplit(".", 2)[0], []).append(fname)
+        if fname in protected:
+            continue
+        m = _BAK_RX.match(fname)
+        if not m:
+            continue
+        groups.setdefault(m.group("inst"), []).append(fname)
     dropped = []
     for _, files in sorted(groups.items()):
-        for fname in sorted(files)[:-KEEP_BACKUPS] if len(files) > KEEP_BACKUPS else []:
+        for fname in sorted(files)[:-KEEP_BACKUPS]:
             dropped.append(fname)
             if not DRY_RUN:
                 os.remove(os.path.join(backup_dir, fname))
@@ -393,6 +532,12 @@ def update_instance(inst_path, tpl_root, backup_dir):
         # ⛔ NO BACKUP, NO WRITE. If the pre-write copy cannot be made SAFELY, the instance is
         # left exactly as it was: the alternative is either overwriting with no way back, or
         # falling back to the plaintext copy that #27 exists to remove.
+        #
+        # ⚠️ Belt-and-braces, and worth knowing it: `update_instance` already parsed this file
+        # successfully above, so `backup()`'s own parse of the same unmodified file only fails on
+        # a concurrent modification between the two. It is kept because `backup()`'s contract is
+        # "raise rather than write a plaintext copy" and a caller that assumed otherwise is
+        # exactly how this bug returns — not because this branch is expected to fire.
         try:
             b, masked = backup(inst_path, backup_dir)
         except BackupUnsafe as e:
@@ -473,26 +618,31 @@ def main():
     # BEFORE anything else touches the backup dir. Every `.bak` written before this release is a
     # cleartext copy of whatever secrets that instance held, and this is the run that clears
     # them; doing it first means a crash later still leaves the flash drive better than it was.
-    files, values, unparseable = redact_existing_backups(backup_dir)
+    files, values, unreadable = redact_existing_backups(backup_dir)
     if files:
         print(f"{'would redact' if DRY_RUN else 'REDACTED'} {values} masked value(s) across "
               f"{files} pre-existing backup(s) in {BACKUP_SUBDIR}/ (unraid-templates#27: "
               f"`Mask` is a UI setting, so these were stored in PLAINTEXT)")
-    if unparseable:
-        print(f"! {len(unparseable)} backup(s) could not be parsed, so could NOT be redacted - "
-              f"they may still hold secrets in plaintext. Review and delete them by hand:")
-        for u in unparseable:
-            print("    " + u)
-    dropped = prune_backups(backup_dir)
-    if dropped:
-        print(f"{'would prune' if DRY_RUN else 'pruned'} {len(dropped)} backup(s) beyond the "
-              f"newest {KEEP_BACKUPS} per instance")
-    if files or unparseable or dropped:
+    if unreadable:
+        print(f"! {len(unreadable)} backup(s) could not be read, so could NOT be redacted - "
+              f"they may still hold secrets in plaintext. These are left in place for you to "
+              f"review and delete by hand:")
+        for fname, why in unreadable:
+            print(f"    {fname} ({why})")
+    if files or unreadable:
         print()
 
     for name in all_repo:
         process_template(name, instances_by_tpl, backup_dir)
         print()
+
+    # ⭐ PRUNE LAST, once this run's own backups exist. Pruning first left KEEP_BACKUPS + 1 on
+    # disk afterwards, so the run ended one over the number it reported keeping. It also spent
+    # flash writes redacting files it was about to delete.
+    dropped = prune_backups(backup_dir, protected={f for f, _ in unreadable})
+    if dropped:
+        print(f"{'would prune' if DRY_RUN else 'pruned'} {len(dropped)} backup(s) beyond the "
+              f"newest {KEEP_BACKUPS} per instance\n")
 
     if unmapped:
         print("left untouched (foreign / not from these templates): " + ", ".join(sorted(unmapped)))

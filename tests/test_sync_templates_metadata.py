@@ -280,6 +280,19 @@ EMPTY_SECRET = (
 SECRET = "s3cret"       # the value `instance_xml()` puts in the Mask="true" TOKEN field
 
 
+# dockerMan writes every variable TWICE: the <Config> this script reconciles, and a legacy
+# <Environment> mirror holding the same value. Assembled the way Unraid actually emits it.
+ENVIRONMENT_MIRROR = (
+    "<Environment><Variable><Value>s3cret</Value><Name>TOKEN</Name><Mode/></Variable>"
+    "</Environment>"
+)
+# A masked field whose value sits in a CHILD element rather than in its own text.
+NESTED_SECRET = (
+    '<Config Name="NESTED" Target="NESTED" Default="" Mode="" Description="x" '
+    'Type="Variable" Display="always" Required="false" Mask="true">pre<b>s3cret</b></Config>'
+)
+
+
 def _backups(d):
     return sorted(p for p in d.iterdir() if p.name.endswith(".bak"))
 
@@ -298,6 +311,50 @@ def test_a_masked_value_is_REDACTED_in_the_backup(sync, inst, tmp_path):
     assert SECRET not in text, (
         "the backup still holds the masked value in PLAINTEXT — this is unraid-templates#27")
     assert sync.REDACTED in text, "the masked field should be marked as redacted, not dropped"
+
+
+def test_the_ENVIRONMENT_mirror_of_a_masked_variable_is_redacted_too(sync, inst, tmp_path):
+    """⭐ dockerMan STORES EVERY VARIABLE TWICE, and redacting only the <Config> left the secret
+    sitting in the other copy — in cleartext, in every backup, while the run reported it redacted.
+
+    `merge()` deepcopies the operator tree and reconciles <Config> only, so the <Environment>
+    block is preserved verbatim. Two independent reviews reproduced this against the real Unraid
+    shape, which is why it is fixed rather than filed.
+    """
+    p = inst(instance_xml(desc="OLD TEXT", extra=ENVIRONMENT_MIRROR))
+    backups = tmp_path / "b"
+    raw = p.read_text(encoding="utf-8")
+    assert raw.count(SECRET) == 2, "precondition: the secret is stored in both places"
+
+    sync.update_instance(str(p), template(desc="NEW TEXT"), str(backups))
+
+    text = _backups(backups)[0].read_text(encoding="utf-8")
+    assert SECRET not in text, (
+        "the <Environment> mirror still holds the secret in plaintext — redacting the <Config> "
+        "half only is not closing #27")
+    assert text.count(sync.REDACTED) == 2
+
+
+def test_a_masked_value_held_in_a_CHILD_element_is_redacted_and_counted_honestly(sync, tmp_path):
+    """⚠️ `el.text` is only the text BEFORE the first child.
+
+    Setting it alone left the secret in the child while COUNTING the field as redacted — so the
+    run reported the file clean, and the idempotence check then saw a redacted `text` and never
+    looked at that file again. The value was permanently classified as cleared. A false "this is
+    now safe" is worse than no clear-out at all, which is why this is not merely cosmetic.
+    """
+    backups = tmp_path / "b"
+    backups.mkdir()
+    bak = backups / "my-widget.xml.20260101-000000.bak"
+    bak.write_text(instance_xml(extra=NESTED_SECRET), encoding="utf-8")
+
+    files, values, unreadable = sync.redact_existing_backups(str(backups))
+
+    text = bak.read_text(encoding="utf-8")
+    assert SECRET not in text, "the secret survived inside a child element"
+    assert (files, values, unreadable) == (1, 2, []), (
+        "the count must include the nested field, or the report is a false all-clear")
+    assert sync.redact_existing_backups(str(backups)) == (0, 0, []), "not idempotent"
 
 
 def test_the_LIVE_instance_keeps_its_secret(sync, inst, tmp_path):
@@ -384,11 +441,140 @@ def test_an_unparseable_backup_is_REPORTED_and_never_silently_deleted(sync, tmp_
     broken = backups / "my-widget.xml.20260101-000000.bak"
     broken.write_text("<Container><Name>x</Name>", encoding="utf-8")
 
-    files, values, unparseable = sync.redact_existing_backups(str(backups))
+    files, values, unreadable = sync.redact_existing_backups(str(backups))
 
     assert (files, values) == (0, 0)
-    assert len(unparseable) == 1 and "my-widget.xml" in unparseable[0]
+    assert len(unreadable) == 1 and unreadable[0][0] == broken.name, unreadable
     assert broken.exists(), "an unparseable backup was deleted rather than reported"
+
+
+def test_the_backup_that_the_run_told_you_to_review_is_not_then_PRUNED(sync, tmp_path):
+    """⛔ THE RUN MUST NOT DELETE THE FILE IT JUST NAMED.
+
+    `redact_existing_backups` reports an unparseable `.bak` and promises it is left for the
+    operator to review. `prune_backups` ran moments later in `main()` and took it out on age —
+    so the run printed "review and delete them by hand" about a file it had already removed. A
+    truncated `.bak` is exactly what the old plaintext-copy path left behind, so this is reachable
+    in the field, and the file it deletes is the one most likely to still hold a secret.
+    """
+    backups = tmp_path / "b"
+    backups.mkdir()
+    broken = backups / "my-widget.xml.20260101-000000.bak"
+    broken.write_text("<Container><Name>x</Name>", encoding="utf-8")
+    for i in range(sync.KEEP_BACKUPS + 2):
+        (backups / f"my-widget.xml.202602{i + 1:02d}-000000.bak").write_text(
+            "<Container/>", encoding="utf-8")
+
+    _, _, unreadable = sync.redact_existing_backups(str(backups))
+    dropped = sync.prune_backups(str(backups), protected={f for f, _ in unreadable})
+
+    assert broken.name not in dropped, "pruned the very file the run told the operator to review"
+    assert broken.exists(), "the unparseable backup was deleted after being reported"
+    assert dropped, "precondition: the prune must actually have had work to do"
+
+
+def test_prune_never_touches_a_file_this_script_did_not_write(sync, tmp_path):
+    """⛔ NOT OURS TO DELETE — and it also corrupted the ordering.
+
+    An operator's `my-tape.xml.BEFORE-MIGRATION.bak` landed in the same group as the real backups
+    under the old positional `rsplit(".", 2)`, and since letters sort after digits it counted as
+    the NEWEST. The three genuine timestamped backups were pruned and the hand-named files became
+    immortal — precisely inverted.
+    """
+    backups = tmp_path / "b"
+    backups.mkdir()
+    for i in range(sync.KEEP_BACKUPS + 3):
+        (backups / f"my-tape.xml.202601{i + 1:02d}-000000.bak").write_text(
+            "<Container/>", encoding="utf-8")
+    hand_named = ["my-tape.xml.BEFORE-MIGRATION.bak", "my-tape.xml.orig.bak", "notes.bak"]
+    for name in hand_named:
+        (backups / name).write_text("<Container/>", encoding="utf-8")
+
+    dropped = sync.prune_backups(str(backups))
+
+    for name in hand_named:
+        assert name not in dropped, f"deleted {name}, which this script never wrote"
+        assert (backups / name).exists(), f"{name} was removed"
+    assert len(dropped) == 3 and all(d.startswith("my-tape.xml.2026") for d in dropped), dropped
+    assert "my-tape.xml.20260101-000000.bak" in dropped, "the OLDEST should go"
+    assert "my-tape.xml.20260113-000000.bak" not in dropped, "the NEWEST must stay"
+
+
+def test_two_backups_in_the_same_second_do_not_overwrite_each_other(sync, inst, tmp_path):
+    """⛔ A BACKUP MUST NOT DESTROY A BACKUP. The stamp is one-second resolution, so a second
+    write in the same second silently replaced the first — and the backup is the whole recovery
+    story now that it is the only copy the operator has of the pre-write state."""
+    backups = tmp_path / "b"
+    p = inst(instance_xml(desc="ONE"))
+    first, _ = sync.backup(str(p), str(backups))
+    p.write_text(instance_xml(desc="TWO"), encoding="utf-8")
+    second, _ = sync.backup(str(p), str(backups))
+
+    assert first != second, "the second backup overwrote the first"
+    assert len(_backups(backups)) == 2
+    assert "ONE" in pathlib.Path(first).read_text(encoding="utf-8")
+    assert "TWO" in pathlib.Path(second).read_text(encoding="utf-8")
+    # The collision name must still be prunable, or these accumulate forever.
+    assert sync._BAK_RX.match(pathlib.Path(second).name), (
+        f"{pathlib.Path(second).name} does not match the name shape prune_backups recognises")
+
+
+def test_neither_housekeeping_step_explodes_on_a_first_ever_run(sync, tmp_path):
+    """Both are called from `main()` BEFORE anything creates the backup dir, so a missing guard
+    here is an uncaught FileNotFoundError that aborts the entire sync on a brand-new install."""
+    absent = str(tmp_path / "never-created")
+    assert sync.redact_existing_backups(absent) == (0, 0, [])
+    assert sync.prune_backups(absent) == []
+
+
+def test_an_unwritable_backup_does_not_abort_the_whole_sync(sync, tmp_path, monkeypatch):
+    """⛔ ONE BAD FILE MUST NOT STOP EVERY TEMPLATE FROM SYNCING.
+
+    An uncaught OSError here propagated out of `main()` before a single template was processed, so
+    a full flash drive in the housekeeping step silently became "the sync does nothing at all".
+    """
+    backups = tmp_path / "b"
+    backups.mkdir()
+    (backups / "my-a.xml.20260101-000000.bak").write_text(instance_xml(), encoding="utf-8")
+    (backups / "my-b.xml.20260101-000000.bak").write_text(instance_xml(), encoding="utf-8")
+
+    real = sync.atomic_write
+
+    def explode(path, root):
+        if "my-a.xml" in path:
+            raise OSError(28, "No space left on device")
+        return real(path, root)
+
+    monkeypatch.setattr(sync, "atomic_write", explode)
+    files, values, unreadable = sync.redact_existing_backups(str(backups))
+
+    assert files == 1 and values == 1, "the healthy file was still redacted"
+    assert [f for f, _ in unreadable] == ["my-a.xml.20260101-000000.bak"], unreadable
+    assert SECRET not in (backups / "my-b.xml.20260101-000000.bak").read_text(encoding="utf-8")
+    assert not list(backups.glob("*.tmp")), "a partial .tmp file was left behind"
+
+
+def test_update_instance_REFUSES_to_write_when_the_backup_cannot_be_made(sync, inst, tmp_path,
+                                                                         monkeypatch, capsys):
+    """⛔ NO BACKUP, NO WRITE — pinned at the level that actually decides it.
+
+    The sibling test drives `backup()` directly and asserts only that it raises, so deleting the
+    whole `try/except BackupUnsafe` gate from `update_instance` left the suite green. What matters
+    to an operator is that the instance is untouched, which is what this asserts.
+    """
+    p = inst(instance_xml(desc="OLD TEXT"))
+    before = p.read_bytes()
+    backups = tmp_path / "b"
+
+    def refuse(path, backup_dir):
+        raise sync.BackupUnsafe("simulated: cannot redact this file")
+
+    monkeypatch.setattr(sync, "backup", refuse)
+    sync.update_instance(str(p), template(desc="NEW TEXT"), str(backups))
+
+    assert p.read_bytes() == before, "the instance was overwritten with no backup taken"
+    assert not backups.exists() or not _backups(backups), "a backup appeared anyway"
+    assert "SKIP" in capsys.readouterr().out
 
 
 def test_prune_keeps_the_newest_N_and_never_borrows_from_another_instance(sync, tmp_path):

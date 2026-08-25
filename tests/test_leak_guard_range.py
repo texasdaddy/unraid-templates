@@ -115,13 +115,17 @@ def _tree_findings(repo: Path) -> list[str]:
     out = []
     for p in guard.tracked_files(repo):
         rel = p.relative_to(repo).as_posix()
-        if guard._skipped(rel):
+        # ⚠️ `repo` and `rel` ARE PASSED, matching production exactly. Dropping them made this
+        # stand-in skip MORE files and scan LESS than `_scan_tree` does — and since it is used to
+        # establish NEGATIVE premises ("the files are clean, only the author is not"), a laxer
+        # stand-in makes those premises easier to satisfy, which is the wrong direction.
+        if guard._skipped(rel, repo):
             continue
         try:
             text = p.read_text(encoding="utf-8")
         except (FileNotFoundError, UnicodeDecodeError):
             continue
-        out += [f"{rel}:{n}: {label}" for n, label, _ in guard.scan_text(text, COMPILED)]
+        out += [f"{rel}:{n}: {label}" for n, label, _ in guard.scan_text(text, COMPILED, rel)]
     return out
 
 
@@ -595,6 +599,12 @@ def test_both_hooks_are_committed_EXECUTABLE():
     reason — checking the worktree would pass while the committed hook stayed inert.
     """
     root = _SCRIPT.parents[1]
+    # ⚠️ SKIP, don't ERROR, outside a repository. This test reads the INDEX, which only exists in
+    # a real clone — and the verification gate runs the suite on `git archive` extractions that
+    # deliberately have no `.git`. Erroring there produced a git traceback in every gate round
+    # that looked like a code failure and had to be re-diagnosed as environmental each time.
+    if not (root / ".git").exists():
+        pytest.skip("not a git repository (an isolated archive copy): the index is unavailable")
     out = subprocess.run(
         ["git", "ls-files", "-s", ".githooks/pre-commit", ".githooks/pre-push"],
         cwd=root, capture_output=True, check=True, text=True).stdout.strip().splitlines()
@@ -732,14 +742,33 @@ def test_the_allow_literals_are_recognised_as_permitted_spans():
     for lit in guard.ALLOW_LITERALS:
         line = f"see https://{lit}/unraid-templates for the icon"
         spans = guard._permitted_spans(line)
-        assert any(line[s:e] == lit for s, e in spans), (
+        start = line.index(lit)
+        assert (start, start + len(lit)) in spans, (
             f"{lit!r} is in ALLOW_LITERALS but is not recognised as a permitted span")
-        # ⭐ THE SPAN MUST NOT REACH BEYOND THE LITERAL. This is the assertion the old test could
-        # not make: a span that covered the trailing path would be free to grant amnesty to
-        # anything written there.
+        # ⭐ THE SPAN MUST NOT REACH BEYOND THE LITERAL, IN EITHER DIRECTION. Asserted as an EXACT
+        # extent: an earlier version of this checked only that the span did not contain the
+        # substring "unraid-templates", which any leftward growth over "see https://" satisfied —
+        # and leftward is precisely the direction the "no span may consume anything to its left"
+        # rule exists for. A weaker assertion under a stronger comment is the shape this repo
+        # treats as a defect.
         for s, e in spans:
-            assert line[s:e] in guard.ALLOW_LITERALS or "unraid-templates" not in line[s:e], (
-                f"a permitted span {line[s:e]!r} reaches past its literal and could mask a leak")
+            assert line[s:e] in guard.ALLOW_LITERALS, (
+                f"a permitted span {line[s:e]!r} is not exactly one carve-out literal — it has "
+                f"grown over its neighbours and could mask a leak written there")
+
+
+def test_a_repeated_allow_literal_is_recognised_at_EVERY_occurrence() -> None:
+    """`_permitted_spans` loops `line.find(lit, start + 1)`; nothing pinned the loop.
+
+    Collapsing it to a single `find` left the whole suite green, because every other case puts one
+    literal on a line. A second occurrence going unrecognised would report it as a hit.
+    """
+    a, b = guard.ALLOW_LITERALS[0], guard.ALLOW_LITERALS[1]
+    line = f"{a} and again {a} and also {b}"
+    spans = guard._permitted_spans(line)
+    covered = sorted(line[s:e] for s, e in spans)
+    assert covered.count(a) == 2, f"the repeated literal was found once, not twice: {covered}"
+    assert b in covered, f"a second, different literal on the same line was missed: {covered}"
 
 
 def test_a_permitted_span_still_suppresses_what_it_actually_contains():
@@ -753,7 +782,12 @@ def test_a_permitted_span_still_suppresses_what_it_actually_contains():
     # An Unraid share-root hit sitting wholly inside a synthetic permitted span. Assembled from
     # fragments: this file is scanned by the guard, so the literal cannot be written out whole.
     leak = "/mnt/" + "user"
-    rx = [("unraid pool path", re.compile(r"/mnt/(?:apps|user|cache|remotes|disks|disk\d+)\b"))]
+    # ⛔ TAKEN FROM THE SHIPPED SET BY LABEL, never re-spelled here. An inline `re.compile(...)`
+    # copy of a shipped pattern is the exact drift `compile_patterns()` exists to stop: it keeps
+    # passing against a stale regex after the real one changes, and this one had silently dropped
+    # `re.IGNORECASE` too.
+    rx = [(label, r) for label, r in COMPILED if label == "unraid pool path"]
+    assert rx, "the 'unraid pool path' pattern has been renamed; this test would be vacuous"
     assert guard.scan_text(f"prefix {leak} suffix", rx), "the pattern does not bite at all"
 
     line = f"prefix {leak} suffix"
@@ -894,6 +928,94 @@ def test_no_permitted_span_overlaps_the_leak_in_any_curated_amnesty_case() -> No
                     f"how the delete-then-match design failed open")
 
 
+def test_a_permitted_span_may_only_start_mid_word_if_it_cannot_contain_a_leak() -> None:
+    """⭐⭐ THE INVARIANT THAT WOULD HAVE CAUGHT THE `.env...local` BYPASS, stated generally.
+
+    A permitted span is safe if EITHER of two things is true:
+      (a) it cannot begin immediately after a word character, so it can never grow leftward out
+          of the token it was written for; or
+      (b) nothing it matches can contain a deny match, so even if it does grow, it has no leak to
+          grant amnesty to.
+
+    `\\.example` relies on (b) — it is a bare suffix with no left bound, and deliberately so, but
+    `.example` contains no leak shape, so it can suppress nothing. `.env[.<qual>].local` relies on
+    (a), because it DOES contain a `private lan domain` match by construction — and it shipped
+    without a left bound, which is exactly how a `<host>.env.<qualifier>` LAN name scanned clean.
+
+    Checking the condition rather than enumerating bypasses is what terminates the class: a new
+    ALLOW_SPANS entry that satisfies neither arm fails HERE, at the cause, instead of being
+    rediscovered later as one more shape that slipped through.
+    """
+    wordy = ("nas-a", "host-b", "operator", "svc1", "x")
+    for token in _PERMITTED_TOKENS:
+        can_contain_a_leak = any(rx.search(token) for _, rx in COMPILED)
+        for prefix in wordy:
+            line = f"{prefix}{token}"
+            grew_left = [(s, e) for s, e in guard._permitted_spans(line)
+                         if s > 0 and re.match(r"[\w-]", line[s - 1])]
+            if grew_left and can_contain_a_leak:
+                pytest.fail(
+                    f"AMNESTY VECTOR: the permitted span {line[grew_left[0][0]:grew_left[0][1]]!r}"
+                    f" begins immediately after a word character in {line!r}, AND the token "
+                    f"{token!r} can contain a deny match. That span can be appended to a real "
+                    f"leak to hide it — left-bound it with (?<![\\w-]).")
+
+
+def test_the_untouchable_lan_local_pattern_is_exactly_as_decided() -> None:
+    """⛔ DO NOT 'FIX' THE TRAILING-DOT GAP. It was repaired once and REVERTED.
+
+    `(?![\\w-]|\\.[\\w-])` does catch `host-a.lan.` at a sentence end — and false-fires on
+    `config.local.${ENV}`, `settings.local.*` and `.gitignore` globs, which are ordinary clean
+    lines. `<label>.local.` and `<label>.lan.` at a sentence end are the same string shape and no
+    regex separates them, so the gap is taken deliberately and declared in KNOWN LIMITS.
+
+    ⚠️ THIS PIN EXISTS BECAUSE NOTHING ELSE CATCHES THE REVERT. The forbidden repair was
+    re-applied experimentally and the ENTIRE suite stayed green, selftest included: `_MUST_PASS`
+    happens to carry only the three `.local` FILENAME forms the bad repair also passes. Pinning
+    the decision is the only thing that makes undoing it loud, so this asserts the regex source.
+    """
+    assert dict(guard.PATTERNS)["private lan domain"] == r"(?<![\w-])[\w-]+\.(?:lan|local)(?![\w.-])", (
+        "the `private lan domain` pattern changed. If this is the trailing-dot 'repair', it was "
+        "tried before and reverted for false-firing on config.local.${ENV} and .gitignore globs "
+        "— see KNOWN LIMITS. Do not re-apply it.")
+
+
+@pytest.mark.parametrize("sample", [
+    # The exact shapes that made the trailing-dot repair unacceptable. `_MUST_PASS` pinned only
+    # the three plain filename forms, all of which the BAD repair also passes — so none of them
+    # would have caught the revert.
+    "load_config('config.local.${ENV}')",
+    "compose.local.$(uname).yaml",
+    "the override file is settings.local.",
+])
+def test_the_false_positives_that_forced_the_trailing_dot_revert_stay_clean(sample: str) -> None:
+    hits = guard.scan_text(sample, COMPILED)
+    assert not hits, (
+        f"{sample!r} now trips {[h[1] for h in hits]} — this is the false-positive class the "
+        f"trailing-dot repair was reverted for")
+
+
+def test_a_trailing_glob_IS_a_known_false_positive_and_is_recorded_as_one() -> None:
+    """⚠️ AN HONEST PIN OF A REAL, PRE-EXISTING FALSE POSITIVE — not a claim that it is fine.
+
+    A `.gitignore` glob of the form `*<name>.local*` trips `private lan domain` TODAY: the glob's
+    trailing `*` is not in `[\\w.-]`, so the right bound is satisfied and the pattern reads it as
+    a hostname. A repo carrying that line would redden CI while leaking nothing.
+
+    It is pinned rather than fixed because the fix is a change to this exact pattern, which is
+    frozen by decision (see `test_the_untouchable_lan_local_pattern_is_exactly_as_decided`) — and
+    because a gap that is asserted is a gap somebody can find, whereas one mentioned in a comment
+    is not. Filed as unraid-templates#32. If that issue is resolved, this test flips to the
+    must-pass list above; until then it documents the true behaviour.
+    """
+    glob = "gitignore glob: *config." + "local*"     # fragmented: this file is scanned
+    hits = guard.scan_text(glob, COMPILED)
+    assert [h[1] for h in hits] == ["private lan domain"], (
+        "the trailing-glob false positive changed behaviour. If it was FIXED, move this sample "
+        "into test_the_false_positives_that_forced_the_trailing_dot_revert_stay_clean and close "
+        "unraid-templates#32.")
+
+
 def test_the_delete_then_match_pass_is_gone_and_must_not_come_back() -> None:
     """`_neutralize` WAS the bug: deletion is what let a permitted token consume its neighbours.
 
@@ -932,7 +1054,50 @@ def test_a_staged_then_deleted_file_is_REPORTED_not_silently_skipped(tmp_path: P
     proc = _run_guard(repo)
     assert proc.returncode == 1, (
         f"a staged-but-deleted leak scanned CLEAN: rc={proc.returncode} {proc.stdout}")
-    assert "staged.txt" in proc.stdout and "absent from the worktree" in proc.stdout, proc.stdout
+    # ⭐ IDENTIFIED, not merely "unreadable". The guard reads the staged BLOB, so it names the
+    # file, the line and the pattern — an operator can act on that, where "I could not vouch for
+    # this path" sent them looking by hand.
+    assert "staged.txt:1" in proc.stdout, proc.stdout
+    assert "private lan domain" in proc.stdout, proc.stdout
+
+
+@pytest.mark.timeout(300)
+def test_an_UNSTAGED_deletion_of_a_clean_file_does_NOT_block_the_commit(tmp_path: Path) -> None:
+    """⭐ THE FALSE-RED THE HOLE-2 FIX NEARLY SHIPPED, and the reason it reads the staged blob.
+
+    `rm <tracked-file>` without staging the deletion is ordinary mid-edit behaviour. The index
+    still holds the file, so a blanket "tracked but absent -> cannot vouch for it" reddened a tree
+    that publishes nothing internal — and told the operator to "re-stage it", which is the wrong
+    instruction when the whole point was to delete it. A guard that reddens correct work is one
+    that gets switched off, so this direction matters as much as the catching one.
+    """
+    repo = tmp_path / "unstaged"
+    _init(repo)
+    (repo / "keep.txt").write_text("nothing internal here\n", encoding="utf-8")
+    (repo / "doomed.txt").write_text("also perfectly clean\n", encoding="utf-8")
+    _git(repo, "add", "keep.txt", "doomed.txt")
+    _git(repo, "commit", "-q", "-m", "base")
+    (repo / "doomed.txt").unlink()          # deleted, deletion NOT staged
+
+    proc = _run_guard(repo)
+    assert proc.returncode == 0, (
+        f"an unstaged deletion of a CLEAN tracked file reddened the tree: {proc.stdout}")
+
+
+@pytest.mark.timeout(300)
+def test_staged_content_that_is_not_UTF8_is_still_reported_as_not_cleared(tmp_path: Path) -> None:
+    """The fallback still fails closed. Reading the blob answers the question when it CAN be
+    decoded; when it cannot, the honest answer is unchanged — not scanned, so not cleared."""
+    repo = tmp_path / "stagedbin"
+    _init(repo)
+    blob = repo / "wide.txt"
+    blob.write_bytes(f"AGENT={_HOST}\n".encode("utf-16"))
+    _git(repo, "add", "wide.txt")
+    blob.unlink()
+
+    proc = _run_guard(repo)
+    assert proc.returncode == 1, f"undecodable staged content was cleared: {proc.stdout}"
+    assert "wide.txt" in proc.stdout and "not UTF-8" in proc.stdout, proc.stdout
 
 
 @pytest.mark.timeout(300)
@@ -1092,6 +1257,59 @@ def test_the_self_exemption_follows_the_FILE_not_a_hardcoded_path(tmp_path: Path
         f"the guard reported its OWN synthetic deny cases as findings when run from a path "
         f"other than {guard.SELF_PATH!r}: {proc.stdout}{proc.stderr}")
 
+    # ⭐ THE OTHER HALF, and the half that actually catches a regression. The docstring names a
+    # TWO-sided bug — "the exemption on the one file that does not need it, AND GONE FROM THE ONE
+    # THAT DOES" — and only the second half was asserted. A decoy at the hardcoded SELF_PATH must
+    # be SCANNED, because it is not this file. Asserting the clean direction alone is equally
+    # true of an exemption that has stopped working entirely.
+    scripts = repo / "scripts"
+    scripts.mkdir()
+    decoy = scripts / "check_no_internal_info.py"
+    decoy.write_text(f"AGENT_URL=http://{_HOST}:9999/mcp\n", encoding="utf-8")
+    _git(repo, "add", "scripts/check_no_internal_info.py")
+
+    proc = subprocess.run([sys.executable, str(copied), "--repo", str(repo)],
+                          capture_output=True, text=True, timeout=300)
+    assert proc.returncode == 1, (
+        f"an unrelated file sitting at the hardcoded {guard.SELF_PATH!r} was exempted — the "
+        f"self-exemption is landing on a PATH rather than on the guard: {proc.stdout}")
+    assert "scripts/check_no_internal_info.py" in proc.stdout, proc.stdout
+
+
+@pytest.mark.timeout(300)
+def test_the_RANGE_scan_resolves_the_self_path_the_same_way_the_tree_scan_does(
+    tmp_path: Path,
+) -> None:
+    """⭐ THE TWO SCANS MUST AGREE, and one call site was missed.
+
+    `added_lines` filtered its unscannable list with `_skipped(p)` — no `root` — so it fell back
+    to the SELF_PATH CONSTANT while the tree scan resolved the real file from `__file__`. The
+    consequence was not a cosmetic mismatch: a path wrongly judged "skipped" drops out of
+    `pending`, and an empty `pending` returns early DISCARDING the unscannable list, so an
+    unreadable blob was reported CLEAN by the range scan on the push path.
+
+    Reproduced the way it actually bites: guard relocated to `tools/`, an undecodable file parked
+    at the hardcoded `scripts/check_no_internal_info.py`.
+    """
+    repo = tmp_path / "twoscans"
+    _init(repo)
+    tools = repo / "tools"
+    tools.mkdir()
+    copied = tools / "check_no_internal_info.py"
+    copied.write_bytes(_SCRIPT.read_bytes())
+    scripts = repo / "scripts"
+    scripts.mkdir()
+    (scripts / "check_no_internal_info.py").write_bytes(
+        f"AGENT=http://{_HOST}/\n".encode("utf-16"))
+    _git(repo, "add", "tools/check_no_internal_info.py", "scripts/check_no_internal_info.py")
+    _git(repo, "commit", "-q", "-m", "decoy at the hardcoded path")
+
+    proc = subprocess.run([sys.executable, str(copied), "--repo", str(repo), "--range", "HEAD"],
+                          capture_output=True, text=True, timeout=300)
+    assert proc.returncode == 1, (
+        f"the RANGE scan cleared a blob it never read, because it resolved the self-path "
+        f"differently from the tree scan: rc={proc.returncode} {proc.stdout}{proc.stderr}")
+
 
 def test_compile_patterns_is_the_single_definition_and_it_is_case_insensitive() -> None:
     """⛔ The drift this closes: `main` inlined `re.compile(rx, re.IGNORECASE)` and the test
@@ -1144,6 +1362,118 @@ def test_ordinary_windows_paths_do_NOT_fire(sample: str) -> None:
     """
     hits = guard.scan_text(sample, COMPILED)
     assert not hits, f"false positive on an ordinary Windows path: {sample!r} -> {hits}"
+
+
+@pytest.mark.parametrize("sample", [
+    # ⭐ THE SAME PATH IN ITS OTHER SPELLINGS. Only the `C:\` form was matched at first; each of
+    # these is the identical leak on the identical machine, written the way that tool writes it.
+    "cache = " + "/mnt/c/Users/" + "operator" + "/AppData/Local/svc",          # WSL view
+    "set CACHE=" + "%SystemDrive%\\Users\\" + "operator" + "\\AppData",        # env-var prefix
+    "path: " + "C:\\\\\\Users\\\\\\" + "operator",                            # 3+ escapes
+])
+def test_the_other_spellings_of_a_windows_profile_path_are_caught(sample: str) -> None:
+    labels = {label for _, label, _ in guard.scan_text(sample, COMPILED)}
+    assert "windows profile path" in labels, f"{sample!r} walks through -> {labels}"
+
+
+def test_svg_and_other_text_formats_are_NEVER_skipped() -> None:
+    """The leak an earlier batch removed was literally an icon URL inside an SVG.
+
+    `SKIP_SUFFIXES` is the one list that can make the guard look away from a whole file, and
+    nothing asserted that a TEXT-bearing format had not drifted into it. Adding `.svg` would have
+    been silently green.
+    """
+    for suffix in (".svg", ".xml", ".md", ".json", ".yml", ".yaml", ".py", ".sh", ".txt"):
+        assert suffix not in guard.SKIP_SUFFIXES, (
+            f"{suffix} is a TEXT format and has been added to SKIP_SUFFIXES — an SVG is XML and "
+            f"carries <title>/<desc>/href, which is where an icon-URL leak lived once")
+    # ...and the exemption still works for what it is actually for.
+    assert guard._skipped("icons/logo.png") and guard._skipped("a/b/FONT.WOFF2")
+
+
+@pytest.mark.parametrize("label,rx", [(label, rx) for label, rx in guard.compile_patterns()])
+def test_no_single_denylist_pattern_backtracks_quadratically(label: str, rx) -> None:
+    """⭐ A HANG IS THE FAILURE MODE A PUSH-PATH GUARD CANNOT HAVE, and only the ALLOW-SPANS had
+    a linearity test — the measured claims on `tailnet name` and `personal mail address` (the
+    lookbehinds that once made a real `git push` take 2m06s) were comment-only. Dropping either
+    bound left the suite green.
+
+    Bounded rather than timed precisely: the point is the ORDER of growth, and a tight wall-clock
+    assertion on a shared runner is its own flake. The inputs are the character runs each pattern
+    is built from, which is what makes a missing left bound quadratic.
+    """
+    import time
+
+    for filler in ("z" * 32_000, "a-b-" * 8_000, "0123456789abcdef-" * 2_000, "x.y." * 8_000):
+        start = time.perf_counter()
+        rx.search(filler)
+        elapsed = time.perf_counter() - start
+        assert elapsed < 2.0, (
+            f"{label!r} took {elapsed:.1f}s on a {len(filler)}-char line — it is backtracking "
+            f"quadratically; check its left bound (?<![...]) is present")
+
+
+def test_the_SUPPRESSION_path_is_linear_too() -> None:
+    """The containment check runs once per match per pattern. Done as a linear scan over the
+    permitted spans it is O(matches x spans), and a 176 KB minified line dense with permitted
+    tokens took 31 SECONDS — on the push path. `_containment_index` makes each query O(log n).
+
+    A line of many `.env.local` tokens is the shape that reaches it: each one is a permitted span
+    AND contains a suppressible deny match, which is the worst case by construction.
+    """
+    import time
+
+    line = "var e=" + '"'.join([".env.local"] * 8_000) + ";"
+    start = time.perf_counter()
+    guard.scan_text(line, COMPILED)
+    elapsed = time.perf_counter() - start
+    assert elapsed < 5.0, (
+        f"scanning one {len(line) // 1024} KB line of permitted tokens took {elapsed:.1f}s — the "
+        f"containment check has gone quadratic again; it must stay indexed, not a linear scan")
+
+
+@pytest.mark.timeout(300)
+def test_a_leaky_COMMITTER_is_caught_even_when_the_author_is_clean(tmp_path: Path) -> None:
+    """`commit_identity` reads four fields; the end-to-end tests only ever set the AUTHOR.
+
+    Truncating `_IDENT_FIELDS` to the author pair left the whole suite green, so nothing pinned
+    the committer half — and a committer address is set by exactly the same kind of stray
+    `-c user.email` override the identity scan exists to catch.
+    """
+    repo = tmp_path / "committer"
+    _init(repo)
+    (repo / "ok.txt").write_text("nothing to see here\n", encoding="utf-8")
+    _git(repo, "add", "ok.txt")
+    bad = "someone@" + "yahoo" + ".invalid"
+    _git(repo, "-c", "user.name=clean", "-c", "user.email=1234+clean@users.noreply.github.com",
+         "-c", f"committer.email={bad}", "commit", "-q", "-m", "clean author, leaky committer",
+         "--author", "clean <1234+clean@users.noreply.github.com>")
+
+    proc = _run_guard(repo, "--range", "HEAD")
+    assert proc.returncode == 1, (
+        f"a leaky COMMITTER address scanned clean: {proc.stdout}{proc.stderr}")
+    assert "committer email" in proc.stdout, proc.stdout
+
+
+def test_a_short_identity_response_is_an_ERROR_not_a_silent_partial_scan() -> None:
+    """`zip` stops at the shorter side, so a malformed git response would have quietly scanned
+    only the fields that arrived and reported the commit clean on the rest — a guard reporting on
+    less than it claims. Unverified must fail closed like everything else here."""
+    original = guard._git
+    guard._git = lambda *a, **k: "only-one-field"          # a response of the wrong shape
+    try:
+        with pytest.raises(ValueError, match="identity fields"):
+            guard.commit_identity(Path("."), "abc1234567")
+    finally:
+        guard._git = original
+
+    # ...and the well-formed response still parses into all four fields.
+    guard._git = lambda *a, **k: "n\x00n@example.com\x00c\x00c@example.com\n"
+    try:
+        assert [f for f, _ in guard.commit_identity(Path("."), "abc")] == list(
+            guard._IDENT_FIELDS)
+    finally:
+        guard._git = original
 
 
 @pytest.mark.timeout(300)

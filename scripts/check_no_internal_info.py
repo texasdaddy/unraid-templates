@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Fail the build if any tracked file contains internal identifying information.
+r"""Fail the build if any tracked file contains internal identifying information.
+
+⚠️ RAW STRING, deliberately. This docstring quotes regexes and Windows paths, so `\U` (in
+`\Users`), `\b`, `\w` and friends appear in it as text. Without the `r` prefix Python reads them
+as escapes: `\Users` is a truncated `\UXXXXXXXX` and is a hard SyntaxError that stops the guard
+from importing at all, and `\b` silently becomes a literal backspace character in the text.
 
 WHY THIS EXISTS
     These repos are public, and so are the images they build. An internal IP, an appdata pool
@@ -43,6 +48,28 @@ KNOWN LIMITS (state them; do not pretend to coverage)
     cost of an accidental leak; it is not a control against a determined one.
 
     Shape-based, per the note above: it cannot see a real value that has no recognisable shape.
+
+    ⚠️ THE SPECIFIC GAPS, listed because three separate pattern comments said "stated in KNOWN
+    LIMITS" while this section did not in fact state them. A cross-reference to a promise nobody
+    kept is the same claim-inflation the guard exists to keep out:
+      * `.lan`/`.local` with a TRAILING DOT (`the agent lives at host-a.lan.`, or the absolute-DNS
+        `http://host-a.lan./mcp`) is NOT matched. The obvious repair `(?![\w-]|\.[\w-])` was tried
+        and REVERTED: it false-fires on `settings.local.*`, `config.local.${ENV}` and `.gitignore`
+        globs, which are ordinary clean lines. `<label>.local.` at a sentence end and
+        `<label>.lan.` at a sentence end are the same string shape and no regex separates them,
+        so this takes the fail-quiet side deliberately. Do not "fix" it.
+      * A `.gitignore` glob ending immediately after the label — `*config.local*` — DOES fire, a
+        real false positive (issue #32). The right bound rejects a following LABEL, and `*` is not
+        one. Not repaired here because the repair touches the frozen pattern above; pinned as
+        known behaviour by a test so it is discoverable rather than folklore.
+      * A CUSTOM Unraid pool name (`/mnt/tank`, `/mnt/nvme`) has no shape here — the pool list is
+        a fixed set of stock names. Widening to `/mnt/[\w-]+/` would fire on ordinary container
+        paths. Custom names are the project-side guard's job.
+      * `@me.com` / `@mac.com` are deliberately absent from the freemail alternation: `me`
+        collides with too much ordinary text.
+      * Windows: UNC (`\\<host>\<share>`), drive-RELATIVE (`\Users\<name>`) and percent-encoded
+        (`C:%5CUsers%5C…`) spellings are not matched. See the pattern comment for why each would
+        cost more in false positives than it closes.
 
     `--range` reads each commit's diff against its FIRST parent. For an ordinary commit that is
     exactly "what this commit added". For a merge it is "everything the merged side brought in",
@@ -88,6 +115,7 @@ IF IT FIRES ON SOMETHING LEGITIMATE
 
 from __future__ import annotations
 
+import bisect
 import functools
 import re
 import subprocess
@@ -198,12 +226,24 @@ PATTERNS: list[tuple[str, str]] = [
     # `"C:\\Users\\operator"` in JSON or Python source is the same leak as the bare form, and a
     # single-character separator class misses every one of them.
     #
-    # KNOWN LIMIT, stated rather than half-covered: a UNC path (`\\<host>\<share>`) also names a
-    # host and is NOT matched here. The shape is two backslashes, a label and a backslash, which
-    # is also an ordinary regex fragment (`"\\w\\d"`) — matching it false-fires on source code,
-    # and a false-red on a clean tree costs more than this gap.
+    # ⚠️ THREE PREFIXES, not one. The same profile path is written three ways on this platform and
+    # only the first was matched at first: the WSL view `/mnt/c/Users/<name>/…` (which also slips
+    # `unraid pool path`, whose pool list is fixed) and the environment-variable form
+    # `%SystemDrive%\Users\<name>` are the same leak in different clothes.
+    #
+    # `\\+` and not `\\{1,2}`: a path can be escaped more than twice (a JSON string inside a
+    # shell string), and `C:\\\Users\\\operator` walked through a two-backslash cap.
+    #
+    # KNOWN LIMITS, stated rather than half-covered (all three are also in the module docstring):
+    #   * a UNC path (`\\<host>\<share>`) names a host and is NOT matched. Its shape — two
+    #     backslashes, a label, a backslash — is also an ordinary regex fragment (`"\\w\\d"`), so
+    #     matching it false-fires on source code, and a false-red costs more than the gap.
+    #   * the drive-RELATIVE form (`\Users\<name>`) is not matched, for the same reason: with no
+    #     prefix to anchor on it fires inside ordinary escaped text.
+    #   * percent-encoded separators (`C:%5CUsers%5Coperator`) are not matched — the same
+    #     encoding limit the docstring already declares for base64 and percent-encoding.
     ("windows profile path",
-     r"(?<![\w])[A-Za-z]:(?:\\{1,2}|/)Users(?:\\{1,2}|/)"
+     r"(?<![\w])(?:[A-Za-z]:|/mnt/[a-z]|%\w+%)(?:\\+|/)Users(?:\\+|/)"
      r"(?!(?:Public|Default|Default User|All Users)(?![\w.-]))[\w.-]+"),
 ]
 
@@ -225,9 +265,9 @@ PATH_EXEMPT: tuple[tuple[str, str], ...] = ()
 # ⚠️ As of today all three are INERT: none of them matches any current pattern, so removing the
 # neutralisation would change no verdict. They are kept as a deliberate carve-out for the
 # functional owner path in case a future pattern would catch it — stated here so nobody reads
-# this list as evidence that the neutralisation is exercised. `_neutralize` is pinned directly
-# (test_the_allow_literals_are_removed_from_a_line), not through a scan verdict that would pass
-# either way.
+# this list as evidence that the carve-out is exercised. It is pinned DIRECTLY, by
+# `test_the_allow_literals_are_recognised_as_permitted_spans`, and not through a scan verdict that
+# would pass either way.
 ALLOW_LITERALS: tuple[str, ...] = (
     # The GitHub/GHCR owner path is functional — neutralizing it breaks image pulls and the
     # icon URLs the Unraid templates point at. It is the account name, not infrastructure, and
@@ -267,7 +307,10 @@ ALLOW_LITERALS: tuple[str, ...] = (
 # the current denylist these spans suppress nothing whatsoever (no deny pattern can match INSIDE
 # an RFC5737 address or an `example.*` suffix) and they are retained as a deliberate carve-out
 # for a future pattern that would. `_MUST_FAIL_ADJACENT` pins the class, one case per label, and
-# `test_NO_permitted_span_can_EVER_contain_a_deny_match` asserts the general property.
+# `test_no_permitted_span_overlaps_the_leak_in_any_curated_amnesty_case` asserts the invariant
+# behind it — that no permitted span OVERLAPS the leak — over exactly those curated cases. Stated
+# that precisely on purpose: it is not a proof over all possible inputs, and a comment claiming
+# one would be the kind of unverified strength claim this file exists to keep out.
 #
 # ⚠️ The host spans are LEFT-BOUNDED and anchor each label with `(?:[\w-]+\.)*`, rather than
 # leading with a bare `[\w.-]*` as this file used to. An unbounded leading `[\w.-]*` overlaps the
@@ -303,7 +346,16 @@ ALLOW_SPANS: tuple[str, ...] = (
     # A dotenv qualifier is one of a small known set, so enumerate it. A qualifier OUTSIDE this
     # list is matched — a visible false positive with a documented escape hatch, which is the
     # right way round for a leak guard.
-    r"\.env(?:\.(?:local|development|staging|production|preview|test|dev|prod|ci|qa"
+    # ⛔⛔ THE LEFT BOUND `(?<![\w-])` IS THE WHOLE SAFETY OF THIS ENTRY, and it was MISSING when
+    # this span was first ported here. Without it the span starts at a bare `\.`, so it matches
+    # the TAIL of a hostname as happily as a filename — and `nas-a.env.local` then contains the
+    # `env.local` deny match, which containment duly suppressed. ALL TWELVE qualifier forms were
+    # exploitable, the scan exited 0, and it masked a leak in COMMIT IDENTITY too:
+    #     AGENT_URL=http://nas-a.env.local:9999/mcp        -> "no internal info found"
+    # That is the amnesty class this whole file was rewritten to close, reintroduced in the one
+    # span nobody re-checked. A span with no left bound can grow leftward over its neighbour; the
+    # rule at the top of this block is not a style note.
+    r"(?<![\w-])\.env(?:\.(?:local|development|staging|production|preview|test|dev|prod|ci|qa"
     r"|sandbox))?\.local\b",
 )
 
@@ -437,6 +489,31 @@ def _permitted_spans(line: str) -> list[tuple[int, int]]:
     return spans
 
 
+def _containment_index(spans: list[tuple[int, int]]) -> tuple[list[int], list[int]]:
+    """Sorted starts plus a running maximum of the ends, for O(log n) containment queries.
+
+    ⚠️ SPANS ARE NOT MERGED, and that is deliberate. Merging overlapping spans into one wider
+    interval would let TWO permitted tokens jointly cover a leak that NEITHER of them contains —
+    a fresh amnesty hole opened in the name of speed. Containment must always be satisfied by a
+    SINGLE span, so the query stays "is there one span with start <= match.start AND end >=
+    match.end", which the running maximum answers exactly.
+    """
+    ordered = sorted(spans)
+    starts = [s for s, _ in ordered]
+    best: list[int] = []
+    run = -1
+    for _, end in ordered:
+        run = max(run, end)
+        best.append(run)
+    return starts, best
+
+
+def _contained(starts: list[int], best: list[int], lo: int, hi: int) -> bool:
+    """Is [lo, hi) entirely inside at least one permitted span?"""
+    i = bisect.bisect_right(starts, lo) - 1
+    return i >= 0 and best[i] >= hi
+
+
 # ⛔ `_neutralize` — which DELETED the permitted spans from a line so the remainder could be
 # matched — used to live here and is deliberately GONE. It WAS the amnesty bug: deletion is what
 # let a permitted token consume its neighbours, because whatever a span could grow over, it could
@@ -464,14 +541,22 @@ def scan_text(text: str, compiled: list[tuple[str, re.Pattern[str]]],
     `rel_path` is only consulted for PATH_EXEMPT and defaults to "" so the function stays callable
     on a bare string — which is what `selftest` and most of the tests do.
 
-    (With the current shape patterns the allowlist suppresses nothing at all: no deny pattern can
-    match inside an RFC5737 address or an `example.*` suffix. It is retained as a deliberate
-    carve-out for a future pattern that would, which is why the containment rule is pinned by its
-    own test rather than by a scan verdict that would pass either way.)
+    ⚠️ THE ALLOWLIST IS NOT INERT, and an earlier version of this docstring claimed it was ("no
+    deny pattern can match inside an RFC5737 address or an `example.*` suffix"). That enumerated
+    two of the three span families and quietly omitted the third: `.env[.<qualifier>].local`
+    CONTAINS a `private lan domain` match by construction, so suppression genuinely fires there.
+    The false half of that claim is exactly what made an unbounded version of that span look
+    harmless. The carve-out is exercised; treat it as live machinery, not decoration.
+
+    ⚡ The containment query is indexed (`_containment_index`) rather than a linear scan over the
+    spans. The naive form is O(matches x spans) per pattern, and a single 176 KB minified line
+    dense with permitted tokens took 31 s — on the push path, which is the hang this guard's own
+    no-silent-hangs rule forbids.
     """
     hits: list[tuple[int, str, str]] = []
     for lineno, line in enumerate(text.splitlines(), start=1):
         permitted = _permitted_spans(line)
+        starts, best = _containment_index(permitted) if permitted else ([], [])
         for label, rx in compiled:
             if rel_path and _exempt(label, rel_path):
                 continue
@@ -486,7 +571,7 @@ def scan_text(text: str, compiled: list[tuple[str, re.Pattern[str]]],
                     hits.append((lineno, label, m.group(0)))
                 continue
             for m in rx.finditer(line):
-                if any(s <= m.start() and m.end() <= e for s, e in permitted):
+                if _contained(starts, best, m.start(), m.end()):
                     continue  # entirely inside something the allowlist permits
                 hits.append((lineno, label, m.group(0)))
                 break
@@ -695,7 +780,13 @@ def added_lines(root: Path, sha: str) -> ParsedDiff:
         parent = _EMPTY_TREE  # the root commit has no parent
     parsed = parse_diff(
         _git(root, "diff", "--unified=0", "--no-color", "--no-renames", parent, sha))
-    pending = [p for p in parsed.unscannable if not _skipped(p)]
+    # ⚠️ `root` IS LOAD-BEARING HERE, and leaving it off was a live fail-open. `_skipped(p)` with
+    # no root falls back to the SELF_PATH CONSTANT instead of resolving this file from `__file__`
+    # — the exact defect `_self_rel_path` exists to remove, one line away from its own fix. The
+    # consequence is worse than a mismatched exemption: a path wrongly judged "skipped" drops out
+    # of `pending`, and an empty `pending` returns early DISCARDING the whole unscannable list, so
+    # a blob the scan never read is reported as clean on the push path.
+    pending = [p for p in parsed.unscannable if not _skipped(p, root)]
     if not pending:
         return ParsedDiff(parsed.added, [])
 
@@ -755,6 +846,15 @@ def commit_identity(root: Path, sha: str) -> list[tuple[str, str]]:
     """
     raw = _git(root, "show", "-s", f"--format={_IDENT_FORMAT}", sha)
     parts = raw.rstrip("\n").split("\0")
+    if len(parts) != len(_IDENT_FIELDS):
+        # ⚠️ NOT a silent `zip` truncation. `zip` stops at the shorter side, so a malformed or
+        # short git response would quietly scan only the fields that happened to arrive and
+        # report the commit clean on the rest — a guard reporting on less than it claims. If the
+        # response is not the shape asked for, the identity is UNVERIFIED, and unverified fails
+        # closed like everything else here.
+        raise ValueError(
+            f"commit {sha[:10]}: expected {len(_IDENT_FIELDS)} identity fields from git, got "
+            f"{len(parts)} - refusing to report on an identity that was not fully read")
     return [(field, value) for field, value in zip(_IDENT_FIELDS, parts) if value]
 
 
@@ -900,6 +1000,13 @@ _MUST_FAIL_ADJACENT: list[tuple[str, str]] = [
      "TENANT_FILE=.env.11111111-2222-3333-4444-555555555555.local"),
     ("private lan domain", "cp .env.host-a.local .env"),
     ("private lan domain", "cp .env.printer-b.local .env"),
+    # ⭐⭐ THE `.env...local` SPAN WITH NO LEFT BOUND — the bypass this file shipped and an
+    # adversarial round found. The span started at a bare `\.`, so it matched the TAIL of a
+    # hostname as readily as a filename and suppressed the `.local` host inside it. All twelve
+    # qualifier forms were exploitable; two are pinned here and the general property is asserted
+    # by `test_a_permitted_span_may_only_start_mid_word_if_it_cannot_contain_a_leak`.
+    ("private lan domain", "AGENT_URL=http://nas-a.env.local:9999/mcp"),
+    ("private lan domain", "PRINTER=printer-b.env.production.local"),
 ]
 # ⚠️ `private lan domain` has no `<host>.lan.example.com` case, and that is correct rather than an
 # omission: its right bound rejects any following label, so `host-a.lan.example.com` is not a
@@ -1077,12 +1184,17 @@ def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
             # ⚠️ NOT SILENT, and not `continue`. A tracked file missing from the worktree is
             # STAGED-BUT-DELETED (or mid-rebase): its content is still in the INDEX and still goes
             # into the commit, so passing over it quietly let a staged leak commit clean — exit 0,
-            # and the file not even counted. Its sibling `UnicodeDecodeError` branch is loudly
-            # justified as "a file this scanner cannot read is a file it cannot vouch for"; the
-            # same principle applies here and now gets the same handling. Real submodules are
-            # filtered out above, so this branch no longer reddens an ordinary layout.
-            undecodable.append(f"{rel} (tracked but absent from the worktree)")
-            continue
+            # and the file not even counted. Real submodules are filtered out above, so this
+            # branch does not fire on an ordinary layout.
+            #
+            # SCAN THE STAGED BLOB rather than merely refusing to vouch for it: that reports a
+            # staged leak precisely (file and line) AND stops an unstaged `rm` of a clean file
+            # from reddening the commit. See `staged_text`.
+            text = staged_text(root, rel)
+            if text is None:
+                undecodable.append(
+                    f"{rel} (absent from the worktree, and its staged content is not UTF-8)")
+                continue
         except OSError as exc:
             # Anything else unreadable — a permission problem, a broken symlink. Reported rather
             # than raised, because a traceback here aborts the scan part-way and every file after
@@ -1116,6 +1228,31 @@ def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
         return 1
     print(f"no internal info found ({scanned} tracked text files scanned)")
     return 0
+
+
+def staged_text(root: Path, rel: str) -> str | None:
+    """What `git commit` would record for a tracked file that is NOT in the worktree, or None.
+
+    ⭐ THIS IS THE ANSWER TO THE STAGED-BUT-DELETED CASE, and it is strictly better than the
+    "cannot read it, cannot vouch for it" report it replaces — in BOTH directions:
+
+      * SECURITY. A staged leak is now IDENTIFIED, with its file and line, instead of being
+        reported as an unreadable path the operator has to go and inspect by hand.
+      * FALSE-RED. `rm <tracked-file>` without staging the deletion is an ordinary thing to do
+        mid-edit, and the index still holds the file, so the blanket report BLOCKED THE COMMIT on
+        a tree that publishes nothing internal — and the advice it printed ("re-stage it") was
+        the wrong instruction for someone whose intent was to keep the deletion. Reading the blob
+        answers the real question, which is what the COMMIT will contain.
+
+    `:<path>` is the index revision of the file. Returning None means the staged content is not
+    UTF-8 text, which falls back to the honest "not scanned, so not cleared".
+    """
+    try:
+        raw = subprocess.run(["git", "cat-file", "blob", f":{rel}"], cwd=root,
+                             capture_output=True, check=True, timeout=_GIT_TIMEOUT_S).stdout
+        return raw.decode("utf-8")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, UnicodeDecodeError):
+        return None
 
 
 def is_shallow(root: Path) -> bool:

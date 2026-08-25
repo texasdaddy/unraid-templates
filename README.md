@@ -144,7 +144,7 @@ parameter, never a second script:
 The committed copy is the **live** version (`DRY_RUN = False`). To validate a change
 first, flip the constant to `True`, run it, review the output, then flip it back.
 
-> **Backups do not contain your secrets** (#27). `Mask="true"` is a *UI* setting —
+> **Backups redact your `Mask="true"` values** (#27). `Mask="true"` is a *UI* setting —
 > it makes the Unraid form render a password box, but the XML on the flash drive
 > holds the value in **plaintext**. Backups used to be byte-for-byte copies, so
 > every run left another cleartext copy of every token and PAT on the drive, and
@@ -163,6 +163,13 @@ first, flip the constant to `True`, run it, review the output, then flip it back
 >
 > `DRY_RUN = True` covers all of this: it reports what it would redact and prune
 > and writes nothing.
+>
+> **What is redacted, stated exactly** — a `Mask="true"` `<Config>`, and the
+> `<Environment><Variable><Value>` mirror dockerMan writes for the same variable.
+> A secret passed some other way is **not** covered and never claimed to be: most
+> importantly anything you typed into **`<Extra Parameters>`** (e.g.
+> `-e TOKEN=...`), which is free text with no `Mask` flag to key on. Keep secrets
+> in masked variables, not in Extra Parameters.
 
 **Install as an Unraid User Script:** *Settings → User Utilities → User Scripts → Add New Script*,
 name it `sync-templates`, paste the file in as the script body, and run it with

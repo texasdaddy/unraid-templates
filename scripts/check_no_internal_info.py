@@ -62,6 +62,21 @@ KNOWN LIMITS (state them; do not pretend to coverage)
         real false positive (issue #32). The right bound rejects a following LABEL, and `*` is not
         one. Not repaired here because the repair touches the frozen pattern above; pinned as
         known behaviour by a test so it is discoverable rather than folklore.
+      * ⭐ THE TREE SCAN READS THE WORKTREE, so a leak that is STAGED and then tidied in the
+        worktree without re-staging is not seen by THIS layer: `git add cfg.txt` while it holds a
+        leak, then overwrite cfg.txt with a clean version and do not re-stage. The index — and so
+        the commit — still carries the leak. The `--range` scan on the push path DOES catch it, so
+        it cannot reach the remote through the hooks or CI; the gap is that the pre-commit layer
+        on its own says clean. Issue #33.
+        A version that also read the staged blob was written and then REMOVED, twice over: reading
+        it per-file made the pre-commit hook take 78 s on a 1000-file worktree, and reading it in
+        one `cat-file --batch` DESYNCHRONISED on a gitlink — `:<path>` on a submodule returns a
+        COMMIT object, whose body the parser must skip — which mis-attributed one file's content
+        to another and could exit 0 on an unread staged leak. Any repository with a modified
+        submodule reaches that. The right shape is almost certainly
+        `git diff --cached --unified=0` fed through the existing, well-tested `parse_diff`, which
+        asks exactly "what will this commit ADD" and needs no new protocol parser. Until that
+        lands this is a stated limit, not a claim — see #33.
       * A CUSTOM Unraid pool name (`/mnt/tank`, `/mnt/nvme`) has no shape here — the pool list is
         a fixed set of stock names. Widening to `/mnt/[\w-]+/` would fire on ordinary container
         paths. Custom names are the project-side guard's job.
@@ -1208,11 +1223,6 @@ def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
     # Submodule entries, resolved once. See `gitlinks` for why they cannot be told apart from a
     # staged-but-deleted file by catching exceptions.
     submodules = gitlinks(root)
-    # Paths whose staged content differs from the worktree, and their blobs — two git calls for
-    # the whole repository, however many files are mid-edit. See `staged_texts` for why that
-    # matters: per-file it was 78 s on a 1000-file working tree, on the pre-commit path.
-    mid_edit = staged_differs(root)
-    staged_blobs = staged_texts(root, sorted(mid_edit))
     for path in tracked_files(root):
         rel = path.relative_to(root).as_posix()
         if _skipped(rel, root):
@@ -1256,14 +1266,6 @@ def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
         scanned += 1
         findings += [f"{rel}:{n}: {label}: {match!r}"
                      for n, label, match in scan_text(text, compiled, rel)]
-        # ...and, when the two differ, what the COMMIT will actually contain. See `staged_differs`.
-        if rel in mid_edit:
-            staged = staged_blobs.get(rel)
-            if staged is None:
-                undecodable.append(f"{rel} (its STAGED content could not be read)")
-            elif staged != text:
-                findings += [f"{rel} [STAGED]:{n}: {label}: {match!r}"
-                             for n, label, match in scan_text(staged, compiled, rel)]
 
     if undecodable:
         print(f"UNREADABLE as UTF-8 ({len(undecodable)}) - not scanned, so not cleared:")
@@ -1309,110 +1311,6 @@ def staged_text(root: Path, rel: str) -> str | None:
         return raw.decode("utf-8")
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, UnicodeDecodeError):
         return None
-
-
-def staged_differs(root: Path) -> set[str]:
-    """Tracked paths whose INDEX content differs from the worktree.
-
-    ⭐ THE SIBLING OF THE STAGED-BUT-DELETED HOLE, and the same mechanism: the tree scan reads the
-    WORKTREE, while a commit records the INDEX. Deletion was only the loudest case of that gap.
-    Stage a leak, then clean the worktree copy WITHOUT re-staging, and the tree scan reads the
-    tidy version and reports clean — while the commit carries the leak:
-
-        git add cfg.txt                 # cfg.txt holds an internal host
-        printf 'AGENT=...example\\n' > cfg.txt   # cleaned, NOT re-staged
-        check_no_internal_info.py       # "no internal info found", exit 0
-        git commit                      # the leak is committed
-
-    The range scan catches it on the push path, so nothing reaches the remote while that layer
-    runs — but the pre-commit layer said CLEAN, and a guard that clears what it did not read is
-    the one failure mode this file may not have. So the tree scan now reads BOTH sides whenever
-    they differ: the worktree (is the leak here NOW) and the staged blob (what the commit will
-    CONTAIN). Neither answers the other's question.
-
-    One `git diff` for the whole repository, and the blobs are then read in ONE
-    `cat-file --batch` (see `staged_texts`) rather than one git process per file.
-
-    Unmerged paths are excluded: they have no stage-0 entry, so asking for `:<path>` fails and got
-    reported as unreadable on a conflict whose content is perfectly clean. See `unmerged_paths`.
-
-    KNOWN LIMIT: a path marked `--assume-unchanged` or `skip-worktree` is invisible to `git diff`,
-    so a leak staged under one is not seen by THIS layer. The push-path range scan still catches
-    it, and nothing saw it before either — so it is not a regression, but it is a limit of this
-    layer rather than a property of the guard, and it is written down instead of assumed.
-    """
-    try:
-        differs = {p for p in _git(root, "diff", "--name-only", "-z").split("\0") if p}
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        # No index to compare (a bare or brand-new repo), or git took too long. The worktree scan
-        # still runs; this only ever ADDS coverage, so failing to determine it is not a reason to
-        # fail the whole scan. ⚠️ `TimeoutExpired` is NOT a `CalledProcessError`, so leaving it out
-        # of this tuple contradicted the sentence above and aborted the entire scan.
-        return set()
-    return differs - unmerged_paths(root)
-
-
-def unmerged_paths(root: Path) -> set[str]:
-    """Paths in an unresolved merge conflict — they have NO stage-0 entry.
-
-    `git cat-file blob :<path>` FAILS on one of these ("is in the index, but not at stage 0"),
-    which the staged read turned into "its STAGED content is not UTF-8": a false RED on a conflict
-    that leaks nothing, pointing the operator at an encoding problem that does not exist. `git
-    commit` refuses while a conflict is unresolved so the hook itself never fires, but a manual
-    run and a CI tree scan taken mid-merge both hit it.
-    """
-    try:
-        out = _git(root, "ls-files", "-u", "-z")
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return set()
-    return {entry.partition("\t")[2] for entry in out.split("\0") if "\t" in entry}
-
-
-def staged_texts(root: Path, paths: list[str]) -> dict[str, str | None]:
-    """The INDEX content of each path, decoded — or None where it cannot be read.
-
-    ⚡ ONE GIT PROCESS FOR ALL OF THEM, not one per file. The first version called `git cat-file`
-    per path at ~75 ms each, so an ordinary "reformat the tree, then commit a subset" state with
-    1000 modified files made the PRE-COMMIT HOOK take 78 SECONDS (measured; a clean tree is 3 s).
-    That is exactly the hang this file's no-silent-hangs rule forbids, and it is the SAME mistake
-    `added_lines` already carries a comment about avoiding — the unit of work was right and the
-    way of fetching it was not. The same 1000 blobs through `--batch` take 0.56 s.
-
-    The `--batch` protocol: one request per input line, and per request either
-    `<sha> <type> <size>` + newline + that many bytes + a newline, or `<rev> missing` + newline.
-    Responses come back in the order asked, which is what lets them be zipped back to their paths.
-    """
-    # A path containing a newline cannot be expressed in a line-based protocol. Vanishingly rare,
-    # and fail-closed: it stays None, i.e. reported as unreadable rather than silently skipped.
-    askable = [p for p in paths if "\n" not in p]
-    result: dict[str, str | None] = {p: None for p in paths}
-    if not askable:
-        return result
-    stdin = "".join(f":{p}\n" for p in askable).encode("utf-8")
-    try:
-        out = subprocess.run(["git", "cat-file", "--batch"], cwd=root, input=stdin,
-                             capture_output=True, check=True, timeout=_GIT_TIMEOUT_S).stdout
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return result
-    pos = 0
-    for path in askable:
-        nl = out.find(b"\n", pos)
-        if nl == -1:
-            break
-        header, pos = out[pos:nl], nl + 1
-        parts = header.split(b" ")
-        if len(parts) != 3 or parts[1] != b"blob":
-            continue            # `<rev> missing`, or a tree/tag where a blob was expected
-        try:
-            size = int(parts[2])
-        except ValueError:
-            break               # the stream is not the shape we think; stop rather than mis-slice
-        blob, pos = out[pos:pos + size], pos + size + 1
-        try:
-            result[path] = blob.decode("utf-8")
-        except UnicodeDecodeError:
-            result[path] = None
-    return result
 
 
 def is_shallow(root: Path) -> bool:
@@ -1477,7 +1375,12 @@ def _scan_commits(root: Path, rev_range: str,
               "noreply address), then rewrite the commits so the metadata is corrected too.")
     if result.findings or result.unscannable:
         return 1
-    print(f"no internal info added across {result.commits} commit(s) in {rev_range}")
+    # ⚠️ `_ascii` HERE TOO — this is the FOURTH `rev_range` site and the only one on the SUCCESS
+    # path. The first repair covered the three failure/finding messages and missed this, so a
+    # perfectly clean range scan on a branch with a non-ASCII name still died with a traceback
+    # under a hook's cp1252 stdout. A guard that crashes when it has nothing to report is the
+    # purest form of the false-red it exists to avoid. The instance, not the class, twice.
+    print(_ascii(f"no internal info added across {result.commits} commit(s) in {rev_range}"))
     return 0
 
 

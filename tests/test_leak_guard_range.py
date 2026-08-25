@@ -1167,87 +1167,15 @@ def test_a_staged_then_deleted_file_is_REPORTED_not_silently_skipped(tmp_path: P
 
 
 @pytest.mark.timeout(300)
-def test_a_leak_STAGED_then_cleaned_in_the_worktree_is_still_caught(tmp_path: Path) -> None:
-    """⭐ THE SIBLING OF THE STAGED-BUT-DELETED HOLE — same mechanism, quieter shape.
-
-    Deletion was only the loudest way for the index and the worktree to disagree. Stage a leak,
-    then tidy the worktree copy WITHOUT re-staging: the tree scan reads the tidy version, reports
-    CLEAN, and the commit carries the leak. The range scan catches it on the push path, but the
-    pre-commit layer had already said clean — and a guard that clears what it did not read is the
-    one failure mode this file may not have.
-    """
-    repo = tmp_path / "stagedmod"
-    _init(repo)
-    cfg = repo / "cfg.txt"
-    cfg.write_text(f"AGENT_URL=http://{_HOST}:9999/mcp\n", encoding="utf-8")
-    _git(repo, "add", "cfg.txt")
-    # Clean the WORKTREE only. The index still holds the leak, and so will the commit.
-    cfg.write_text("AGENT_URL=http://your-host.example:9999/mcp\n", encoding="utf-8")
-
-    assert _HOST in _git(repo, "show", ":cfg.txt"), "precondition: the index still holds it"
-    assert _HOST not in cfg.read_text(encoding="utf-8"), "precondition: the worktree is clean"
-
-    proc = _run_guard(repo)
-    assert proc.returncode == 1, (
-        f"a leak that is STAGED but tidied in the worktree scanned CLEAN — the tree scan is "
-        f"reading the worktree instead of what the commit will contain: {proc.stdout}")
-    assert "STAGED" in proc.stdout and "cfg.txt" in proc.stdout, proc.stdout
-
-
-@pytest.mark.timeout(300)
-def test_the_staged_side_is_read_in_ONE_git_process_not_one_per_file(tmp_path: Path) -> None:
-    """⛔ A PRE-COMMIT HOOK MAY NOT TAKE A MINUTE. The first version spawned `git cat-file` per
-    modified path at ~75 ms each, so an ordinary "reformat the tree, commit a subset" state with
-    1000 modified files took 78 SECONDS on every commit — the hang this file's own rule forbids,
-    and the identical mistake `added_lines` documents avoiding.
-
-    Pinned by COUNTING PROCESSES, not by wall-clock: a timing threshold on a shared runner is its
-    own flake, and the property that matters is "one batch, not one per file". 60 files would be
-    60 spawns under the old design.
-    """
-    repo = tmp_path / "manydirty"
-    _init(repo)
-    for i in range(60):
-        (repo / f"f{i:03d}.txt").write_text(f"clean line {i}\n", encoding="utf-8")
-    _git(repo, "add", "-A")
-    for i in range(60):
-        (repo / f"f{i:03d}.txt").write_text(f"edited line {i}\n", encoding="utf-8")
-
-    mid = guard.staged_differs(repo)
-    assert len(mid) == 60, f"precondition: all 60 should be mid-edit, got {len(mid)}"
-
-    calls = []
-    real = subprocess.run
-
-    def counting(cmd, *a, **kw):
-        if isinstance(cmd, list) and len(cmd) > 1 and cmd[1] == "cat-file":
-            calls.append(cmd)
-        return real(cmd, *a, **kw)
-
-    guard.subprocess.run = counting
-    try:
-        blobs = guard.staged_texts(repo, sorted(mid))
-    finally:
-        guard.subprocess.run = real
-
-    assert len(calls) == 1, (
-        f"{len(calls)} `git cat-file` processes for 60 files — the staged read is per-file again, "
-        f"which is 75 ms each on the commit path")
-    assert len(blobs) == 60 and all(v is not None for v in blobs.values())
-    # ⚠️ NEWLINE-AGNOSTIC. `Path.write_text` translates `\n` to CRLF on Windows, so what the blob
-    # holds depends on the machine's `core.autocrlf` — an exact-content assertion here passes or
-    # fails by environment rather than by behaviour, which is the same class as a clock-dependent
-    # test. What this case is actually about is that response N came back attached to path N.
-    assert blobs["f007.txt"].rstrip("\r\n") == "clean line 7", (
-        f"the batch responses were mis-zipped to paths: f007 got {blobs['f007.txt']!r}")
-    assert blobs["f042.txt"].rstrip("\r\n") == "clean line 42", blobs["f042.txt"]
-
-
-@pytest.mark.timeout(300)
 def test_an_unresolved_merge_conflict_does_not_redden_a_clean_tree(tmp_path: Path) -> None:
-    """⛔ A FALSE-RED THE STAGED READ INTRODUCED. An unmerged path has NO stage-0 entry, so
-    `git cat-file blob :<path>` fails — and that was reported as "its STAGED content is not
-    UTF-8": red on a conflict that leaks nothing, blaming an encoding problem that does not exist.
+    """A tree mid-merge, with entirely clean content, must not redden.
+
+    Kept as a standing regression guard. It was written for a false-red that a staged-blob read
+    introduced (an unmerged path has no stage-0 entry, so `git cat-file blob :<path>` failed and
+    was reported as an encoding problem); that machinery has since been removed — see issue #33 —
+    so the case now passes for the simpler reason. It stays because "a conflicted tree does not
+    redden" is a property worth pinning whatever the implementation, and the next attempt at
+    staged scanning will need it on day one.
     """
     repo = tmp_path / "conflictclean"
     _init(repo)
@@ -1263,7 +1191,8 @@ def test_an_unresolved_merge_conflict_does_not_redden_a_clean_tree(tmp_path: Pat
     _git(repo, "commit", "-q", "-am", "ours")
     _merge_expecting_conflict(repo, "other")
 
-    assert "a.txt" in guard.unmerged_paths(repo), "precondition: the path is unmerged"
+    stages = _git(repo, "ls-files", "-u", "--", "a.txt").strip().splitlines()
+    assert len(stages) > 1, f"precondition: the merge did not conflict, so this proves nothing: {stages}"
     proc = _run_guard(repo)
     assert proc.returncode == 0, (
         f"an unresolved conflict with entirely clean content reddened the tree: {proc.stdout}")
@@ -1293,6 +1222,49 @@ def test_a_non_ascii_REVISION_RANGE_does_not_crash_the_announcement(tmp_path: Pa
         f"{proc.stderr.decode('utf-8', 'replace')}")
     assert proc.returncode == 1, proc.stdout
     assert b"INTERNAL INFO FOUND" in proc.stdout, proc.stdout
+
+
+@pytest.mark.timeout(300)
+def test_a_leak_STAGED_then_TIDIED_is_a_STATED_LIMIT_of_the_tree_scan(tmp_path: Path) -> None:
+    """⚠️ AN HONEST PIN OF A KNOWN GAP — not a claim that it is fine. Issue #33.
+
+    The tree scan reads the WORKTREE. Stage a leak, overwrite the file with a clean version and do
+    not re-stage: the index (and so the commit) still carries the leak, and this layer says clean.
+
+    Both halves are asserted, because the SECOND is what makes the gap tolerable: the `--range`
+    scan on the push path DOES catch it, so it cannot reach the remote through the hooks or CI.
+
+    ⛔ WHY THIS IS A PIN AND NOT A FIX. Two implementations that closed it were written and
+    removed: reading the staged blob per-file made the pre-commit hook take 78 s on a 1000-file
+    worktree, and reading it via `cat-file --batch` desynchronised on a gitlink (`:<path>` on a
+    submodule returns a COMMIT, whose body the parser must skip), mis-attributing one file's
+    content to another and exiting 0 on an unread staged leak — reachable by any repo with a
+    modified submodule. When #33 is done this test INVERTS: the tree scan should exit 1 and the
+    assertion below should be the thing that changes, deliberately and visibly.
+    """
+    repo = tmp_path / "stagedtidied"
+    _init(repo)
+    cfg = repo / "cfg.txt"
+    cfg.write_text(f"AGENT_URL=http://{_HOST}:9999/mcp\n", encoding="utf-8")
+    _git(repo, "add", "cfg.txt")
+    cfg.write_text("AGENT_URL=http://your-host.example:9999/mcp\n", encoding="utf-8")
+
+    assert _HOST in _git(repo, "show", ":cfg.txt"), "precondition: the index holds the leak"
+    assert _HOST not in cfg.read_text(encoding="utf-8"), "precondition: the worktree is clean"
+
+    tree = _run_guard(repo)
+    assert tree.returncode == 0, (
+        f"the TREE scan now catches this — #33 has been implemented, so invert this test and "
+        f"delete the KNOWN LIMIT from the guard: {tree.stdout}")
+
+    # ...and the layer that actually gates the remote DOES catch it.
+    _git(repo, "commit", "-q", "-m", "publish the staged leak")
+    rng = _run_guard(repo, "--range", "HEAD")
+    assert rng.returncode == 1, (
+        f"the RANGE scan missed a staged-then-committed leak — this is the layer that keeps the "
+        f"gap above tolerable, so if it stops working the limit is no longer acceptable: "
+        f"{rng.stdout}")
+    assert "cfg.txt" in rng.stdout, rng.stdout
 
 
 @pytest.mark.timeout(300)

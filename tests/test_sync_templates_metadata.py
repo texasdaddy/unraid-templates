@@ -291,6 +291,14 @@ NESTED_SECRET = (
     '<Config Name="NESTED" Target="NESTED" Default="" Mode="" Description="x" '
     'Type="Variable" Display="always" Required="false" Mask="true">pre<b>s3cret</b></Config>'
 )
+# ...and the same thing with NO leading text at all. This is the case that actually exercises the
+# "a child element is content too" branch: with `pre` present the element is already caught by its
+# own text, so a version that ignored children entirely still passed. The mutation matrix found
+# that — the test above was proving less than its name claimed.
+NESTED_SECRET_NO_TEXT = (
+    '<Config Name="NESTED2" Target="NESTED2" Default="" Mode="" Description="x" '
+    'Type="Variable" Display="always" Required="false" Mask="true"><b>s3cret</b></Config>'
+)
 
 
 def _backups(d):
@@ -346,15 +354,29 @@ def test_a_masked_value_held_in_a_CHILD_element_is_redacted_and_counted_honestly
     backups = tmp_path / "b"
     backups.mkdir()
     bak = backups / "my-widget.xml.20260101-000000.bak"
-    bak.write_text(instance_xml(extra=NESTED_SECRET), encoding="utf-8")
+    # BOTH nested shapes: one with text before the child, one with the child alone. Only the
+    # second exercises the "a child is content too" branch — with leading text the element is
+    # already caught by its own text, so a version ignoring children entirely still passed.
+    bak.write_text(instance_xml(extra=NESTED_SECRET + NESTED_SECRET_NO_TEXT), encoding="utf-8")
 
     files, values, unreadable = sync.redact_existing_backups(str(backups))
 
     text = bak.read_text(encoding="utf-8")
     assert SECRET not in text, "the secret survived inside a child element"
-    assert (files, values, unreadable) == (1, 2, []), (
-        "the count must include the nested field, or the report is a false all-clear")
+    assert (files, values, unreadable) == (1, 3, []), (
+        "the count must include BOTH nested fields, or the report is a false all-clear")
     assert sync.redact_existing_backups(str(backups)) == (0, 0, []), "not idempotent"
+
+
+def test_a_masked_field_whose_ONLY_content_is_a_child_still_counts_as_holding_a_secret(sync):
+    """The `len(el) > 0` branch, isolated. A mutation returning False there survived the test
+    above, because that fixture had text before the child and was caught by the text branch."""
+    root = ET.fromstring(instance_xml(extra=NESTED_SECRET_NO_TEXT))
+    nested = [c for c in root.findall("Config") if c.get("Target") == "NESTED2"][0]
+    assert not (nested.text or "").strip(), "precondition: no text, the value is in the child"
+    assert sync._element_holds_a_secret(nested), (
+        "a masked field whose only content is a child element was judged empty — its secret "
+        "would survive redaction while being reported as cleared")
 
 
 def test_the_LIVE_instance_keeps_its_secret(sync, inst, tmp_path):

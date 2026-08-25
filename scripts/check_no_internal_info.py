@@ -1248,10 +1248,25 @@ def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
             # SCAN THE STAGED BLOB rather than merely refusing to vouch for it: that reports a
             # staged leak precisely (file and line) AND stops an unstaged `rm` of a clean file
             # from reddening the commit. See `staged_text`.
+            #
+            # ⚠️ ONE SUBPROCESS PER ABSENT FILE, ~74 ms each (issue #34). Irrelevant for the
+            # handful of files normally in this state, and ~77 s if a 1000-file tracked directory
+            # is deleted without staging the deletion. Left per-file DELIBERATELY: the batched
+            # form is what shipped an exit-0 bypass in this same package (a non-blob response
+            # carries a body, and not consuming it desynchronised the stream — see #33), and
+            # adding a third batch reader to fix a SLOWDOWN rather than a correctness defect was
+            # the wrong trade at the end of that package. #34 carries the design.
             text = staged_text(root, rel)
             if text is None:
+                # ⚠️ DO NOT NAME A CAUSE THIS DOES NOT KNOW. `staged_text` returns None for two
+                # different reasons — the blob is not UTF-8, OR `git cat-file` refused the path
+                # (an UNMERGED path has no stage-0 entry) — and this message used to assert the
+                # first. On a conflicted file that is also absent from the worktree it therefore
+                # sent the operator after an encoding problem that did not exist. Naming a wrong
+                # cause is the same defect class as a wrong claim anywhere else in this file.
                 undecodable.append(
-                    f"{rel} (absent from the worktree, and its staged content is not UTF-8)")
+                    f"{rel} (absent from the worktree, and its staged content could not be read: "
+                    f"not UTF-8, or the path is unmerged and has no stage-0 entry)")
                 continue
         except OSError as exc:
             # Anything else unreadable — a permission problem, a broken symlink. Reported rather

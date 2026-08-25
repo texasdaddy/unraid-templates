@@ -1346,7 +1346,38 @@ def test_staged_content_that_is_not_UTF8_is_still_reported_as_not_cleared(tmp_pa
 
     proc = _run_guard(repo)
     assert proc.returncode == 1, f"undecodable staged content was cleared: {proc.stdout}"
-    assert "wide.txt" in proc.stdout and "not UTF-8" in proc.stdout, proc.stdout
+    assert "wide.txt" in proc.stdout and "could not be read" in proc.stdout, proc.stdout
+
+
+@pytest.mark.timeout(300)
+def test_an_unmerged_absent_path_is_not_blamed_on_the_ENCODING(tmp_path: Path) -> None:
+    """⚠️ The message must not name a cause the guard does not know.
+
+    `staged_text` returns None for two different reasons — the blob is not UTF-8, or `git cat-file`
+    refused the path because it is UNMERGED and has no stage-0 entry. The message asserted the
+    first, so a conflicted file that is also absent from the worktree sent the operator after an
+    encoding problem that did not exist. The content here is valid UTF-8 throughout.
+    """
+    repo = tmp_path / "unmergedgone"
+    _init(repo)
+    f = repo / "c.txt"
+    f.write_text("base\n", encoding="utf-8")
+    _git(repo, "add", "c.txt")
+    _git(repo, "commit", "-q", "-m", "base")
+    _git(repo, "checkout", "-q", "-b", "other")
+    f.write_text("theirs, valid utf-8\n", encoding="utf-8")
+    _git(repo, "commit", "-q", "-am", "theirs")
+    _git(repo, "checkout", "-q", "main")
+    f.write_text("ours, valid utf-8\n", encoding="utf-8")
+    _git(repo, "commit", "-q", "-am", "ours")
+    _merge_expecting_conflict(repo, "other")
+    f.unlink()      # conflicted AND absent from the worktree
+
+    proc = _run_guard(repo)
+    assert proc.returncode == 1, f"fail-closed is still required here: {proc.stdout}"
+    assert "unmerged" in proc.stdout, (
+        f"the guard blamed the encoding for what is an unmerged path with no stage-0 entry — the "
+        f"content is valid UTF-8: {proc.stdout}")
 
 
 @pytest.mark.timeout(300)

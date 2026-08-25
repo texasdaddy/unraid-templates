@@ -256,12 +256,19 @@ def _masked_configs(root):
 
 
 def _masked_names(root):
-    """Every Name/Target a masked <Config> goes by — the keys the <Environment> mirror uses."""
+    """The environment-variable KEYS the masked <Config> elements correspond to.
+
+    ⚠️ `Target` IS THE VARIABLE NAME; `Name` is the human label the UI shows ("Key", "API token").
+    The <Environment> mirror keys on the VARIABLE, so matching the human label as well made an
+    unrelated variable that merely shared a label get redacted — destroying a non-secret value a
+    restore would want, and counting it, so the run reported more redactions than it performed.
+    `Name` is used only as a fallback for a <Config> that has no Target.
+    """
     names = set()
     for c in _masked_configs(root):
-        for key in (c.get("Name"), c.get("Target")):
-            if (key or "").strip():
-                names.add(key.strip())
+        key = (c.get("Target") or "").strip() or (c.get("Name") or "").strip()
+        if key:
+            names.add(key)
     return names
 
 
@@ -349,9 +356,20 @@ def backup(path, backup_dir):
     except ET.ParseError as e:
         raise BackupUnsafe(f"{os.path.basename(path)}: {e}") from e
     n = redact_secrets(tree.getroot())
-    os.makedirs(backup_dir, exist_ok=True)
-    dest = _unused_backup_path(backup_dir, os.path.basename(path))
-    atomic_write(dest, tree.getroot())
+    # ⛔ A WRITE FAILURE HERE IS ALSO "could not back it up safely". `redact_existing_backups` was
+    # hardened so one bad file could not abort the sync, and this sibling path was left raising —
+    # so a full or read-only flash drive gave a traceback out of main(), a half-finished run, and
+    # an orphaned `.tmp` nothing ever cleans up (`_backup_files` only matches `.bak`). Same class,
+    # same handling: the caller's "no backup, no write" branch takes it from here.
+    dest = ""
+    try:
+        os.makedirs(backup_dir, exist_ok=True)
+        dest = _unused_backup_path(backup_dir, os.path.basename(path))
+        atomic_write(dest, tree.getroot())
+    except OSError as e:
+        if dest:
+            _discard(dest + ".tmp")
+        raise BackupUnsafe(f"{os.path.basename(path)}: could not be written: {e}") from e
     return dest, n
 
 
@@ -641,8 +659,17 @@ def main():
     # flash writes redacting files it was about to delete.
     dropped = prune_backups(backup_dir, protected={f for f, _ in unreadable})
     if dropped:
-        print(f"{'would prune' if DRY_RUN else 'pruned'} {len(dropped)} backup(s) beyond the "
-              f"newest {KEEP_BACKUPS} per instance\n")
+        # ⚠️ THE DRY-RUN FIGURE IS A LOWER BOUND, and says so. The prune runs after the templates,
+        # so a live run has also written this run's own backups by now and a rehearsal has not —
+        # the rehearsal is short by up to one per updated instance. Stated rather than silently
+        # off by one: the whole point of DRY_RUN is that it predicts the live run.
+        if DRY_RUN:
+            print(f"would prune at least {len(dropped)} backup(s) beyond the newest "
+                  f"{KEEP_BACKUPS} per instance (a live run also prunes the backups it takes "
+                  f"itself, which this rehearsal has not written)\n")
+        else:
+            print(f"pruned {len(dropped)} backup(s) beyond the newest {KEEP_BACKUPS} "
+                  f"per instance\n")
 
     if unmapped:
         print("left untouched (foreign / not from these templates): " + ", ".join(sorted(unmapped)))

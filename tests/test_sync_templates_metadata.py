@@ -368,6 +368,76 @@ def test_a_masked_value_held_in_a_CHILD_element_is_redacted_and_counted_honestly
     assert sync.redact_existing_backups(str(backups)) == (0, 0, []), "not idempotent"
 
 
+def test_the_mirror_matches_the_VARIABLE_name_not_the_human_label(sync):
+    """⚠️ `Target` is the environment variable; `Name` is the label the UI shows.
+
+    Matching the human label too meant an unrelated variable that merely shared a label — "Key" is
+    an obvious collision — was redacted in the backup, destroying a NON-secret value a restore
+    would want, and counted, so the run reported more redactions than it made.
+    """
+    xml = (
+        HEAD
+        + '<Config Name="Key" Target="API_KEY" Default="" Mode="" Description="x" '
+          'Type="Variable" Display="always" Required="true" Mask="true">s3cret</Config>'
+        + "<Environment>"
+          "<Variable><Value>s3cret</Value><Name>API_KEY</Name></Variable>"
+          "<Variable><Value>public-not-a-secret</Value><Name>Key</Name></Variable>"
+          "</Environment>"
+        + "</Container>"
+    )
+    root = ET.fromstring(xml)
+    n = sync.redact_secrets(root)
+
+    text = ET.tostring(root, encoding="unicode")
+    assert SECRET not in text, "the real secret and its mirror must both go"
+    assert "public-not-a-secret" in text, (
+        "an unrelated variable was redacted because it shared the Config's human LABEL — that "
+        "destroys a value a restore needs")
+    assert n == 2, f"reported {n} redactions for 2 real ones — the count follows the same bug"
+
+
+def test_a_config_with_no_Target_still_matches_its_mirror_by_Name(sync):
+    """The fallback arm. Narrowing to Target must not stop matching a Config that has none."""
+    xml = (
+        HEAD
+        + '<Config Name="TOKEN" Default="" Mode="" Description="x" Type="Variable" '
+          'Display="always" Required="true" Mask="true">s3cret</Config>'
+        + "<Environment><Variable><Value>s3cret</Value><Name>TOKEN</Name></Variable></Environment>"
+        + "</Container>"
+    )
+    root = ET.fromstring(xml)
+    assert sync.redact_secrets(root) == 2
+    assert SECRET not in ET.tostring(root, encoding="unicode")
+
+
+def test_a_backup_that_cannot_be_WRITTEN_skips_the_instance_instead_of_crashing(
+    sync, inst, tmp_path, monkeypatch, capsys,
+):
+    """⛔ THE SIBLING PATH. `redact_existing_backups` was hardened so one bad file could not abort
+    the sync; `backup()` was left raising, so a full or read-only flash drive gave a traceback out
+    of `main()`, a half-finished run, and an orphaned `.tmp` nothing ever cleans up.
+
+    A fix that leaves a sibling is half a fix — this is the sibling.
+    """
+    p = inst(instance_xml(desc="OLD TEXT"))
+    before = p.read_bytes()
+    backups = tmp_path / "b"
+
+    def no_space(path, root):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(sync, "atomic_write", no_space)
+    with pytest.raises(sync.BackupUnsafe):
+        sync.backup(str(p), str(backups))
+    assert not list(backups.glob("*.tmp")), "an orphaned .tmp was left behind"
+
+    # ...and through update_instance, the operator sees a SKIP and keeps their file.
+    sync.update_instance(str(p), template(desc="NEW TEXT"), str(backups))
+    assert p.read_bytes() == before, "the instance was written despite the backup failing"
+    assert "SKIP" in capsys.readouterr().out
+    assert not list(backups.glob("*.tmp")), "an orphaned .tmp was left behind"
+
+
 def test_a_masked_field_whose_ONLY_content_is_a_child_still_counts_as_holding_a_secret(sync):
     """The `len(el) > 0` branch, isolated. A mutation returning False there survived the test
     above, because that fixture had text before the child and was caught by the text branch."""

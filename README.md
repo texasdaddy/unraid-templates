@@ -99,7 +99,7 @@ there is (see above). What follows is orientation, not the reference.
 | Script | What it is | Where it runs |
 |---|---|---|
 | `scripts/sync-templates.py` | Reconciles the Unraid host's `my-*.xml` container templates against this repo | Unraid host, via **User Scripts** |
-| `scripts/check_no_internal_info.py` | Public-repo guard: fails on internal-looking **shapes** — RFC1918/CGNAT addresses, `.lan`/`.local`/`*.ts.net` hosts, the real Unraid share roots under `/mnt/` (`apps`, `user`, `cache`, `remotes`, `disks` — an arbitrarily-named pool is NOT matched), freemail addresses, bare UUIDs. It **cannot** see a bare hostname, codename or personal name; those have no shape, and a second guard held outside every repo is what catches them. Both layers are required, and green CI here is not clearance. | CI, on every PR, on push to `main`, and on `v*` tags — required by branch protection, see below |
+| `scripts/check_no_internal_info.py` | Public-repo guard: fails on internal-looking **shapes** — RFC1918/CGNAT addresses, `.lan`/`.local`/`*.ts.net` hosts, the real Unraid share roots under `/mnt/` (`apps`, `user`, `cache`, `remotes`, `disks`, `disk1`…`diskN` — an arbitrarily-named pool is NOT matched), freemail addresses, bare UUIDs, and `C:\Users\<name>\…` Windows profile paths. The `--range` scan additionally reads each commit's **own author/committer name and email**, which are published on every push and which no later commit can remove. It **cannot** see a bare hostname, codename or personal name; those have no shape, and a second guard held outside every repo is what catches them. Both layers are required, and green CI here is not clearance. | CI, on every PR, on push to `main`, and on `v*` tags — required by branch protection, see below |
 
 > **The guard is enforcing now** (this was the other half of #4). `main` carries
 > branch protection requiring all three checks — `No internal info (public-repo
@@ -143,6 +143,26 @@ parameter, never a second script:
 
 The committed copy is the **live** version (`DRY_RUN = False`). To validate a change
 first, flip the constant to `True`, run it, review the output, then flip it back.
+
+> **Backups do not contain your secrets** (#27). `Mask="true"` is a *UI* setting —
+> it makes the Unraid form render a password box, but the XML on the flash drive
+> holds the value in **plaintext**. Backups used to be byte-for-byte copies, so
+> every run left another cleartext copy of every token and PAT on the drive, and
+> nothing pruned them.
+>
+> Now a backup is written with every masked value replaced by `***REDACTED***`,
+> the **first run also redacts the backups earlier versions already wrote**, and
+> backups are pruned to the newest `KEEP_BACKUPS` (10) per instance. A `.bak`
+> that cannot be parsed is *reported by name and left alone* — it may still hold
+> a secret, so review and delete those by hand.
+>
+> **What this costs a restore:** the structure and every non-secret value come
+> back in full; a masked value must be re-entered. That is not much of a loss —
+> `merge()` copies applied values across verbatim, so a merge cannot damage a
+> secret; the backup is there in case a *merge* goes wrong.
+>
+> `DRY_RUN = True` covers all of this: it reports what it would redact and prune
+> and writes nothing.
 
 **Install as an Unraid User Script:** *Settings → User Utilities → User Scripts → Add New Script*,
 name it `sync-templates`, paste the file in as the script body, and run it with

@@ -50,6 +50,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -1798,3 +1799,1033 @@ def test_a_windows_profile_path_in_a_real_repo_fails_the_actual_tree_scan(tmp_pa
     proc = _run_guard(repo)
     assert proc.returncode == 1, f"a Windows profile path scanned clean: {proc.stdout}"
     assert "windows profile path" in proc.stdout, proc.stdout
+
+
+# =============================================================================================
+# ROUND 2 — the three fail-opens the amnesty hardening never touched (#241, #242, #250).
+#
+# All three live in the diff-PARSING and DECODE code rather than in the pattern matching, and all
+# three have the same shape: the guard reports CLEAN about something it never read. That is worse
+# than a missed pattern, because the run says so explicitly.
+#
+#   #250  an external diff driver replaces git's output, so no header is recognised, every line
+#         is dropped, and the range scan exits 0 on a real leak.
+#   #241  the path is derived wrongly (a path containing " b/", a git-quoted path, or a trailing
+#         space eaten by `.strip()`), so the re-diff matches nothing, git exits 0 empty, and the
+#         file is reported clean instead of unscannable. One shape also handed an arbitrary file
+#         the guard's single self-exemption.
+#   #242  BOM-less UTF-16LE of ASCII is VALID UTF-8, so every decode site succeeded, the
+#         NUL-separated content matched no pattern, and the file was COUNTED AS SCANNED.
+#
+# ⭐ EVERY TEST BELOW WAS RUN AGAINST `main@8d3664d` FIRST and failed there. A guard test that has
+# never been red proves only that it agrees with today's code.
+# =============================================================================================
+
+
+def _seeded(repo: Path) -> str:
+    """A repository with one ordinary commit and NO dependence on machine git config.
+
+    ⚠️ THE CONFIG IS PINNED, NOT INHERITED. A test that shells out to git and inherits whatever
+    the machine has is the config-dependent sibling of a time-bomb test: it passes here and
+    behaves differently on a runner. `core.quotePath` is pinned ON — git's own default — because
+    the guard's job is to work regardless, and pinning it OFF here would quietly test the
+    developer's config instead of the fix.
+    """
+    _init(repo)
+    _git(repo, "config", "core.autocrlf", "false")
+    _git(repo, "config", "core.quotePath", "true")
+    (repo / "README.md").write_text("seed\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-q", "-m", "seed")
+    return _git(repo, "rev-parse", "HEAD").strip()
+
+
+def _commit(repo: Path, msg: str) -> str:
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", msg)
+    return _git(repo, "rev-parse", "HEAD").strip()
+
+
+def _stage_literal(repo: Path, path: str, blob: bytes) -> None:
+    """Put `path` in the INDEX with `blob` as its content, never touching the worktree.
+
+    ⚠️ `core.protectNTFS=false` because Windows refuses to WRITE a name ending in a space. The
+    flag guards writing such a name, not reading one, so a commit authored on Linux — every CI
+    runner — carries it happily and the bypass is real wherever the repository is cloned.
+    """
+    sha = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=repo, input=blob,
+                         capture_output=True, check=True, timeout=120).stdout.decode().strip()
+    _git(repo, "-c", "core.protectNTFS=false", "update-index", "--add",
+         "--cacheinfo", f"100644,{sha},{path}")
+
+
+def _unstage_literal(repo: Path, path: str) -> None:
+    _git(repo, "-c", "core.protectNTFS=false", "update-index", "--force-remove", path)
+
+
+def _commit_index(repo: Path, msg: str) -> str:
+    """Commit exactly what is in the index, bypassing `git commit`'s worktree checks."""
+    tree = _git(repo, "write-tree").strip()
+    parent = _git(repo, "rev-parse", "HEAD").strip()
+    sha = _git(repo, "commit-tree", tree, "-p", parent, "-m", msg).strip()
+    _git(repo, "update-ref", "HEAD", sha)
+    return sha
+
+
+# Assembled at runtime, like every other leak literal in this file.
+_LEAK_LINE = f"AGENT_URL=http://{_HOST}:9999/mcp"
+_LEAK_ADDR_LINE = f"DATABASE_URL=postgresql://u:p@{_ADDR}:5432/db"
+# A NUL inside the first 8000 bytes is what makes git call a blob binary.
+_NUL_BLOB = b"\x00\x01\x02" + _LEAK_LINE.encode() + b"\n\x00"
+
+
+# ------------------------------------------------------------------- #250 external diff driver
+
+
+_HEADERLESS_DIFF = f"@@ -0,0 +1 @@\n+{_LEAK_LINE}\n"
+
+
+def test_a_diff_with_hunks_but_no_header_is_UNREADABLE_rather_than_silently_clean() -> None:
+    """#250. The state whose ABSENCE was the fail-open.
+
+    An external diff driver makes git emit neither `diff --git` nor `+++ `, so no line can be
+    attributed to a file. `parse_diff` dropped them all and returned empty-added AND
+    empty-unscannable — byte-identical to "there was nothing to scan".
+    """
+    parsed = guard.parse_diff(_HEADERLESS_DIFF)
+    assert parsed.added == [], "a line with no file attached must not be counted as scanned"
+    assert parsed.unscannable == [guard._NO_HEADER], (
+        "hunks with no recognised header must be REPORTED, not passed over")
+
+
+def test_an_ordinary_diff_is_never_reported_as_headerless() -> None:
+    """The negative direction. A state that fires on correct input is a false red, and a guard
+    that reddens a correct tree gets switched off."""
+    parsed = guard.parse_diff(
+        f"diff --git a/cfg.txt b/cfg.txt\n--- /dev/null\n+++ b/cfg.txt\n"
+        f"@@ -0,0 +1 @@\n+{_LEAK_LINE}\n")
+    assert parsed.unscannable == []
+    assert [c for _, _, c in parsed.added] == [_LEAK_LINE]
+
+
+def test_an_empty_diff_is_not_reported_as_headerless() -> None:
+    """A merge commit against its first parent can legitimately produce nothing at all."""
+    assert guard.parse_diff("").unscannable == []
+    assert guard.parse_diff("\n").unscannable == []
+
+
+def test_the_headerless_marker_reaches_the_verdict_and_prints_without_its_sigil() -> None:
+    """The marker is only worth having if it survives to the operator, legibly."""
+    findings, blind = guard.scan_added("abc1234567", guard.parse_diff(_HEADERLESS_DIFF), COMPILED)
+    assert findings == []
+    assert len(blind) == 1, blind
+    assert "external diff driver" in blind[0], blind[0]
+    assert guard._MARKER_SIGIL not in blind[0], "the NUL sigil must be stripped for display"
+
+
+def test_the_sigil_is_stripped_from_a_FINDING_line_too_not_only_the_unscannable_list() -> None:
+    """`_shown` is applied at two sites and only one was covered — deleting it from the findings
+    line left the whole suite green. A raw NUL reaching a git hook's cp1252 stdout is exactly the
+    class `_ascii` exists for, so the guard would die while announcing a leak."""
+    marker = guard._unparsed_header("a/x b/y")
+    findings, _ = guard.scan_added("abc1234567", guard.ParsedDiff([(marker, 1, _LEAK_LINE)], []),
+                                   COMPILED)
+    assert len(findings) == 1, findings
+    assert guard._MARKER_SIGIL not in findings[0], (
+        "the NUL sigil leaked into a finding line, which a cp1252 pipe cannot print")
+
+
+@pytest.mark.timeout(300)
+def test_an_unattributable_marker_survives_ALONGSIDE_a_binary_needing_a_rediff(
+    tmp_path: Path,
+) -> None:
+    """The combined case, which the early return hides.
+
+    `added_lines` returns `unattributable` in two places: the `if not pending` early return, and
+    the accumulator that follows it. Only the first was covered, so blanking the second
+    (`still_unreadable = []`) left every test green — a diff carrying BOTH an unattributable
+    marker and a binary file needing a re-diff would have dropped the marker on the floor.
+
+    Driven through the pure function because git with `--no-ext-diff` pinned will not produce a
+    headerless diff, which is the point of the pin.
+    """
+    repo = tmp_path / "combined"
+    _seeded(repo)
+    (repo / "asset.bin").write_bytes(b"\x00\x01" + _LEAK_LINE.encode() + b"\n")
+    _commit(repo, "add asset")
+    sha = _git(repo, "rev-parse", "HEAD").strip()
+
+    real = guard.parse_diff
+
+    def both(diff: str, _o=real):
+        parsed = _o(diff)
+        # Only the PRIMARY parse gets the extra marker; the re-diff's own result is untouched.
+        if "--text" not in diff and parsed.unscannable:
+            return guard.ParsedDiff(parsed.added, [*parsed.unscannable, guard._NO_HEADER])
+        return parsed
+
+    guard.parse_diff = both
+    try:
+        got = guard.added_lines(repo, sha)
+    finally:
+        guard.parse_diff = real
+
+    assert any(guard._is_marker(u) for u in got.unscannable), (
+        f"the unattributable marker was dropped once a re-diff also had to run: {got.unscannable}")
+
+
+def test_a_marker_is_never_mistaken_for_a_skipped_path() -> None:
+    """A marker that `_skipped` swallowed would be a fail-open with extra steps.
+
+    ⚠️ ONLY PATH-LESS THINGS MAY BE MARKERS, and an earlier version of this test asserted the
+    opposite — that a NUL-bearing PATH wrapped as a marker also escaped `_skipped`. That pinned a
+    defect in the direction that made it look correct. A value that HAS a path must go through the
+    normal filters; see `test_a_skipped_suffix_stays_skipped_by_BOTH_scans_when_its_content_has_a_NUL`.
+    """
+    for marker in (guard._NO_HEADER, guard._unparsed_header("a/x b/y")):
+        assert guard._is_marker(marker)
+        assert not guard._skipped(marker), marker
+
+
+@pytest.mark.timeout(300)
+def test_a_skipped_suffix_stays_skipped_by_BOTH_scans_when_its_content_has_a_NUL(
+    tmp_path: Path,
+) -> None:
+    """⛔ A FALSE RED WITH NO AVAILABLE FIX — the worst shape a guard can take.
+
+    Wrapping a NUL-bearing path in a marker made it inherit the marker exemption from `_skipped`,
+    so a `.pdf` — already in SKIP_SUFFIXES — whose first NUL falls PAST git's 8000-byte binary
+    window was SKIPPED by the tree scan and REFUSED by the range scan. The two scans disagreeing
+    about which files count is precisely what sharing `_skipped` exists to prevent.
+
+    And the printed remedy was inert: "add a binary suffix to SKIP_SUFFIXES" for a suffix already
+    in SKIP_SUFFIXES. `.githooks/pre-push` blocked the push with nothing the operator could change.
+
+    Both directions asserted, so this cannot be satisfied by skipping everything: the skipped
+    suffix passes, and a byte-identical file at a NON-skipped suffix is still refused.
+    """
+    repo = tmp_path / "pdfnul"
+    base = _seeded(repo)
+    body = b"%PDF-1.4\n" + b"x" * 9000 + b"\n" + _LEAK_LINE.encode("utf-16-le") + b"\n"
+    (repo / "doc.pdf").write_bytes(body)
+    (repo / "doc.dat").write_bytes(body)
+    _commit(repo, "add assets")
+
+    # The premise: git must serve these as TEXT, or the primary-path NUL check is never reached.
+    assert "Binary files" not in _git(repo, "diff", "--unified=0", "--no-color", base, "HEAD"), (
+        "premise broken: git called it binary, so this exercises the fallback, not the case named")
+
+    proc = _run_guard(repo, "--range", f"{base}..HEAD")
+    out = proc.stdout + proc.stderr
+    assert "doc.pdf" not in out, (
+        f"a suffix already in SKIP_SUFFIXES was refused by the range scan while the tree scan "
+        f"skips it, and the printed remedy cannot clear it: {out}")
+    assert "doc.dat" in out, f"the non-skipped twin must still be refused: {out}"
+
+
+@pytest.mark.timeout(300)
+def test_an_external_diff_driver_cannot_blind_the_range_scan(tmp_path: Path) -> None:
+    """#250 end to end, with a real driver configured — the ONLY way to test this.
+
+    ⚠️ LOCAL-ONLY IN PRACTICE, and that is exactly why it matters: a CI runner has no
+    `diff.external`, so the layer this disables is `.githooks/pre-push` — the layer that exists
+    for the add-then-delete case, on the machine of whoever happens to like difftastic.
+    """
+    driver = tmp_path / "driver.sh"          # OUTSIDE the repo, so it is never committed
+    driver.write_text('#!/bin/sh\nprintf "1 %s\\n" "$(cat "$5")"\n',
+                      encoding="utf-8", newline="\n")
+    repo = tmp_path / "extdiff"
+    base = _seeded(repo)
+    _git(repo, "config", "diff.external", "sh " + driver.as_posix())
+    (repo / "cfg.txt").write_text(_LEAK_LINE + "\n", encoding="utf-8")
+    _commit(repo, "add cfg")
+    (repo / "cfg.txt").unlink()
+    _commit(repo, "drop cfg")               # the tree is clean; only history holds it now
+
+    assert _run_guard(repo).returncode == 0, "precondition: the tree really is clean"
+    proc = _run_guard(repo, "--range", f"{base}..HEAD")
+    assert proc.returncode == 1, (
+        f"an external diff driver blinded the range scan: {proc.stdout}{proc.stderr}")
+    assert "private lan domain" in proc.stdout, proc.stdout
+
+
+@pytest.mark.timeout(300)
+def test_a_textconv_filter_cannot_hide_a_leak_from_the_range_scan(tmp_path: Path) -> None:
+    """The `.gitattributes` route to the same place, which `--no-textconv` closes.
+
+    ⚠️ DECLARED LIMIT: this exercises the PRIMARY diff call. The `--text` re-diff cannot be
+    reached with a textconv configured — git treats the converted blob as text and never emits
+    `Binary files` — so that call site is covered by SHARING `_DIFF_FLAGS` with this one rather
+    than by its own end-to-end case. The mutation matrix strips the flag from the shared tuple.
+    """
+    conv = tmp_path / "conv.sh"
+    conv.write_text('#!/bin/sh\necho "nothing to see here"\n', encoding="utf-8", newline="\n")
+    repo = tmp_path / "textconv"
+    base = _seeded(repo)
+    _git(repo, "config", "diff.hide.textconv", "sh " + conv.as_posix())
+    (repo / ".gitattributes").write_text("*.dat diff=hide\n", encoding="utf-8")
+    (repo / "cfg.dat").write_text(_LEAK_LINE + "\n", encoding="utf-8")
+    _commit(repo, "add cfg")
+    (repo / "cfg.dat").unlink()
+    _commit(repo, "drop cfg")
+
+    proc = _run_guard(repo, "--range", f"{base}..HEAD")
+    assert proc.returncode == 1, f"a textconv filter hid the leak: {proc.stdout}{proc.stderr}"
+
+
+@pytest.mark.timeout(300)
+def test_EVERY_git_diff_the_scan_runs_carries_the_pinned_config_and_flags(tmp_path: Path) -> None:
+    """⛔ ASSERTS WHAT THE CODE PASSES TO GIT, not what the constants contain.
+
+    The first version of this test inspected `_DIFF_FLAGS`/`_DIFF_CONFIG` and nothing else. That
+    restated the constants instead of executing the call sites: reverting the RE-DIFF invocation to
+    its old unpinned argv left the whole suite green, and that re-diff is the very call site the
+    textconv test explicitly delegates to this one. It also carried a genuine tautology —
+    `assert pinned is not None` on a freshly-built dict, which cannot fail.
+
+    So this captures every `git diff` argv the scan actually issues and checks each one, which
+    covers the sharing without depending on how it is implemented.
+    """
+    repo = tmp_path / "argv"
+    base = _seeded(repo)
+    (repo / ".gitattributes").write_text("*.lock binary\n", encoding="utf-8")
+    (repo / "deps.lock").write_text("resolved = 1\n", encoding="utf-8")   # forces the re-diff
+    (repo / "plain.txt").write_text("hello\n", encoding="utf-8")
+    _commit(repo, "add both")
+    sha = _git(repo, "rev-parse", "HEAD").strip()
+
+    seen: list[list[str]] = []
+    real_run, real_git = subprocess.run, guard._git
+
+    def spy_run(cmd, *a, **kw):
+        if isinstance(cmd, list) and "diff" in cmd:
+            seen.append(list(cmd))
+        return real_run(cmd, *a, **kw)
+
+    def spy_git(root, *args, **kw):
+        if "diff" in args:
+            seen.append(["git", *args])
+        return real_git(root, *args, **kw)
+
+    guard.subprocess.run, guard._git = spy_run, spy_git
+    try:
+        guard.added_lines(repo, sha)
+    finally:
+        guard.subprocess.run, guard._git = real_run, real_git
+
+    assert len(seen) >= 2, f"expected the primary diff AND the --text re-diff, saw {len(seen)}"
+    assert any("--text" in c for c in seen), "the re-diff call site was never exercised"
+    for cmd in seen:
+        flat = " ".join(cmd)
+        for flag in ("--no-ext-diff", "--no-textconv", "--no-renames", "--unified=0"):
+            assert flag in cmd, f"{flag} missing from a real git diff call: {flat}"
+        for key in ("core.quotePath=false", "diff.noprefix=false",
+                    "diff.srcPrefix=a/", "diff.dstPrefix=b/", "diff.mnemonicPrefix=false"):
+            assert key in cmd, f"{key} unpinned on a real git diff call: {flat}"
+
+
+# ------------------------------------------------------------- #241 path derivation / `+++ `
+
+
+@pytest.mark.parametrize("path", [
+    "cfg.txt",
+    "dir/cfg.txt",
+    "a file with spaces.txt",
+    "x b/y.lock",                 # contains " b/" — the split-based derivation's first victim
+    "b/b.txt",
+    "notes.png ",                 # trailing space — what `.strip()` used to eat
+    " leading.txt",
+    "café.bin",              # non-ASCII, quoted by git unless core.quotePath is pinned off
+    "a/b b/c d/e.bin",
+])
+def test_the_header_path_is_reconstructed_byte_exactly(path: str) -> None:
+    """#241, member 1. Reconstruction by LENGTH, then verified — never a delimiter guess."""
+    assert guard._header_path(f"a/{path} b/{path}") == path
+
+
+@pytest.mark.parametrize("tail", [
+    '"a/caf\\303\\251.bin" "b/caf\\303\\251.bin"',   # a quoted pair the pin should prevent
+    "a/only-one-side",
+    "a/x b/y",                                        # the two sides disagree: a rename slipped in
+    "",
+    "a/",
+])
+def test_an_unreconstructable_header_fails_CLOSED_and_names_what_it_saw(tail: str) -> None:
+    """A tail this cannot explain must never produce a wrong-but-plausible path.
+
+    And the marker must NAME the header: a fail-closed report that says only "unparsed" leaves
+    the operator nothing to act on, which is how the sibling repo's attempt made every binary
+    file in a commit unactionable.
+    """
+    got = guard._header_path(tail)
+    assert guard._is_marker(got), f"{tail!r} produced a path rather than a refusal: {got!r}"
+    assert repr(tail) in got, "the marker must quote the header it could not parse"
+
+
+def test_the_plus_line_strips_one_tab_and_never_whitespace() -> None:
+    """#241, member 2. git appends a TAB after a path carrying trailing whitespace — measured:
+    `+++ b/notes.png \\t` — so `.strip()` removed the tab AND the meaningful space with it."""
+    assert guard._plus_path("b/notes.png \t") == "b/notes.png "
+    assert guard._plus_path("b/cfg.txt") == "b/cfg.txt"
+    assert guard._plus_path("b/two.txt\t\t") == "b/two.txt\t", "at most ONE tab"
+    assert guard._plus_path("b/ leading.txt") == "b/ leading.txt"
+
+
+def test_the_plus_line_cannot_OVERRIDE_a_path_the_header_already_gave() -> None:
+    """#241, member 2, at the seam. Two sources for one fact is how the bypass happened: the
+    header produced the path byte-exactly and the very next line threw it away.
+
+    ⚠️ THE TWO SOURCES MUST DISAGREE HERE, or this proves nothing. The first version of this test
+    used a trailing-space path, where `_plus_path` and `_header_path` compute the SAME answer —
+    so it passed with the precedence rule reverted, and the mutation matrix caught it as a
+    survivor. It was satisfied by a predicate other than the one it names. Making the two sources
+    name different files isolates the precedence rule as the only thing that can decide it, and
+    the decoy is a SKIPPED suffix so a wrong answer drops the leak rather than merely mislabelling
+    it.
+    """
+    parsed = guard.parse_diff(
+        "diff --git a/real.txt b/real.txt\n--- /dev/null\n+++ b/decoy.png\n"
+        f"@@ -0,0 +1 @@\n+{_LEAK_LINE}\n")
+    assert [p for p, _, _ in parsed.added] == ["real.txt"], (
+        "the `+++ ` line was allowed to replace the header's path")
+    assert _hits("abc", parsed.added), "and the leak must therefore still be found"
+
+
+def test_the_plus_line_does_not_override_even_when_the_two_sources_agree() -> None:
+    """The original trailing-space case, kept as a regression pin for `_plus_path` itself."""
+    parsed = guard.parse_diff(
+        "diff --git a/notes.png  b/notes.png \nnew file mode 100644\n"
+        "--- /dev/null\n+++ b/notes.png \t\n"
+        f"@@ -0,0 +1 @@\n+{_LEAK_LINE}\n")
+    assert [p for p, _, _ in parsed.added] == ["notes.png "]
+
+
+def test_the_plus_line_IS_the_path_source_when_there_is_no_header() -> None:
+    """⛔ The fallback is NOT redundant — deleting it is what turned #241 into #250 in the
+    sibling repo. It is the only path source when git emits no `diff --git` line."""
+    parsed = guard.parse_diff(f"--- /dev/null\n+++ b/cfg.txt\n@@ -0,0 +1 @@\n+{_LEAK_LINE}\n")
+    assert [p for p, _, _ in parsed.added] == ["cfg.txt"]
+
+
+def test_a_deleted_file_is_still_recognised_by_dev_null_on_the_plus_line() -> None:
+    """The behaviour the `+++ ` branch must keep: a deletion adds nothing."""
+    parsed = guard.parse_diff(
+        "diff --git a/cfg.txt b/cfg.txt\ndeleted file mode 100644\n"
+        f"--- a/cfg.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-{_LEAK_LINE}\n")
+    assert parsed.added == []
+    assert parsed.unscannable == []
+
+
+def test_an_unparseable_header_is_reported_ONCE_not_once_per_branch() -> None:
+    """The `Binary files ` branch must not re-report a marker the header line already added.
+
+    Reverting that guard leaves two identical entries, inflating the "in N added file(s)" count
+    the operator reads. Asserted on the LIST, so it pins the behaviour rather than the wording.
+    """
+    parsed = guard.parse_diff(
+        'diff --git "a/bad\\"q.bin" "b/bad\\"q.bin"\n'
+        'Binary files "a/bad\\"q.bin" and "b/bad\\"q.bin" differ\n')
+    assert len(parsed.unscannable) == 1, (
+        f"an unparseable binary header was reported once per branch: {parsed.unscannable}")
+    assert guard._is_marker(parsed.unscannable[0])
+
+
+def test_DELETING_a_file_whose_path_cannot_be_parsed_is_not_reported() -> None:
+    """⛔ A DELETION PUBLISHES NOTHING, and that has to hold for an unparseable path too.
+
+    The header marker is appended at the `diff --git` line, which is read BEFORE
+    `deleted file mode `, so the deletion guard could never apply to it: a commit that merely
+    DELETED a file whose path git C-quotes failed the range scan. The advice the marker carries —
+    rename it, or review that commit by hand — cannot be acted on for a commit already written, so
+    it was a red with no way out. That is the trap the `Binary files ` branch already documents
+    for the parseable case; there is no reason the unparseable case should be treated worse.
+
+    Both spellings, because git emits a different body for a text and a binary deletion.
+    """
+    text_deletion = guard.parse_diff(
+        'diff --git "a/note\\\\draft.md" "b/note\\\\draft.md"\n'
+        "deleted file mode 100644\n"
+        '--- "a/note\\\\draft.md"\n+++ /dev/null\n@@ -1 +0,0 @@\n-perfectly clean text\n')
+    assert text_deletion.unscannable == [], (
+        f"deleting an unparseable TEXT path was reported: {text_deletion.unscannable}")
+
+    binary_deletion = guard.parse_diff(
+        'diff --git "a/bad\\"q.bin" "b/bad\\"q.bin"\n'
+        "deleted file mode 100644\n"
+        'Binary files "a/bad\\"q.bin" and /dev/null differ\n')
+    assert binary_deletion.unscannable == [], (
+        f"deleting an unparseable BINARY path was reported: {binary_deletion.unscannable}")
+
+    # ⚠️ THE NEGATIVE DIRECTION, or this "fix" is just a bypass: ADDING one is still refused.
+    addition = guard.parse_diff(
+        'diff --git "a/bad\\"q.bin" "b/bad\\"q.bin"\n'
+        "new file mode 100644\n"
+        'Binary files /dev/null and "b/bad\\"q.bin" differ\n')
+    assert len(addition.unscannable) == 1, (
+        f"adding an unparseable path must still be refused: {addition.unscannable}")
+
+    # ⛔⛔ PRECISION, NOT MERELY REMOVAL — and this is the assertion that earns its keep.
+    # Everything above passes just as happily if the pop is replaced by `unscannable.clear()`,
+    # which is a REAL fail-open: one commit that deletes an unparseable path while ADDING a
+    # binary blob wipes the binary's entry off the list too, and the run exits 0 with the added
+    # value still recoverable from history. A test that pins "something was removed" cannot see
+    # that; only one that pins WHICH entry survives can.
+    mixed = guard.parse_diff(
+        "diff --git a/asset.dat b/asset.dat\nnew file mode 100644\n"
+        "Binary files /dev/null and b/asset.dat differ\n"
+        'diff --git "a/bad\\\\q.md" "b/bad\\\\q.md"\n'
+        "deleted file mode 100644\n"
+        '--- "a/bad\\\\q.md"\n+++ /dev/null\n@@ -1 +0,0 @@\n-gone\n')
+    assert mixed.unscannable == ["asset.dat"], (
+        f"the deletion's pop took an unrelated entry that was already reported: "
+        f"{mixed.unscannable}")
+
+
+@pytest.mark.timeout(300)
+def test_BOTH_halves_of_241_are_closed_a_half_fix_leaves_the_other_open(tmp_path: Path) -> None:
+    """⭐ ONE test, BOTH members — deliberately.
+
+    The work package is explicit that #241 has two members and that closing only one leaves the
+    other open. Split across two tests, a half-fix shows as one red and one green and reads like
+    partial progress; asserted together it reads as what it is.
+
+      (1) the `diff --git` header parse — a BINARY file whose path contains " b/". There is no
+          `+++ ` line to correct it, the re-diff matches nothing, git exits 0 empty, and the
+          file is announced CLEAN.
+      (2) the `+++ ` `.strip()` — a TEXT file at `<SELF_PATH> ` strips to exactly the guard's own
+          path and inherits its single self-exemption.
+    """
+    repo = tmp_path / "both241"
+    base = _seeded(repo)
+
+    (repo / "x b").mkdir()
+    (repo / "x b" / "y.lock").write_bytes(_NUL_BLOB)
+    # ⚠️ ORDER IS LOAD-BEARING. `git add -A` sees a tracked path that is absent from the worktree
+    # and stages its DELETION — so running it AFTER `_stage_literal` silently undid the literal
+    # path, and this test passed its first assertion while the second half was never committed at
+    # all. A setup that quietly no-ops is the vacuous-premise failure, which is why the tree is
+    # asserted below rather than assumed.
+    _git(repo, "add", "-A")
+    _stage_literal(repo, guard.SELF_PATH + " ", (_LEAK_ADDR_LINE + "\n").encode())
+    add_sha = _commit_index(repo, "add both")
+
+    listed = _git(repo, "ls-tree", "-r", "--name-only", add_sha)
+    assert "x b/y.lock" in listed, f"member 1's file never reached the commit: {listed!r}"
+    assert guard.SELF_PATH + " \n" in listed or guard.SELF_PATH + ' ' in listed, (
+        f"member 2's file never reached the commit — the premise is vacuous: {listed!r}")
+
+    (repo / "x b" / "y.lock").unlink()
+    _git(repo, "add", "-A")
+    _unstage_literal(repo, guard.SELF_PATH + " ")
+    _commit_index(repo, "drop both")
+
+    assert _run_guard(repo).returncode == 0, "precondition: the tree really is clean"
+    proc = _run_guard(repo, "--range", f"{base}..HEAD")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1, f"both halves of #241 still pass silently: {out}"
+    assert "x b/y.lock" in out, f"member 1 (' b/' in the header path) still open: {out}"
+    assert guard.SELF_PATH + " " in out, f"member 2 (`+++ `.strip()) still open: {out}"
+
+
+@pytest.mark.timeout(300)
+def test_a_non_ascii_path_is_resolved_rather_than_quoted_away(tmp_path: Path) -> None:
+    """#241, member 1(b) — the realistic one: any binary file with an accented filename."""
+    repo = tmp_path / "quoted"
+    base = _seeded(repo)
+    (repo / "café.bin").write_bytes(_NUL_BLOB)
+    _commit(repo, "add asset")
+    (repo / "café.bin").unlink()
+    _commit(repo, "drop asset")
+
+    proc = _run_guard(repo, "--range", f"{base}..HEAD")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1, f"a git-quoted path scanned clean: {out}"
+    # ⚠️ RESOLVED, NOT MERELY REFUSED. `"caf" in out` alone cannot tell the two apart: with the
+    # `core.quotePath=false` pin removed, the output still contains "caf" — inside the escaped RAW
+    # HEADER of an unparsed-header refusal (`'"a/caf\303\251.bin" ...'`). The test would have kept
+    # its name while proving the opposite of what it claims, so it must assert that the path was
+    # reconstructed rather than that the bytes appear somewhere.
+    assert "cannot resolve to one path" not in out, (
+        f"the pin is not holding: the path was REFUSED as unparseable rather than resolved: {out}")
+    # `_ascii` escapes it for a cp1252 pipe, so match the stem rather than the accent.
+    assert "caf" in out and ".bin" in out, out
+
+
+@pytest.mark.timeout(300)
+def test_a_redi_ff_that_matches_NOTHING_leaves_the_path_unreadable(tmp_path: Path) -> None:
+    """The check that closes the CLASS rather than the two reported header shapes.
+
+    Every path mis-parse — including any future one — ends in the same place: `git diff` exits 0
+    with no output, the strict decode of "" succeeds, and the path drops silently out of
+    `still_unreadable`. Driven here through the pure function, since inventing a NEW mis-parse is
+    exactly what this is meant to survive.
+    """
+    parsed = guard.ParsedDiff([], ["no/such/file.bin"])
+    # A path that is tracked nowhere: the re-diff can only come back empty.
+    repo = tmp_path / "empty-rediff"
+    _seeded(repo)
+    (repo / "real.bin").write_bytes(_NUL_BLOB)
+    _commit(repo, "add real")
+    sha = _git(repo, "rev-parse", "HEAD").strip()
+
+    original = guard.parse_diff
+    try:
+        # Force the primary parse to claim a path the commit does not contain, which is precisely
+        # what a mis-parse produces. Everything after that is the real code.
+        guard.parse_diff = lambda d, _o=original: (
+            parsed if d.startswith("diff --git") else _o(d))
+        got = guard.added_lines(repo, sha)
+    finally:
+        guard.parse_diff = original
+    assert got.unscannable == ["no/such/file.bin"], (
+        "an empty re-diff was treated as a clean one — the shape every mis-parse ends in")
+
+
+@pytest.mark.timeout(300)
+def test_a_path_containing_glob_characters_is_matched_literally(tmp_path: Path) -> None:
+    """A glob-shaped filename is scanned correctly through the `--text` re-diff path.
+
+    ⚠️ SCOPED CLAIM, because the mutation matrix disproved the stronger one. This test does NOT
+    demonstrate that `:(literal)` is load-bearing: dropping it leaves the suite green, and the
+    reason is measured, not assumed — git's pathspec matching tries an EXACT match before treating
+    the string as a glob, so `-- 'sprite[1].bin'` resolves the literal file either way. Windows
+    cannot create a name containing `*` or `?` at all, so the remaining glob metacharacters are
+    not reachable here.
+
+    `:(literal)` is kept because it is free and removes the dependence on that git behaviour, but
+    it is belt-and-braces rather than a proven guard — and the honest statement of what a guard
+    does NOT catch ages better than a strength claim. What this test DOES pin is the behaviour
+    that matters: a `.gitattributes`-binary text file at such a path is resolved and cleared
+    (no false red), and a leak inside one is still caught (it read the real content).
+    """
+    repo = tmp_path / "globpath"
+    base = _seeded(repo)
+    (repo / ".gitattributes").write_text("*.bin binary\n", encoding="utf-8")
+    (repo / "sprite[1].bin").write_text("frames = 12\n", encoding="utf-8")
+    _commit(repo, "add sprite")
+
+    # The premise: git really does refuse to diff it, so the re-diff path IS the one under test.
+    assert "Binary files" in _git(repo, "diff", "--unified=0", "--no-color", base, "HEAD"), (
+        "premise broken: git served it as text, so the pathspec is never exercised")
+
+    proc = _run_guard(repo, "--range", f"{base}..HEAD")
+    assert proc.returncode == 0, (
+        f"a glob-shaped path was not matched literally, so correct work went red: {proc.stdout}")
+
+    (repo / "sprite[1].bin").write_text(f"frames = 12\n{_LEAK_LINE}\n", encoding="utf-8")
+    _commit(repo, "leak in the sprite")
+    proc = _run_guard(repo, "--range", f"{base}..HEAD")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1, f"a leak at a glob-shaped path scanned clean: {out}"
+    assert "private lan domain" in out, out
+
+
+# ------------------------------------------------------------------------ #242 NUL / UTF-16
+
+
+def test_a_NUL_bearing_added_line_is_reported_rather_than_counted_as_scanned() -> None:
+    """#242 on the PRIMARY diff path — not only in the `--text` re-diff fallback.
+
+    git flags a blob binary only if a NUL falls in its first 8000 bytes, so a UTF-16 payload
+    further in gets an ordinary TEXT diff and the re-diff never runs. "git called it binary" and
+    "it contains a NUL" are different questions.
+    """
+    payload = _LEAK_LINE.encode("utf-16-le").decode("utf-8")
+    parsed = guard.parse_diff(
+        f"diff --git a/report.txt b/report.txt\n--- /dev/null\n+++ b/report.txt\n"
+        f"@@ -0,0 +1 @@\n+{payload}\n")
+    assert parsed.added == [], "NUL-separated content is not text and must not count as scanned"
+    # ⚠️ The PLAIN PATH, not a marker: it has a path, so it must stay subject to `_skipped`.
+    assert parsed.unscannable == ["report.txt"], parsed.unscannable
+    assert not guard._is_marker(parsed.unscannable[0])
+
+
+def test_a_NUL_bearing_file_is_reported_ONCE_not_once_per_line() -> None:
+    """A UTF-16 file is NUL-bearing on every line; a thousand reports read as a thousand faults."""
+    payload = _LEAK_LINE.encode("utf-16-le").decode("utf-8")
+    parsed = guard.parse_diff(
+        f"diff --git a/report.txt b/report.txt\n--- /dev/null\n+++ b/report.txt\n"
+        f"@@ -0,0 +3 @@\n+{payload}\n+{payload}\n+{payload}\n")
+    assert len(parsed.unscannable) == 1, parsed.unscannable
+
+
+def test_ordinary_non_ascii_utf8_is_still_SCANNED_not_refused() -> None:
+    """⭐ THE DIRECTION THAT MATTERS MOST. A rule that refuses too much is a false red, and a
+    guard that reddens correct work gets switched off — which is a net LOSS of safety."""
+    parsed = guard.parse_diff(
+        f"diff --git a/notes.md b/notes.md\n--- /dev/null\n+++ b/notes.md\n"
+        f"@@ -0,0 +1 @@\n+café naïve 日本語 {_LEAK_LINE}\n")
+    assert parsed.unscannable == [], "accented and CJK UTF-8 must not be mistaken for binary"
+    assert len(parsed.added) == 1
+    assert _hits("abc", parsed.added), "and the leak inside it must still be caught"
+
+
+@pytest.mark.timeout(300)
+def test_bomless_utf16le_is_not_cleared_by_the_TREE_scan(tmp_path: Path) -> None:
+    """#242, decode site 1. UTF-16LE of ASCII is `A\\x00G\\x00E\\x00…` — every byte under 0x80,
+    so `read_text(encoding="utf-8")` SUCCEEDS and the file was counted in the scanned total."""
+    repo = tmp_path / "u16tree"
+    _seeded(repo)
+    (repo / "report.txt").write_bytes(_LEAK_LINE.encode("utf-16-le"))
+    _git(repo, "add", "report.txt")
+
+    proc = _run_guard(repo)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1, f"BOM-less UTF-16LE was reported as scanned and clean: {out}"
+    assert "NUL" in out and "report.txt" in out, out
+
+
+@pytest.mark.timeout(300)
+def test_bomless_utf16le_is_not_cleared_through_the_STAGED_blob(tmp_path: Path) -> None:
+    """#242, decode site 2 — `staged_text`, reached by the same content one step later: stage the
+    file, delete it from the worktree, and the tree scan reads the index blob instead.
+
+    This is the site the sibling repo's attempt missed, which is why the check is placed on what
+    the reads PRODUCE rather than being written at each read.
+    """
+    repo = tmp_path / "u16staged"
+    _seeded(repo)
+    (repo / "report.txt").write_bytes(_LEAK_LINE.encode("utf-16-le"))
+    _git(repo, "add", "report.txt")
+    (repo / "report.txt").unlink()
+
+    proc = _run_guard(repo)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1, f"a staged UTF-16 blob was decoded and cleared: {out}"
+    assert "NUL" in out and "report.txt" in out, out
+
+
+@pytest.mark.timeout(300)
+def test_bomless_utf16le_past_gits_binary_window_is_not_cleared_by_the_RANGE_scan(
+    tmp_path: Path,
+) -> None:
+    """#242, decode site 3, in the place that actually matters.
+
+    ⚠️ The payload sits PAST 8000 bytes deliberately. git only calls a blob binary when a NUL is
+    in its first 8000, so this gets an ordinary text diff and never reaches the `--text` re-diff —
+    which is where the sibling repo put its check, covering only the case git had already refused.
+    """
+    repo = tmp_path / "u16range"
+    base = _seeded(repo)
+    (repo / "report.txt").write_bytes(
+        b"# header\n" * 1200 + _LEAK_LINE.encode("utf-16-le") + b"\n")
+    _commit(repo, "add report")
+    (repo / "report.txt").unlink()
+    _commit(repo, "drop report")
+
+    # The premise: git really does serve this as TEXT, so the fallback path is not involved.
+    raw = _git(repo, "diff", "--unified=0", "--no-color", f"{base}", "HEAD~0")
+    assert "Binary files" not in raw, "premise broken: git called it binary, wrong case under test"
+
+    proc = _run_guard(repo, "--range", f"{base}..HEAD")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1, f"UTF-16LE past the 8000-byte window scanned clean: {out}"
+    assert "report.txt" in out, out
+    assert "NOT CLEARED" in out and "NUL byte" in out, (
+        f"the verdict must say what was refused and why: {out}")
+
+
+@pytest.mark.timeout(300)
+def test_a_gitattributes_binary_TEXT_file_is_still_resolved_and_scanned(tmp_path: Path) -> None:
+    """The false red the NUL rule must not create.
+
+    Marking a generated lockfile `binary` is standard practice. git emits `Binary files … differ`,
+    the `--text` re-diff must resolve it, and a CLEAN one must stay clean while a leaking one is
+    still caught. Both directions, because only asserting the clean one proves nothing.
+    """
+    repo = tmp_path / "lockclean"
+    base = _seeded(repo)
+    (repo / ".gitattributes").write_text("*.lock binary\n", encoding="utf-8")
+    (repo / "deps.lock").write_text("resolved = 1\nname = 'left-pad'\n", encoding="utf-8")
+    _commit(repo, "add lock")
+    assert _run_guard(repo).returncode == 0
+    assert _run_guard(repo, "--range", f"{base}..HEAD").returncode == 0, (
+        "a `.gitattributes`-binary TEXT file was refused — that is a false red on correct work")
+
+    (repo / "deps.lock").write_text(f"resolved = 1\n{_LEAK_LINE}\n", encoding="utf-8")
+    _commit(repo, "leak in the lock")
+    proc = _run_guard(repo, "--range", f"{base}..HEAD")
+    assert proc.returncode == 1, f"and a leak inside one must still be caught: {proc.stdout}"
+
+
+# ----------------------------------------------------- the false "these repos are public" claim
+
+
+def test_the_guard_does_not_claim_the_fleet_is_public() -> None:
+    """⭐ A FALSE CLAIM IS A DEFECT, and this one is the argument for switching the guard off.
+
+    Every CODE repo is PRIVATE; only `unraid-templates` is public. Stating a rationale that holds
+    only for public repositories hands the next reader a reason to ignore the guard everywhere
+    else — and this file is the fleet's shared source for it.
+
+    ⚠️ The correction deliberately does NOT quote the sentence it refutes, so this assertion can
+    be a plain absence check rather than one that has to reason about context.
+    """
+    src = _SCRIPT.read_text(encoding="utf-8")
+    assert "repos are public" not in src.lower(), (
+        "the false fleet-wide 'these repos are public' claim is back")
+    assert "every CODE repo is PRIVATE" in src
+    assert "Only `unraid-templates` is\n    PUBLIC" in src or "unraid-templates` is" in src
+
+
+def test_the_accurate_public_references_are_KEPT() -> None:
+    """The other half of the same edit: this repo IS public, and the statements that say so are
+    load-bearing — they are why a real-literal denylist cannot live here."""
+    src = _SCRIPT.read_text(encoding="utf-8")
+    assert "cannot live in a public repo" in src, (
+        "the accurate, unraid-specific rationale was removed along with the false one")
+
+
+# ------------------------------------- line splitting: git's definition, not Python's
+# Found by an adversarial agent during this package's verification gate, and it is the most
+# serious of the four: a REAL leak passed BOTH scans with exit 0 while staying recoverable from
+# history, and it is reachable by accident rather than only by intent.
+
+
+# The nine characters `str.splitlines()` breaks on and `git` does not.
+_EXTRA_BREAKS = ["\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "", " ", " "]
+
+
+@pytest.mark.parametrize("ch", _EXTRA_BREAKS, ids=[repr(c) for c in _EXTRA_BREAKS])
+def test_a_line_is_split_only_on_newline_never_on_pythons_extra_breaks(ch: str) -> None:
+    """⛔ THE ROOT CAUSE. `str.splitlines()` breaks on nine characters git treats as content."""
+    assert guard._lines(f"a{ch}b") == [f"a{ch}b"], f"{ch!r} was treated as a line break"
+    assert guard._lines("a\nb") == ["a", "b"], "and `\\n` must still split"
+
+
+@pytest.mark.parametrize("ch", _EXTRA_BREAKS, ids=[repr(c) for c in _EXTRA_BREAKS])
+def test_a_leak_after_one_of_those_characters_is_still_found_in_an_added_line(ch: str) -> None:
+    """The fail-open itself, at the pure-function level.
+
+    `splitlines` cut `+harmless<ch>LEAK` into `+harmless` and `LEAK` — and the remainder no longer
+    began with `+`, so it fell past the added-line branch and was dropped. Not scanned, not
+    reported, not counted as unscannable: the run simply said clean.
+    """
+    parsed = guard.parse_diff(
+        f"diff --git a/cfg.txt b/cfg.txt\n--- /dev/null\n+++ b/cfg.txt\n"
+        f"@@ -0,0 +1 @@\n+harmless{ch}{_LEAK_LINE}\n")
+    assert len(parsed.added) == 1, f"{ch!r} split one added line into fragments: {parsed.added}"
+    assert _hits("abc", parsed.added), f"the leak after {ch!r} was dropped"
+
+
+@pytest.mark.timeout(300)
+def test_a_CR_split_leak_is_caught_end_to_end_by_the_range_scan(tmp_path: Path) -> None:
+    """The full bypass: added, then deleted, so only the range scan can see it.
+
+    A carriage return is not exotic — any file with mixed line endings carries one, and `\\x0c`
+    is an ordinary page break in real source.
+    """
+    repo = tmp_path / "crsplit"
+    base = _seeded(repo)
+    (repo / "cfg.txt").write_bytes(f"harmless\n\r{_LEAK_LINE}\n\r{_LEAK_ADDR_LINE}\n".encode())
+    leak = _commit(repo, "add cfg")
+    (repo / "cfg.txt").unlink()
+    _commit(repo, "drop cfg")
+
+    assert _run_guard(repo).returncode == 0, "precondition: the tree really is clean"
+    # ...and the premise: the value really is still recoverable, or there is nothing to catch.
+    assert _HOST in _git(repo, "show", f"{leak}:cfg.txt")
+
+    proc = _run_guard(repo, "--range", f"{base}..HEAD")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1, f"a CR-split leak passed the range scan: {out}"
+    assert "private lan domain" in out and "private IPv4" in out, out
+
+
+@pytest.mark.timeout(300)
+def test_file_content_cannot_FORGE_a_diff_header_and_steal_the_self_exemption(
+    tmp_path: Path,
+) -> None:
+    """⛔ THE ESCALATION, and the reason this is a production defect rather than a miss.
+
+    `diff --git` is the one branch checked unconditionally — correctly, because in git's real
+    grammar every content line carries a `+`/`-`/space prefix and so can never look like a header.
+    Splitting on `\\r` broke that guarantee: content could start a line, forge a header, and
+    re-attribute everything after it to any path — including this guard's own, the single file
+    both scans skip. That is #241's self-exemption theft reached by another route.
+    """
+    repo = tmp_path / "forge"
+    base = _seeded(repo)
+    (repo / "planted.txt").write_bytes(
+        f"X\rdiff --git a/{guard.SELF_PATH} b/{guard.SELF_PATH}\n"
+        f"Y\r@@ -0,0 +1,1 @@\n{_LEAK_ADDR_LINE}\n".encode())
+    _commit(repo, "plant")
+
+    proc = _run_guard(repo, "--range", f"{base}..HEAD")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1, f"a forged header stole the self-exemption: {out}"
+    assert "planted.txt" in out, (
+        f"the leak was attributed to the FORGED path rather than the real file: {out}")
+
+
+@pytest.mark.timeout(300)
+def test_a_CR_split_leak_is_caught_through_the_binary_rediff_path_too(tmp_path: Path) -> None:
+    """The same flaw defeated the #241/#242 fail-closed machinery, so it is pinned there as well.
+
+    With the file marked binary, it reaches the `--text` re-diff. That output was NON-empty (so
+    the empty-re-diff refusal did not fire) and carried no NUL (so the not-text refusal did not
+    fire) — while the leak line had already been dropped by the split. The path then fell out of
+    `still_unreadable` and was reported clean: every new guard satisfied, nothing scanned.
+    """
+    repo = tmp_path / "crbinary"
+    base = _seeded(repo)
+    (repo / ".gitattributes").write_text("*.dat -diff\n", encoding="utf-8")
+    (repo / "cfg.dat").write_bytes(f"ok\n\r{_LEAK_LINE}\n".encode())
+    _commit(repo, "add dat")
+
+    proc = _run_guard(repo, "--range", f"{base}..HEAD")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1, f"a CR-split leak passed through the re-diff path: {out}"
+
+
+@pytest.mark.timeout(300)
+def test_both_scans_agree_on_the_line_number_of_a_finding_in_a_CR_bearing_file(
+    tmp_path: Path,
+) -> None:
+    """The reason `scan_text` shares the rule even though its split was not a bypass.
+
+    Every fragment was still scanned there, so nothing leaked — but the two scans counted lines
+    differently, so the same finding was reported at two different line numbers depending on which
+    half of the guard found it. A guard whose halves disagree is telling one of them wrong.
+    """
+    repo = tmp_path / "linenos"
+    base = _seeded(repo)
+    (repo / "cfg.txt").write_bytes(f"one\ntwo\rstill two\n{_LEAK_LINE}\n".encode())
+    _commit(repo, "add cfg")
+
+    tree = _run_guard(repo)
+    rng = _run_guard(repo, "--range", f"{base}..HEAD")
+    assert tree.returncode == 1 and rng.returncode == 1
+
+    # git's own count: the leak is on line 3, because `\r` is content.
+    assert "cfg.txt:3:" in tree.stdout, tree.stdout
+    assert "cfg.txt:3:" in rng.stdout, rng.stdout
+
+
+# ------------------------------------------ log.showSignature: the identity call site
+# Found by an adversarial agent during this package's verification gate. It was previously
+# DISMISSED here on a measurement taken against UNSIGNED commits, where the setting is genuinely
+# inert (see #35). Signing is what makes it bite, and signing is ordinary.
+
+
+def _ssh_signing_available() -> bool:
+    """Can this machine make an ssh-signed commit? Probed, not assumed."""
+    return shutil.which("ssh-keygen") is not None
+
+
+# ⚠️ ASSEMBLED AT RUNTIME, like every other deny case here — and this one caught me out. Written
+# whole, it made the guard fail on its own test suite, at the very line that exists to prove the
+# guard reports such a path. The file never needs to EXIST: git's "Unable to open allowed keys
+# file <path>" warning quotes it back, and that warning text IS the payload.
+_SIGNERS_WINPATH = "C:/Users/" + "jsmith" + "/.ssh/allowed_signers"
+
+
+def _sign_with_ssh(repo: Path, allowed_signers: str = _SIGNERS_WINPATH) -> None:
+    _git(repo, "config", "gpg.format", "ssh")
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(repo / "k")],
+                   cwd=repo, capture_output=True, check=True, timeout=120)
+    _git(repo, "config", "user.signingkey", str(repo / "k.pub"))
+    _git(repo, "config", "commit.gpgsign", "true")
+    _git(repo, "config", "log.showSignature", "true")
+    _git(repo, "config", "gpg.ssh.allowedSignersFile", allowed_signers)
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.skipif(not _ssh_signing_available(), reason="ssh-keygen not available")
+def test_a_signed_commit_with_log_showSignature_does_not_fabricate_a_finding(
+    tmp_path: Path,
+) -> None:
+    """⛔ A FALSE RED THE OPERATOR CANNOT CLEAR, which is the worst kind.
+
+    With `log.showSignature=true` git prepends the signature-VERIFICATION block to stdout, ahead
+    of the `--format` output — and the warning naming the allowed-signers file contains a Windows
+    profile path. Glued onto the first field, that made a spotless commit report its "author name"
+    as publishing `C:\\Users\\<name>`. The advice printed with it (rewrite history, fix
+    `user.email`) cannot touch the real cause.
+
+    The field COUNT stays 4, so `commit_identity`'s fail-closed guard cannot catch this: the
+    response has the right shape and the wrong content.
+    """
+    repo = tmp_path / "signed"
+    _seeded(repo)
+    _sign_with_ssh(repo)   # need not exist; the WARNING is the payload
+    (repo / "f.txt").write_text("hi\n", encoding="utf-8")
+    _commit(repo, "signed")
+
+    # The premise: git really is emitting the signature block into the identity output, or this
+    # test passes vacuously against a machine that quietly did not sign.
+    raw = _git(repo, "show", "-s", "--format=%an", "HEAD")
+    assert "signature" in raw.lower() or "principal" in raw.lower(), (
+        f"premise broken: the commit was not signed, so nothing is under test here: {raw!r}")
+
+    proc = _run_guard(repo, "--range", "HEAD --not --remotes")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, f"a signed commit fabricated an identity finding: {out}"
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.skipif(not _ssh_signing_available(), reason="ssh-keygen not available")
+def test_a_REAL_leak_in_the_author_name_is_still_caught_when_signatures_are_shown(
+    tmp_path: Path,
+) -> None:
+    """The other direction, and the reason this is not merely cosmetic: the fabricated text also
+    BURIES a genuine leak among the signature output. Suppressing the block must not suppress the
+    finding with it."""
+    repo = tmp_path / "signedleak"
+    _seeded(repo)
+    _sign_with_ssh(repo)
+    _git(repo, "commit", "-q", "--allow-empty",
+         f"--author={_HOST} admin <admin@example.com>", "-m", "second")
+
+    proc = _run_guard(repo, "--range", "HEAD --not --remotes")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1, f"a leak in the author name went unreported: {out}"
+    assert "author name" in out and "private lan domain" in out, out
+
+
+@pytest.mark.timeout(300)
+def test_an_unparseable_header_prints_a_remediation_that_matches_its_CAUSE(
+    tmp_path: Path,
+) -> None:
+    """A fail-closed report that names the WRONG cause sends the operator after a problem that
+    does not exist — the same defect class as any other false claim in this file.
+
+    git C-quotes a path containing a quote, a backslash or a control byte REGARDLESS of
+    `core.quotePath` (which governs non-ASCII only), so such a header genuinely cannot be
+    reconstructed. The file is neither binary nor mis-encoded, so "add a binary suffix" and
+    "commit it as UTF-8 text" are both wrong.
+
+    ⚠️ Built with plumbing, because Windows cannot create such a name — but every CI runner is
+    Linux, where a commit carrying one is perfectly legal.
+    """
+    repo = tmp_path / "quotedhdr"
+    base = _seeded(repo)
+    blob = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=repo,
+                          input=b"hello world\n", capture_output=True, check=True,
+                          timeout=120).stdout.decode().strip()
+    tree = subprocess.run(["git", "mktree", "-z"], cwd=repo,
+                          input=f'100644 blob {blob}\tquo"te.txt\0'.encode(),
+                          capture_output=True, check=True, timeout=120).stdout.decode().strip()
+    sha = _git(repo, "commit-tree", tree, "-p", base, "-m", "quoted path").strip()
+    _git(repo, "update-ref", "refs/heads/main", sha)
+
+    proc = _run_guard(repo, "--range", f"{base}..{sha}")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1, f"an unattributable diff was cleared: {out}"
+    assert "cannot resolve to one path" in out, out
+    # The cause-specific advice must travel WITH the marker...
+    assert "C-quotes" in out and "rename it" in out, (
+        f"the marker did not carry advice matching its own cause: {out}")
+    # ...and the generic decode advice must be scoped so it no longer claims to apply to it.
+    assert "For an ordinary path above" in out, out
+
+
+def test_the_required_status_check_names_are_recorded_in_the_workflow() -> None:
+    """Renaming a required check leaves every PR green and permanently unmergeable, and the
+    required contexts are invisible from inside the repo — so they are written down here."""
+    ci = (_SCRIPT.parents[1] / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    for context in ("No internal info (public-repo guard)",
+                    "Templates are well-formed XML",
+                    "Leak-guard tests"):
+        assert ci.count(context) >= 2, (
+            f"{context!r} is a required status check but is not recorded as one")

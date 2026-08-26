@@ -13,7 +13,19 @@ on:
 permissions:
   contents: read
 
+# ⛔⛔ ALL THREE `name:` STRINGS BELOW ARE REQUIRED STATUS-CHECK CONTEXTS ON `main`, and the
+# protection has `enforce_admins` on. The required contexts are, exactly:
+#     "No internal info (public-repo guard)"
+#     "Templates are well-formed XML"
+#     "Leak-guard tests"
+# Renaming any of them does not fail the check — the required context simply never reports, and
+# every PR sits `mergeable: true` / `mergeStateStatus: BLOCKED`: three green jobs, nothing
+# failing, permanently unmergeable. The names are invisible from the repo, which is why they are
+# written down here. To rename one, change the branch-protection required context FIRST (a
+# repo-settings change, not a code one), then the job.
+# Verified 2026-08-25: `gh api repos/texasdaddy/unraid-templates/branches/main/protection`.
 jobs:
+  # ⛔ REQUIRED STATUS CHECK — do not rename. See the note above `jobs:`.
   # This repo is PUBLIC by necessity — Unraid fetches the icons and templates anonymously
   # over raw.githubusercontent.com. That makes it the likeliest place for a concrete host,
   # IP or appdata path to leak, because templates are where operator-specific values live.
@@ -103,6 +115,7 @@ jobs:
       # emits nothing is indistinguishable from a slow one until the runner's 6-hour limit.
       - run: python -u -m pytest tests -q --timeout=300
 
+  # ⛔ REQUIRED STATUS CHECK — do not rename. See the note above `jobs:`.
   templates:
     name: Templates are well-formed XML
     runs-on: ubuntu-24.04

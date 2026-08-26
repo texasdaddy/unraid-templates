@@ -1923,14 +1923,104 @@ def test_the_headerless_marker_reaches_the_verdict_and_prints_without_its_sigil(
     assert guard._MARKER_SIGIL not in blind[0], "the NUL sigil must be stripped for display"
 
 
+def test_the_sigil_is_stripped_from_a_FINDING_line_too_not_only_the_unscannable_list() -> None:
+    """`_shown` is applied at two sites and only one was covered — deleting it from the findings
+    line left the whole suite green. A raw NUL reaching a git hook's cp1252 stdout is exactly the
+    class `_ascii` exists for, so the guard would die while announcing a leak."""
+    marker = guard._unparsed_header("a/x b/y")
+    findings, _ = guard.scan_added("abc1234567", guard.ParsedDiff([(marker, 1, _LEAK_LINE)], []),
+                                   COMPILED)
+    assert len(findings) == 1, findings
+    assert guard._MARKER_SIGIL not in findings[0], (
+        "the NUL sigil leaked into a finding line, which a cp1252 pipe cannot print")
+
+
+@pytest.mark.timeout(300)
+def test_an_unattributable_marker_survives_ALONGSIDE_a_binary_needing_a_rediff(
+    tmp_path: Path,
+) -> None:
+    """The combined case, which the early return hides.
+
+    `added_lines` returns `unattributable` in two places: the `if not pending` early return, and
+    the accumulator that follows it. Only the first was covered, so blanking the second
+    (`still_unreadable = []`) left every test green — a diff carrying BOTH an unattributable
+    marker and a binary file needing a re-diff would have dropped the marker on the floor.
+
+    Driven through the pure function because git with `--no-ext-diff` pinned will not produce a
+    headerless diff, which is the point of the pin.
+    """
+    repo = tmp_path / "combined"
+    _seeded(repo)
+    (repo / "asset.bin").write_bytes(b"\x00\x01" + _LEAK_LINE.encode() + b"\n")
+    _commit(repo, "add asset")
+    sha = _git(repo, "rev-parse", "HEAD").strip()
+
+    real = guard.parse_diff
+
+    def both(diff: str, _o=real):
+        parsed = _o(diff)
+        # Only the PRIMARY parse gets the extra marker; the re-diff's own result is untouched.
+        if "--text" not in diff and parsed.unscannable:
+            return guard.ParsedDiff(parsed.added, [*parsed.unscannable, guard._NO_HEADER])
+        return parsed
+
+    guard.parse_diff = both
+    try:
+        got = guard.added_lines(repo, sha)
+    finally:
+        guard.parse_diff = real
+
+    assert any(guard._is_marker(u) for u in got.unscannable), (
+        f"the unattributable marker was dropped once a re-diff also had to run: {got.unscannable}")
+
+
 def test_a_marker_is_never_mistaken_for_a_skipped_path() -> None:
-    """A marker that `_skipped` swallowed would be a fail-open with extra steps."""
-    for marker in (guard._NO_HEADER, guard._unparsed_header("a/x b/y"),
-                   guard._nul_content("logo.png")):
+    """A marker that `_skipped` swallowed would be a fail-open with extra steps.
+
+    ⚠️ ONLY PATH-LESS THINGS MAY BE MARKERS, and an earlier version of this test asserted the
+    opposite — that a NUL-bearing PATH wrapped as a marker also escaped `_skipped`. That pinned a
+    defect in the direction that made it look correct. A value that HAS a path must go through the
+    normal filters; see `test_a_skipped_suffix_stays_skipped_by_BOTH_scans_when_its_content_has_a_NUL`.
+    """
+    for marker in (guard._NO_HEADER, guard._unparsed_header("a/x b/y")):
         assert guard._is_marker(marker)
         assert not guard._skipped(marker), marker
-        # ...including one whose text ends in a skipped suffix.
-    assert not guard._skipped(guard._nul_content("logo.png"))
+
+
+@pytest.mark.timeout(300)
+def test_a_skipped_suffix_stays_skipped_by_BOTH_scans_when_its_content_has_a_NUL(
+    tmp_path: Path,
+) -> None:
+    """⛔ A FALSE RED WITH NO AVAILABLE FIX — the worst shape a guard can take.
+
+    Wrapping a NUL-bearing path in a marker made it inherit the marker exemption from `_skipped`,
+    so a `.pdf` — already in SKIP_SUFFIXES — whose first NUL falls PAST git's 8000-byte binary
+    window was SKIPPED by the tree scan and REFUSED by the range scan. The two scans disagreeing
+    about which files count is precisely what sharing `_skipped` exists to prevent.
+
+    And the printed remedy was inert: "add a binary suffix to SKIP_SUFFIXES" for a suffix already
+    in SKIP_SUFFIXES. `.githooks/pre-push` blocked the push with nothing the operator could change.
+
+    Both directions asserted, so this cannot be satisfied by skipping everything: the skipped
+    suffix passes, and a byte-identical file at a NON-skipped suffix is still refused.
+    """
+    repo = tmp_path / "pdfnul"
+    base = _seeded(repo)
+    body = b"%PDF-1.4\n" + b"x" * 9000 + b"\n" + _LEAK_LINE.encode("utf-16-le") + b"\n"
+    (repo / "doc.pdf").write_bytes(body)
+    (repo / "doc.dat").write_bytes(body)
+    _commit(repo, "add assets")
+
+    # The premise: git must serve these as TEXT, or the primary-path NUL check is never reached.
+    assert "Binary files" not in _git(repo, "diff", "--unified=0", "--no-color", base, "HEAD"), (
+        "premise broken: git called it binary, so this exercises the fallback, not the case named")
+
+    proc = _run_guard(repo, "--range", f"{base}..HEAD")
+    out = proc.stdout + proc.stderr
+    assert "doc.pdf" not in out, (
+        f"a suffix already in SKIP_SUFFIXES was refused by the range scan while the tree scan "
+        f"skips it, and the printed remedy cannot clear it: {out}")
+    assert "doc.dat" in out, f"the non-skipped twin must still be refused: {out}"
 
 
 @pytest.mark.timeout(300)
@@ -1983,21 +2073,55 @@ def test_a_textconv_filter_cannot_hide_a_leak_from_the_range_scan(tmp_path: Path
     assert proc.returncode == 1, f"a textconv filter hid the leak: {proc.stdout}{proc.stderr}"
 
 
-def test_both_diff_call_sites_share_one_pinned_flag_set() -> None:
-    """One definition, so a flag cannot be dropped from one scan and kept in the other.
+@pytest.mark.timeout(300)
+def test_EVERY_git_diff_the_scan_runs_carries_the_pinned_config_and_flags(tmp_path: Path) -> None:
+    """⛔ ASSERTS WHAT THE CODE PASSES TO GIT, not what the constants contain.
 
-    This is the same reason `compile_patterns` exists: when the two scans held their own copies,
-    dropping a flag from one left every test green while the shipped scan behaved differently.
+    The first version of this test inspected `_DIFF_FLAGS`/`_DIFF_CONFIG` and nothing else. That
+    restated the constants instead of executing the call sites: reverting the RE-DIFF invocation to
+    its old unpinned argv left the whole suite green, and that re-diff is the very call site the
+    textconv test explicitly delegates to this one. It also carried a genuine tautology —
+    `assert pinned is not None` on a freshly-built dict, which cannot fail.
+
+    So this captures every `git diff` argv the scan actually issues and checks each one, which
+    covers the sharing without depending on how it is implemented.
     """
-    assert "--no-ext-diff" in guard._DIFF_FLAGS
-    assert "--no-textconv" in guard._DIFF_FLAGS
-    assert "--no-renames" in guard._DIFF_FLAGS, "path reconstruction depends on both sides matching"
-    pinned = dict(zip(guard._DIFF_CONFIG[1::2], guard._DIFF_CONFIG[1::2]))
-    flat = " ".join(guard._DIFF_CONFIG)
-    for key in ("core.quotePath=false", "diff.noprefix=false",
-                "diff.srcPrefix=a/", "diff.dstPrefix=b/"):
-        assert key in flat, f"{key} unpinned: the header path is derived from these prefixes"
-    assert pinned is not None
+    repo = tmp_path / "argv"
+    base = _seeded(repo)
+    (repo / ".gitattributes").write_text("*.lock binary\n", encoding="utf-8")
+    (repo / "deps.lock").write_text("resolved = 1\n", encoding="utf-8")   # forces the re-diff
+    (repo / "plain.txt").write_text("hello\n", encoding="utf-8")
+    _commit(repo, "add both")
+    sha = _git(repo, "rev-parse", "HEAD").strip()
+
+    seen: list[list[str]] = []
+    real_run, real_git = subprocess.run, guard._git
+
+    def spy_run(cmd, *a, **kw):
+        if isinstance(cmd, list) and "diff" in cmd:
+            seen.append(list(cmd))
+        return real_run(cmd, *a, **kw)
+
+    def spy_git(root, *args, **kw):
+        if "diff" in args:
+            seen.append(["git", *args])
+        return real_git(root, *args, **kw)
+
+    guard.subprocess.run, guard._git = spy_run, spy_git
+    try:
+        guard.added_lines(repo, sha)
+    finally:
+        guard.subprocess.run, guard._git = real_run, real_git
+
+    assert len(seen) >= 2, f"expected the primary diff AND the --text re-diff, saw {len(seen)}"
+    assert any("--text" in c for c in seen), "the re-diff call site was never exercised"
+    for cmd in seen:
+        flat = " ".join(cmd)
+        for flag in ("--no-ext-diff", "--no-textconv", "--no-renames", "--unified=0"):
+            assert flag in cmd, f"{flag} missing from a real git diff call: {flat}"
+        for key in ("core.quotePath=false", "diff.noprefix=false",
+                    "diff.srcPrefix=a/", "diff.dstPrefix=b/", "diff.mnemonicPrefix=false"):
+            assert key in cmd, f"{key} unpinned on a real git diff call: {flat}"
 
 
 # ------------------------------------------------------------- #241 path derivation / `+++ `
@@ -2151,6 +2275,13 @@ def test_a_non_ascii_path_is_resolved_rather_than_quoted_away(tmp_path: Path) ->
     proc = _run_guard(repo, "--range", f"{base}..HEAD")
     out = proc.stdout + proc.stderr
     assert proc.returncode == 1, f"a git-quoted path scanned clean: {out}"
+    # ⚠️ RESOLVED, NOT MERELY REFUSED. `"caf" in out` alone cannot tell the two apart: with the
+    # `core.quotePath=false` pin removed, the output still contains "caf" — inside the escaped RAW
+    # HEADER of an unparsed-header refusal (`'"a/caf\303\251.bin" ...'`). The test would have kept
+    # its name while proving the opposite of what it claims, so it must assert that the path was
+    # reconstructed rather than that the bytes appear somewhere.
+    assert "cannot resolve to one path" not in out, (
+        f"the pin is not holding: the path was REFUSED as unparseable rather than resolved: {out}")
     # `_ascii` escapes it for a cp1252 pipe, so match the stem rather than the accent.
     assert "caf" in out and ".bin" in out, out
 
@@ -2239,8 +2370,9 @@ def test_a_NUL_bearing_added_line_is_reported_rather_than_counted_as_scanned() -
         f"diff --git a/report.txt b/report.txt\n--- /dev/null\n+++ b/report.txt\n"
         f"@@ -0,0 +1 @@\n+{payload}\n")
     assert parsed.added == [], "NUL-separated content is not text and must not count as scanned"
-    assert len(parsed.unscannable) == 1, parsed.unscannable
-    assert "NUL" in parsed.unscannable[0]
+    # ⚠️ The PLAIN PATH, not a marker: it has a path, so it must stay subject to `_skipped`.
+    assert parsed.unscannable == ["report.txt"], parsed.unscannable
+    assert not guard._is_marker(parsed.unscannable[0])
 
 
 def test_a_NUL_bearing_file_is_reported_ONCE_not_once_per_line() -> None:
@@ -2323,7 +2455,9 @@ def test_bomless_utf16le_past_gits_binary_window_is_not_cleared_by_the_RANGE_sca
     proc = _run_guard(repo, "--range", f"{base}..HEAD")
     out = proc.stdout + proc.stderr
     assert proc.returncode == 1, f"UTF-16LE past the 8000-byte window scanned clean: {out}"
-    assert "NUL" in out and "report.txt" in out, out
+    assert "report.txt" in out, out
+    assert "NOT CLEARED" in out and "NUL byte" in out, (
+        f"the verdict must say what was refused and why: {out}")
 
 
 @pytest.mark.timeout(300)

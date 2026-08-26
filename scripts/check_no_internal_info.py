@@ -753,12 +753,6 @@ def _unparsed_header(tail: str) -> str:
         f"that commit by hand before pushing>")
 
 
-def _nul_content(path: str) -> str:
-    return _MARKER_SIGIL + (
-        f"<{_shown(path)}: the lines it ADDS contain a NUL byte, so they are not UTF-8 text and "
-        f"nothing in them could be scanned>")
-
-
 def _is_marker(p: str) -> bool:
     return p.startswith(_MARKER_SIGIL)
 
@@ -991,7 +985,11 @@ def parse_diff(diff: str) -> ParsedDiff:
             # removal, and reporting it would make every commit that deletes a binary — or the
             # delete half of a binary rename — fail forever. That is the same trap the
             # removed-lines rule above avoids: a guard that punishes cleanup gets switched off.
-            if path and not deleted and not line.rstrip().endswith("and /dev/null differ"):
+            # `not _is_marker(path)`: an unparsed header was already reported at the `diff --git`
+            # line, and reporting it again here made a binary file with such a path appear TWICE,
+            # inflating the "in N added file(s)" count the operator reads.
+            if (path and not deleted and not _is_marker(path)
+                    and not line.rstrip().endswith("and /dev/null differ")):
                 unscannable.append(path)
             path = ""
             continue
@@ -1014,11 +1012,23 @@ def parse_diff(diff: str) -> ParsedDiff:
         if in_hunk and line.startswith("+"):
             content = line[1:]
             if "\x00" in content:
+                # ⛔ THE PLAIN PATH, NOT A MARKER, and the difference was a false red nobody could
+                # clear. Markers are steered AROUND `_skipped` on purpose — `_NO_HEADER` and an
+                # unparsed header have no path, so no suffix rule can apply to them. This case is
+                # the opposite: it HAS a path, and wrapping it made it inherit that exemption. A
+                # `.pdf` whose first NUL falls past git's 8000-byte window was then SKIPPED by the
+                # tree scan and REFUSED by the range scan — the two scans disagreeing about which
+                # files count, which is exactly what `_skipped` exists to prevent. Worse, the
+                # printed remedy was inert: the suffix was already in SKIP_SUFFIXES, so the
+                # operator was told to do the thing they had already done, with no way to pass.
+                #
                 # Reported ONCE per path, not once per line: a UTF-16 file is NUL-bearing on
                 # every line, and a report repeated a thousand times reads as a thousand faults.
                 if path not in nul_seen:
                     nul_seen.add(path)
-                    unscannable.append(_nul_content(path))
+                    # An unparsed-header marker is ALREADY in `unscannable` from the header line.
+                    if not _is_marker(path):
+                        unscannable.append(path)
             else:
                 added.append((path, lineno, content))
             lineno += 1
@@ -1684,7 +1694,9 @@ def _scan_commits(root: Path, rev_range: str,
         # now CARRIES its own remediation (see `_unparsed_header` / `_nul_content`) rather than
         # having this site try to recognise one after the sigil has been stripped for display.
         print("For an ordinary path above: add a binary suffix to SKIP_SUFFIXES if that is what "
-              "it is, or commit the file as UTF-8 text.\n")
+              "it is, or commit the file as UTF-8 text. A file that DECODES but carries a NUL "
+              "byte is refused here too - BOM-less UTF-16/UTF-32 is valid UTF-8 and would scan "
+              "as nothing, so it is not cleared.\n")
     if result.findings:
         # ⚠️ `_ascii` HERE TOO. This is the line that ANNOUNCES a real leak, and with a non-ASCII
         # branch name in `rev_range` it died mid-sentence under a hook's cp1252 stdout — the guard

@@ -2264,6 +2264,22 @@ def test_DELETING_a_file_whose_path_cannot_be_parsed_is_not_reported() -> None:
     assert len(addition.unscannable) == 1, (
         f"adding an unparseable path must still be refused: {addition.unscannable}")
 
+    # ⛔⛔ PRECISION, NOT MERELY REMOVAL — and this is the assertion that earns its keep.
+    # Everything above passes just as happily if the pop is replaced by `unscannable.clear()`,
+    # which is a REAL fail-open: one commit that deletes an unparseable path while ADDING a
+    # binary blob wipes the binary's entry off the list too, and the run exits 0 with the added
+    # value still recoverable from history. A test that pins "something was removed" cannot see
+    # that; only one that pins WHICH entry survives can.
+    mixed = guard.parse_diff(
+        "diff --git a/asset.dat b/asset.dat\nnew file mode 100644\n"
+        "Binary files /dev/null and b/asset.dat differ\n"
+        'diff --git "a/bad\\\\q.md" "b/bad\\\\q.md"\n'
+        "deleted file mode 100644\n"
+        '--- "a/bad\\\\q.md"\n+++ /dev/null\n@@ -1 +0,0 @@\n-gone\n')
+    assert mixed.unscannable == ["asset.dat"], (
+        f"the deletion's pop took an unrelated entry that was already reported: "
+        f"{mixed.unscannable}")
+
 
 @pytest.mark.timeout(300)
 def test_BOTH_halves_of_241_are_closed_a_half_fix_leaves_the_other_open(tmp_path: Path) -> None:

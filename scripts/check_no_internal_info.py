@@ -7,11 +7,29 @@ as escapes: `\Users` is a truncated `\UXXXXXXXX` and is a hard SyntaxError that 
 from importing at all, and `\b` silently becomes a literal backspace character in the text.
 
 WHY THIS EXISTS
-    These repos are public, and so are the images they build. An internal IP, an appdata pool
-    path or a personal address committed to either is PERMANENT: removing it in a later commit
-    does not remove it, because it stays in the history and in whatever already mirrored the
-    repo. Cleaning it up afterwards costs a full history rewrite and a force-push across every
-    clone. This guard is what stops it coming back.
+    An internal IP, an appdata pool path or a personal address committed anywhere is PERMANENT:
+    removing it in a later commit does not remove it, because it stays in the history and in
+    whatever already mirrored the repo. Cleaning it up afterwards costs a full history rewrite
+    and a force-push across every clone. This guard is what stops it coming back.
+
+    ⛔ WHICH REPOSITORIES ARE PUBLIC — the previous answer here was WRONG, and wrong in the
+    direction that gets a guard switched off. It generalized "public" across the whole fleet,
+    including the images built from it. The truth: every CODE repo is PRIVATE — `tape`,
+    `keystone`, `cef-tracker`, `reauth-bot`, `gambit`, `the-desk`. Only `unraid-templates` is
+    PUBLIC (the GHCR *packages* are public too).
+
+    (The false sentence is deliberately NOT reproduced here. A correction that quotes the claim
+    it is refuting leaves the claim greppable in the file, so the next reader — and any test
+    asserting it is gone — finds it either way.)
+
+    ⚠️ Why a docstring error is worth this much space: this file is the fleet's shared guard, and
+    a blanket claim of publicness is precisely the premise someone reasons FROM when they want to
+    relax it — "this one is private, so the check does not really apply here". It does apply. A
+    private repo is not a secret store: it is readable by every collaborator and every token with
+    `repo` scope, it gets cloned onto laptops and CI runners, and making it public later — or
+    forking it, or extracting it — publishes the whole history at once. The guard's value does
+    not come from the repository's visibility, and stating a reason that only holds for public
+    repositories hands the next reader an argument for ignoring it everywhere else.
 
 ⭐ THIS GUARD MATCHES SHAPES, NOT VALUES — AND THAT IS DELIBERATE.
     Every pattern below describes a CLASS of value (an RFC1918 address, a `/mnt/<pool>` path, a
@@ -643,6 +661,107 @@ _EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 _HUNK_RX = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
+# ⛔⛔ EVERY `git diff` THIS FILE RUNS GOES THROUGH BOTH OF THESE. A guard whose VERDICT depends on
+# the developer's git config is not a guard: the same commit passes on one machine and fails on
+# another, and the machine it passes on is whichever one happens to have the setting.
+#
+# ⚠️ PIN THE CLASS, NOT THE MEMBERS YOU HAPPEN TO KNOW. Each entry below is a setting that changes
+# what `git diff` EMITS, which is the only input this scanner has:
+#   * `diff.external` / `GIT_EXTERNAL_DIFF` - difftastic's and delta's documented setup is exactly
+#     `[diff] external = difft`. git then emits NEITHER a `diff --git` header NOR a `+++ ` line;
+#     the output is just the driver's stdout, so `parse_diff` set no path, dropped every line, and
+#     returned empty-added AND empty-unscannable. A REAL LEAK EXITED 0 (issue #250). `--no-ext-diff`
+#     is the fix; `-c diff.external=` is NOT - git tries to spawn the empty string and dies 128.
+#   * `--no-textconv` - the `.gitattributes` `diff=<driver>`/`textconv` route to the same place.
+#   * `core.quotePath` - with the default `true`, a non-ASCII path is emitted C-quoted
+#     (`"a/caf\303\251.bin"`), which no path derivation here can reconstruct (issue #241).
+#   * `diff.noprefix`, `diff.srcPrefix`, `diff.dstPrefix`, `diff.mnemonicPrefix` - all four change
+#     the `a/`/`b/` prefixes the header path is derived FROM. `mnemonicPrefix` was measured not to
+#     apply to a two-tree diff, and is pinned anyway: a pin costs one argument, whereas relying on
+#     that measurement means re-verifying it against every future git release.
+# The one setting deliberately NOT pinned here is `log.showSignature`, which affects `git log`
+# rather than `git diff` - a separate call site, and a separate issue.
+_DIFF_CONFIG = ("-c", "core.quotePath=false",
+                "-c", "diff.noprefix=false",
+                "-c", "diff.srcPrefix=a/",
+                "-c", "diff.dstPrefix=b/",
+                "-c", "diff.mnemonicPrefix=false")
+_DIFF_FLAGS = ("--unified=0", "--no-color", "--no-renames", "--no-ext-diff", "--no-textconv")
+
+# ------------------------------------------------------------------ unattributable MARKERS
+# Some things `parse_diff` must report are NOT paths: "I could not read this file" needs a file,
+# but "I could not work out WHICH file this is" has none to give.
+#
+# ⛔ THE SIGIL IS A NUL, and that is the whole reason this is safe. A git path can never contain
+# one — git itself uses NUL to delimit paths in `ls-files -z` — so a marker is distinguishable
+# from every real path by construction, rather than by a prefix convention a real filename could
+# collide with. That matters because a marker must NEVER reach a `git diff -- <pathspec>`: it
+# would match nothing, git would exit 0 with empty output, and the run would clear a diff it
+# never read. Checked by `_is_marker`, stripped for display by `_shown`.
+#
+# ⚠️ A MARKER MUST NAME SOMETHING THE OPERATOR CAN ACT ON. A fail-closed report that says only
+# "unparsed" names no file and cannot be acted on, so `_unparsed_header` quotes the raw header.
+_MARKER_SIGIL = "\x00"
+
+_NO_HEADER = _MARKER_SIGIL + (
+    "<the whole diff carried hunks but no 'diff --git' header, so not one of its lines could be "
+    "attributed to a file - is an external diff driver (diff.external / GIT_EXTERNAL_DIFF) "
+    "configured?>")
+
+
+def _unparsed_header(tail: str) -> str:
+    return _MARKER_SIGIL + f"<a 'diff --git' header this cannot resolve to one path: {tail!r}>"
+
+
+def _nul_content(path: str) -> str:
+    return _MARKER_SIGIL + (
+        f"<{_shown(path)}: the lines it ADDS contain a NUL byte, so they are not UTF-8 text and "
+        f"nothing in them could be scanned>")
+
+
+def _is_marker(p: str) -> bool:
+    return p.startswith(_MARKER_SIGIL)
+
+
+def _shown(p: str) -> str:
+    return p[len(_MARKER_SIGIL):] if _is_marker(p) else p
+
+
+def _header_path(tail: str) -> str:
+    """The ONE path out of a `diff --git a/X b/X` tail, byte-exact — or a marker.
+
+    ⛔ NOT `tail.split(" b/", 1)`, which is what this used to be and which two ordinary shapes
+    defeat (issue #241). A path CONTAINING ` b/` splits at the wrong place —
+    `a/x b/y.lock b/x b/y.lock` yielded `y.lock b/x b/y.lock`, a path that does not exist — and a
+    path git QUOTES has no ` b/` at all, so the whole tail became the path. Neither is a cosmetic
+    mis-naming: for a BINARY file there is no `+++ ` line to correct it afterwards, the re-diff
+    that follows matches nothing, git exits 0 empty, and the file is reported CLEAN rather than
+    unscannable. The fail-closed posture inverted.
+
+    ⭐ RECONSTRUCTION, NOT SPLITTING. `--no-renames` and the pinned prefixes (`_DIFF_CONFIG`) mean
+    both sides are the SAME path, so `a/{p} b/{p}` determines `p` by LENGTH — no delimiter has to
+    be guessed. The reconstruction is then verified byte-for-byte, which is what makes a tail this
+    cannot explain fail CLOSED instead of producing a wrong-but-plausible answer.
+    """
+    if len(tail) < 5 or (len(tail) - 5) % 2:
+        return _unparsed_header(tail)
+    n = (len(tail) - 5) // 2
+    p = tail[2:2 + n]
+    return p if tail == f"a/{p} b/{p}" else _unparsed_header(tail)
+
+
+def _plus_path(rest: str) -> str:
+    """The path out of a `+++ ` line — stripping AT MOST ONE trailing TAB, never whitespace.
+
+    ⛔ `.strip()` HERE WAS A FULL BYPASS (issue #241). git appends a TAB after a path that carries
+    trailing whitespace — measured: `+++ b/notes.png \\t` — so stripping removed the tab AND the
+    meaningful trailing space with it. `notes.png ` became `notes.png`, whose suffix is SKIPPED,
+    and every added line in the real file was dropped. The worse half: `<SELF_PATH> ` stripped to
+    exactly `SELF_PATH` and inherited this guard's single self-exemption, so an arbitrary file
+    could be handed the one exemption in the file.
+    """
+    return rest[:-1] if rest.endswith("\t") else rest
+
 
 def _git(root: Path, *args: str) -> str:
     """Run git and return stdout as text.
@@ -754,6 +873,34 @@ def parse_diff(diff: str) -> ParsedDiff:
     ⚠️ A BINARY DIFF CARRIES NO LINES, so it must be REPORTED rather than passed over. The tree
     scan already refuses to vouch for what it cannot decode; a UTF-16 file is invisible to both
     scans otherwise, which is a hole rather than a limit.
+
+    ⛔⛔ "GIT CALLED IT BINARY" AND "IT CONTAINS A NUL" ARE DIFFERENT QUESTIONS, and treating them
+    as one was issue #242. git flags a blob binary only if a NUL falls in its FIRST 8000 BYTES, so
+    a BOM-less UTF-16LE payload further in gets an ordinary TEXT diff — and UTF-16LE of ASCII
+    (`A\\x00G\\x00E\\x00…`) is *valid UTF-8*, so the decode succeeds, the content is NUL-separated
+    so no pattern can match, and the file was counted as SCANNED. The guard reported it read and
+    cleared when it had read nothing of the sort.
+
+    So the NUL check lives HERE, on the added lines of the PRIMARY diff, and not only in the
+    `--text` re-diff fallback (which runs only for what git ALREADY refused — the case that was
+    already being reported). One rule covers UTF-16LE, UTF-16BE and UTF-32 without enumerating
+    encodings, because a NUL does not occur in legitimate UTF-8 source.
+
+    ⚠️ SCOPED, not a strength claim: this catches content whose NULs land in ADDED lines. Ordinary
+    non-ASCII UTF-8 — accents, CJK — has no NUL and is still scanned normally, which is the
+    direction that matters most, since a guard that reddens correct work gets switched off.
+
+    ⛔⛔ "I SAW A DIFF BUT NO HEADER I RECOGNISE" IS A THIRD ANSWER, and its absence was a
+    fail-open (issue #250). With an external diff driver configured, git emits neither a
+    `diff --git` header nor a `+++ ` line — just the driver's stdout. `path` therefore stayed
+    empty, `if not path: continue` dropped every line INCLUDING the added ones the driver had
+    printed under a `@@` header, and this returned empty-added AND empty-unscannable, which reads
+    identically to "there was nothing to scan". A real leak exited 0.
+
+    `--no-ext-diff` (see `_DIFF_CONFIG`) stops git doing that in the first place. This state is
+    the second half, and it is the more important half: the flag closes the ONE member of the
+    class that is known, whereas a parser that cannot say "unrecognised" turns every FUTURE member
+    into a silent pass too. Reported loud, and fail-closed, exactly like an undecodable file.
     """
     added: list[tuple[str, int, str]] = []
     unscannable: list[str] = []
@@ -761,19 +908,36 @@ def parse_diff(diff: str) -> ParsedDiff:
     lineno = 0
     in_hunk = False
     deleted = False
+    saw_header = False
+    saw_hunk = False
+    nul_seen: set[str] = set()
     for line in diff.splitlines():
         if line.startswith("diff --git "):
-            # `a/X b/X`. Split on " b/" so a path containing a space still resolves; git quotes
-            # genuinely pathological names, and those fall back to the whole tail.
-            tail = line[len("diff --git "):]
-            path = tail.split(" b/", 1)[1] if " b/" in tail else tail
+            saw_header = True
+            path = _header_path(line[len("diff --git "):])
+            if _is_marker(path):
+                # Nothing after this can be trusted to belong to a file, so say so HERE rather
+                # than waiting for a `Binary files` line that a text file never produces.
+                unscannable.append(path)
             in_hunk = False
             deleted = False
             continue
         if not in_hunk and line.startswith("+++ "):
-            raw = line[4:].strip()
-            # `/dev/null` on the new side means the file was DELETED — a deletion adds nothing.
-            path = "" if raw == "/dev/null" else raw.removeprefix("b/")
+            raw = _plus_path(line[4:])
+            if raw == "/dev/null":
+                # `/dev/null` on the new side means the file was DELETED — a deletion adds nothing.
+                path = ""
+            elif not saw_header:
+                # ⭐ THE HEADER WINS WHEN THERE IS ONE, and this branch is the FALLBACK — not the
+                # override it used to be. Two sources for one fact is how #241's second half
+                # happened: `diff --git` had already produced the path byte-exactly and the very
+                # next line threw it away. Making `+++ ` authoritative-only-when-alone leaves the
+                # two unable to disagree.
+                #
+                # ⛔ AND IT IS NOT REDUNDANT — do NOT delete it. It is the ONLY path source when
+                # git emits no `diff --git` header, and removing it is what turned #241 into #250
+                # in the sibling repo (tape#241, "what the next attempt should know", item 1).
+                path = raw.removeprefix("b/")
             continue
         if line.startswith("deleted file mode "):
             # `GIT binary patch` (only emitted under `--binary`, which this never passes) carries
@@ -791,16 +955,38 @@ def parse_diff(diff: str) -> ParsedDiff:
                 unscannable.append(path)
             path = ""
             continue
-        if not path:
-            continue
+        # ⛔ THE HUNK IS RECOGNISED BEFORE THE PATH GATE, and the order is the whole point. With
+        # `if not path: continue` first, a diff with no header dropped its `@@` lines here too, so
+        # `saw_hunk` could never become true on precisely the diffs it exists to detect — the
+        # check would have been dead code that looked like a fix (`_worker-common`: a mutation
+        # must PERFORM the failure, and a guard whose pattern matches 0x is broken, not passing).
+        # Setting `in_hunk` unconditionally also strengthens the header/prose ambiguity above:
+        # once `@@` has been seen, nothing until the next `diff --git` is treated as a header,
+        # which is git's own grammar rather than a heuristic.
         m = _HUNK_RX.match(line)
         if m:
             lineno = int(m.group(1))
             in_hunk = True
+            saw_hunk = True
+            continue
+        if not path:
             continue
         if in_hunk and line.startswith("+"):
-            added.append((path, lineno, line[1:]))
+            content = line[1:]
+            if "\x00" in content:
+                # Reported ONCE per path, not once per line: a UTF-16 file is NUL-bearing on
+                # every line, and a report repeated a thousand times reads as a thousand faults.
+                if path not in nul_seen:
+                    nul_seen.add(path)
+                    unscannable.append(_nul_content(path))
+            else:
+                added.append((path, lineno, content))
             lineno += 1
+    if saw_hunk and not saw_header:
+        # ⚠️ The `if not path: continue` above already dropped every one of those hunk lines. This
+        # is what stops that from being SILENT. Checked after the loop rather than per line so it
+        # is reported once for the diff, not once per hunk.
+        unscannable.append(_NO_HEADER)
     return ParsedDiff(added, unscannable)
 
 
@@ -836,8 +1022,12 @@ def added_lines(root: Path, sha: str) -> ParsedDiff:
         parent = _git(root, "rev-parse", "--verify", f"{sha}^").strip() or _EMPTY_TREE
     except subprocess.CalledProcessError:
         parent = _EMPTY_TREE  # the root commit has no parent
-    parsed = parse_diff(
-        _git(root, "diff", "--unified=0", "--no-color", "--no-renames", parent, sha))
+    parsed = parse_diff(_git(root, *_DIFF_CONFIG, "diff", *_DIFF_FLAGS, parent, sha))
+    # ⚠️ A MARKER IS NOT A PATH and must never reach a pathspec — it is already the final answer.
+    # Feeding one to the re-diff below would match nothing, git would exit 0 with empty output,
+    # and the run would clear a diff it could not read at all.
+    unattributable = [p for p in parsed.unscannable if _is_marker(p)]
+    parsed = ParsedDiff(parsed.added, [p for p in parsed.unscannable if not _is_marker(p)])
     # ⚠️ `root` IS LOAD-BEARING HERE, and leaving it off was a live fail-open. `_skipped(p)` with
     # no root falls back to the SELF_PATH CONSTANT instead of resolving this file from `__file__`
     # — the exact defect `_self_rel_path` exists to remove, one line away from its own fix. The
@@ -846,22 +1036,45 @@ def added_lines(root: Path, sha: str) -> ParsedDiff:
     # a blob the scan never read is reported as clean on the push path.
     pending = [p for p in parsed.unscannable if not _skipped(p, root)]
     if not pending:
-        return ParsedDiff(parsed.added, [])
+        return ParsedDiff(parsed.added, unattributable)
 
     added = list(parsed.added)
-    still_unreadable: list[str] = []
+    still_unreadable: list[str] = list(unattributable)
     for path in pending:
         try:
+            # ⚠️ `:(literal)` — WITHOUT IT THE PATH IS A GLOB. A perfectly ordinary asset name
+            # containing `[`, `*` or `?` is pathspec MAGIC, so `-- 'sprite[1].bin'` matches
+            # nothing, and "matches nothing" is the exact state that reads as clean below.
             raw = subprocess.run(
-                ["git", "diff", "--unified=0", "--no-color", "--no-renames", "--text",
-                 parent, sha, "--", path],
+                ["git", *_DIFF_CONFIG, "diff", *_DIFF_FLAGS, "--text",
+                 parent, sha, "--", f":(literal){path}"],
                 cwd=root, capture_output=True, check=True, timeout=_GIT_TIMEOUT_S).stdout
             text = raw.decode("utf-8")
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, UnicodeDecodeError):
             # Cannot read it → cannot vouch for it. Fail closed, exactly like the tree scan.
             still_unreadable.append(path)
             continue
-        added += parse_diff(text).added
+        # ⛔⛔ AN EMPTY RE-DIFF IS NOT A CLEAN ONE — it is the shape every path mis-parse ends in
+        # (issue #241). git exits 0 with no output when the pathspec matched nothing, the strict
+        # decode of "" succeeds, `parse_diff("")` adds nothing, and the path silently drops out of
+        # `still_unreadable` — so a file the scan never opened is reported CLEAN. This is the
+        # check that closes the CLASS rather than the two header shapes that were reported: any
+        # future way of deriving a wrong path ends here, fail-closed, instead of exiting 0.
+        #
+        # ⚠️ EMPTY OUTPUT, not "no ADDED lines". A binary whose change only REMOVES bytes yields
+        # real hunks with no `+` line, and reddening that would be a false red on correct work.
+        if not text.strip():
+            still_unreadable.append(path)
+            continue
+        sub = parse_diff(text)
+        # ⛔ THE RE-DIFF'S OWN VERDICT WAS BEING DISCARDED — only `.added` was read. So a path git
+        # flagged binary, re-diffed with `--text`, that came back NUL-bearing (a BOM-less UTF-16
+        # blob) contributed no added lines, raised nothing, and quietly dropped out of
+        # `still_unreadable` — reported CLEAN. Whatever the re-diff could not read stays unread.
+        if sub.unscannable:
+            still_unreadable += sub.unscannable
+            continue
+        added += sub.added
     return ParsedDiff(added, still_unreadable)
 
 
@@ -874,8 +1087,12 @@ def scan_added(sha: str, parsed: ParsedDiff, compiled: list[tuple[str, re.Patter
         if _skipped(path, root):
             continue
         for _, label, match in scan_text(content, compiled, path):
-            findings.append(f"{sha[:10]} {path}:{lineno}: {label}: {match!r}")
-    return findings, [f"{sha[:10]} {p}" for p in parsed.unscannable if not _skipped(p, root)]
+            findings.append(f"{sha[:10]} {_shown(path)}:{lineno}: {label}: {match!r}")
+    # `_shown` strips the marker sigil for display. `_skipped` is still asked of the RAW value: a
+    # marker is not a path, so it matches no skip suffix and no self-exemption, which is the
+    # answer wanted — an unattributable diff is never skipped.
+    return findings, [f"{sha[:10]} {_shown(p)}" for p in parsed.unscannable
+                      if not _skipped(p, root)]
 
 
 # ------------------------------------------------------- the COMMIT'S OWN identity
@@ -1277,6 +1494,20 @@ def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
         except UnicodeDecodeError:
             # NOT silent: a file this scanner cannot read is a file it cannot vouch for.
             undecodable.append(rel)
+            continue
+        # ⛔⛔ A SUCCESSFUL DECODE IS NOT PROOF IT IS TEXT (issue #242). BOM-less UTF-16LE of ASCII
+        # is `A\x00G\x00E\x00…` — every byte under 0x80, so it IS valid UTF-8. `read_text`
+        # succeeded, the decoded content was NUL-separated so no pattern could match, and the file
+        # was counted in the "scanned" total. The guard vouched for a file it had not read.
+        #
+        # ⭐ PLACED AFTER THE `try`, DELIBERATELY, so it covers BOTH sources of `text` — the
+        # worktree read AND the staged blob from `staged_text`. Those are two of the three decode
+        # sites in this file, and the sibling repo's attempt at this reached only one of them
+        # because it was written at the reads rather than at what they produce (tape#242).
+        if "\x00" in text:
+            undecodable.append(
+                f"{rel} (contains a NUL byte, so it is not UTF-8 text - BOM-less UTF-16/UTF-32 "
+                f"decodes as valid UTF-8 and would scan as nothing)")
             continue
         scanned += 1
         findings += [f"{rel}:{n}: {label}: {match!r}"

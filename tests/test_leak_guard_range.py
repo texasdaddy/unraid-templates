@@ -2216,6 +2216,55 @@ def test_a_deleted_file_is_still_recognised_by_dev_null_on_the_plus_line() -> No
     assert parsed.unscannable == []
 
 
+def test_an_unparseable_header_is_reported_ONCE_not_once_per_branch() -> None:
+    """The `Binary files ` branch must not re-report a marker the header line already added.
+
+    Reverting that guard leaves two identical entries, inflating the "in N added file(s)" count
+    the operator reads. Asserted on the LIST, so it pins the behaviour rather than the wording.
+    """
+    parsed = guard.parse_diff(
+        'diff --git "a/bad\\"q.bin" "b/bad\\"q.bin"\n'
+        'Binary files "a/bad\\"q.bin" and "b/bad\\"q.bin" differ\n')
+    assert len(parsed.unscannable) == 1, (
+        f"an unparseable binary header was reported once per branch: {parsed.unscannable}")
+    assert guard._is_marker(parsed.unscannable[0])
+
+
+def test_DELETING_a_file_whose_path_cannot_be_parsed_is_not_reported() -> None:
+    """⛔ A DELETION PUBLISHES NOTHING, and that has to hold for an unparseable path too.
+
+    The header marker is appended at the `diff --git` line, which is read BEFORE
+    `deleted file mode `, so the deletion guard could never apply to it: a commit that merely
+    DELETED a file whose path git C-quotes failed the range scan. The advice the marker carries —
+    rename it, or review that commit by hand — cannot be acted on for a commit already written, so
+    it was a red with no way out. That is the trap the `Binary files ` branch already documents
+    for the parseable case; there is no reason the unparseable case should be treated worse.
+
+    Both spellings, because git emits a different body for a text and a binary deletion.
+    """
+    text_deletion = guard.parse_diff(
+        'diff --git "a/note\\\\draft.md" "b/note\\\\draft.md"\n'
+        "deleted file mode 100644\n"
+        '--- "a/note\\\\draft.md"\n+++ /dev/null\n@@ -1 +0,0 @@\n-perfectly clean text\n')
+    assert text_deletion.unscannable == [], (
+        f"deleting an unparseable TEXT path was reported: {text_deletion.unscannable}")
+
+    binary_deletion = guard.parse_diff(
+        'diff --git "a/bad\\"q.bin" "b/bad\\"q.bin"\n'
+        "deleted file mode 100644\n"
+        'Binary files "a/bad\\"q.bin" and /dev/null differ\n')
+    assert binary_deletion.unscannable == [], (
+        f"deleting an unparseable BINARY path was reported: {binary_deletion.unscannable}")
+
+    # ⚠️ THE NEGATIVE DIRECTION, or this "fix" is just a bypass: ADDING one is still refused.
+    addition = guard.parse_diff(
+        'diff --git "a/bad\\"q.bin" "b/bad\\"q.bin"\n'
+        "new file mode 100644\n"
+        'Binary files /dev/null and "b/bad\\"q.bin" differ\n')
+    assert len(addition.unscannable) == 1, (
+        f"adding an unparseable path must still be refused: {addition.unscannable}")
+
+
 @pytest.mark.timeout(300)
 def test_BOTH_halves_of_241_are_closed_a_half_fix_leaves_the_other_open(tmp_path: Path) -> None:
     """⭐ ONE test, BOTH members — deliberately.

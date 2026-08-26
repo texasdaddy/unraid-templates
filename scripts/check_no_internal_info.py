@@ -979,6 +979,21 @@ def parse_diff(diff: str) -> ParsedDiff:
             # `parse_diff` is a documented pure function with its own tests; it should not depend
             # on its one caller's flags for correctness.
             deleted = True
+            # ⛔ A DELETION PUBLISHES NOTHING — INCLUDING AN UNPARSEABLE ONE. The header marker is
+            # appended at the `diff --git` line, which is read BEFORE this one, so the `deleted`
+            # guard on the `Binary files ` branch below never got the chance to apply to it. A
+            # commit that merely DELETES a file whose path git C-quotes therefore failed the range
+            # scan — and the advice the marker carries ("rename it, or review that commit by
+            # hand") cannot be acted on for a commit already written. A red with no way out is
+            # exactly what the comment on that branch forbids for the parseable case, and there is
+            # no reason the unparseable case should be treated worse: either way the deletion adds
+            # nothing to the history.
+            #
+            # Popped by identity from the tail: nothing else appends between the header line and
+            # this one, so the marker for THIS file section is necessarily the last entry.
+            if _is_marker(path) and unscannable and unscannable[-1] == path:
+                unscannable.pop()
+                path = ""
             continue
         if not in_hunk and (line.startswith("Binary files ") or line == "GIT binary patch"):
             # ⚠️ A DELETION PUBLISHES NOTHING. `Binary files a/x and /dev/null differ` is a
@@ -1691,7 +1706,7 @@ def _scan_commits(root: Path, rev_range: str,
         # ⚠️ THE ADVICE MUST MATCH THE CAUSE, and this one line covered two unrelated ones. For an
         # UNPARSEABLE HEADER both halves of it are wrong — the file is neither binary nor
         # mis-encoded — so it left the operator chasing a problem that does not exist. Each marker
-        # now CARRIES its own remediation (see `_unparsed_header` / `_nul_content`) rather than
+        # now CARRIES its own remediation (see `_unparsed_header`) rather than
         # having this site try to recognise one after the sigil has been stripped for display.
         print("For an ordinary path above: add a binary suffix to SKIP_SUFFIXES if that is what "
               "it is, or commit the file as UTF-8 text. A file that DECODES but carries a NUL "

@@ -600,6 +600,37 @@ def _contained(starts: list[int], best: list[int], lo: int, hi: int) -> bool:
 # rule itself.
 
 
+def _lines(text: str) -> list[str]:
+    r"""Split text into lines the way GIT does — on `\n`, and on nothing else.
+
+    ⛔⛔ NEVER `str.splitlines()` HERE. Python splits on NINE more characters than git does —
+    `\r`, `\x0b`, `\x0c`, `\x1c`, `\x1d`, `\x1e`, ``, ` `, ` ` — and git treats
+    every one of them as ordinary CONTENT inside a diff line. In `parse_diff` that was a
+    FAIL-OPEN, not a cosmetic difference:
+
+        an added line `+harmless\rAGENT=<rfc1918-addr>` arrives from git as ONE line. `splitlines`
+        cut it into `+harmless` and `AGENT=<rfc1918-addr>` — and the remainder no longer starts
+        with `+`, so it fell past the added-line branch and was DROPPED. Not scanned, not
+        reported, not counted: both scans exited 0 with the value still recoverable from history.
+
+    Reachable by accident, not just by intent: any file with mixed line endings carries `\r`, and
+    `\x0c` (form feed) is an ordinary page-break character in real source.
+
+    It also let file CONTENT forge a `diff --git` header — the one branch that is checked
+    unconditionally, because in git's real grammar a content line always carries a `+`/`-`/space
+    prefix and so can never look like one. A forged header re-attributed the following lines to
+    any path the attacker chose, INCLUDING this guard's own path, which is the single file both
+    scans skip. That is the self-exemption theft #241 exists to close, reached by a different
+    route.
+
+    ⚠️ SHARED BY BOTH SCANS ON PURPOSE. `scan_text` had the same call. There it was not a bypass —
+    every fragment still got scanned — but it made the two scans disagree about what line a
+    finding is ON, and a guard whose two halves count lines differently is telling one of them
+    wrong. One definition, so they cannot drift apart again.
+    """
+    return text.split("\n")
+
+
 def scan_text(text: str, compiled: list[tuple[str, re.Pattern[str]]],
               rel_path: str = "") -> list[tuple[int, str, str]]:
     """(line number, label, matched text) for every hit in `text`.
@@ -630,7 +661,7 @@ def scan_text(text: str, compiled: list[tuple[str, re.Pattern[str]]],
     no-silent-hangs rule forbids.
     """
     hits: list[tuple[int, str, str]] = []
-    for lineno, line in enumerate(text.splitlines(), start=1):
+    for lineno, line in enumerate(_lines(text), start=1):
         permitted = _permitted_spans(line)
         starts, best = _containment_index(permitted) if permitted else ([], [])
         for label, rx in compiled:
@@ -710,7 +741,16 @@ _NO_HEADER = _MARKER_SIGIL + (
 
 
 def _unparsed_header(tail: str) -> str:
-    return _MARKER_SIGIL + f"<a 'diff --git' header this cannot resolve to one path: {tail!r}>"
+    # ⚠️ THE REMEDIATION TRAVELS WITH THE MARKER. This is not a file that failed to decode, so the
+    # generic "add a binary suffix / commit it as UTF-8" advice printed for unreadable files is
+    # wrong for it in both halves, and an operator following it stays red with nothing to change.
+    # git C-quotes any path containing a quote, a backslash or a control byte REGARDLESS of
+    # `core.quotePath` (which governs non-ASCII only), and such a header cannot be reconstructed.
+    return _MARKER_SIGIL + (
+        f"<a 'diff --git' header this cannot resolve to one path, so nothing in that diff was "
+        f"attributed or scanned: {tail!r} - if the path contains a quote, a backslash or a "
+        f"control character, git C-quotes it and it cannot be read here: rename it, or review "
+        f"that commit by hand before pushing>")
 
 
 def _nul_content(path: str) -> str:
@@ -911,7 +951,7 @@ def parse_diff(diff: str) -> ParsedDiff:
     saw_header = False
     saw_hunk = False
     nul_seen: set[str] = set()
-    for line in diff.splitlines():
+    for line in _lines(diff):
         if line.startswith("diff --git "):
             saw_header = True
             path = _header_path(line[len("diff --git "):])
@@ -1118,8 +1158,32 @@ def commit_identity(root: Path, sha: str) -> list[tuple[str, str]]:
 
     NUL-separated rather than newline-separated: a name may legitimately contain almost anything
     except NUL, and a newline in a name would otherwise shift every following field by one.
+
+    ⛔⛔ `--no-show-signature` IS LOAD-BEARING, and leaving it off was a live false red. With
+    `log.showSignature=true` — an ordinary setting for anyone who signs commits — git prepends the
+    signature-VERIFICATION block to stdout, ahead of the `--format` output:
+
+        Good "git" signature with ED25519 key SHA256:...
+        Unable to open allowed keys file "C:/Users/<name>/.ssh/allowed_signers": ...
+        No principal matched.
+        <author name>\0<author email>\0<committer name>\0<committer email>
+
+    That text is glued onto the FIRST field, so a spotless commit was reported as publishing a
+    Windows profile path (from the key path in the warning) or a freemail address (from the
+    signer principal) in its "author name". The field count is still 4, so the guard below cannot
+    catch it — the response has the right SHAPE and the wrong CONTENT.
+
+    Both directions are wrong, which is why this is not cosmetic. The false red is unfixable by
+    the operator: the message says to rewrite history and correct `user.email`, and neither
+    touches the real cause. And in the other direction the fabricated text BURIES a genuine leak
+    in the author name among the signature output.
+
+    This is the same class as `_DIFF_CONFIG` — a setting on the developer's machine deciding the
+    guard's verdict — one call site over. It was previously dismissed here as "a separate call
+    site, and a separate issue" (#35) on a measurement taken against UNSIGNED commits, where the
+    setting is genuinely inert. Signing is what makes it bite.
     """
-    raw = _git(root, "show", "-s", f"--format={_IDENT_FORMAT}", sha)
+    raw = _git(root, "show", "-s", "--no-show-signature", f"--format={_IDENT_FORMAT}", sha)
     parts = raw.rstrip("\n").split("\0")
     if len(parts) != len(_IDENT_FIELDS):
         # ⚠️ NOT a silent `zip` truncation. `zip` stops at the shorter side, so a malformed or
@@ -1454,7 +1518,20 @@ def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
         if rel in submodules and not path.is_file():
             continue
         try:
-            text = path.read_text(encoding="utf-8")
+            # ⚠️ READ BYTES AND DECODE — do NOT use `read_text`, which applies UNIVERSAL NEWLINES
+            # and translates `\r\n` and a lone `\r` to `\n` BEFORE any splitting. That left
+            # `_lines` powerless here: the tree scan counted a CR-bearing file's lines differently
+            # from the range scan (raw bytes from git) and from `staged_text` (which decodes a
+            # blob and translates nothing) — three reads, three answers, for one file. Reading
+            # bytes makes all three agree instead of leaving one definition of "line" in `_lines`
+            # and a second hidden in the reader.
+            #
+            # ⚠️ NOT `read_text(newline="")` either: `Path.read_text` only accepts `newline` from
+            # Python 3.13, and CI pins 3.12, so that spelling raises TypeError on every file.
+            # The exceptions below are unchanged — `read_bytes` raises the same FileNotFoundError
+            # and OSError subclasses (a checked-out submodule is still IsADirectoryError /
+            # PermissionError), and `.decode` raises the same UnicodeDecodeError.
+            text = path.read_bytes().decode("utf-8")
         except FileNotFoundError:
             # ⚠️ NOT SILENT, and not `continue`. A tracked file missing from the worktree is
             # STAGED-BUT-DELETED (or mid-rebase): its content is still in the INDEX and still goes
@@ -1601,8 +1678,13 @@ def _scan_commits(root: Path, rev_range: str,
               f"scanned, so NOT CLEARED:")
         for u in result.unscannable:
             print("  " + _ascii(u))
-        print("Add a binary suffix to SKIP_SUFFIXES if that is what it is, or commit the "
-              "file as UTF-8 text.\n")
+        # ⚠️ THE ADVICE MUST MATCH THE CAUSE, and this one line covered two unrelated ones. For an
+        # UNPARSEABLE HEADER both halves of it are wrong — the file is neither binary nor
+        # mis-encoded — so it left the operator chasing a problem that does not exist. Each marker
+        # now CARRIES its own remediation (see `_unparsed_header` / `_nul_content`) rather than
+        # having this site try to recognise one after the sigil has been stripped for display.
+        print("For an ordinary path above: add a binary suffix to SKIP_SUFFIXES if that is what "
+              "it is, or commit the file as UTF-8 text.\n")
     if result.findings:
         # ⚠️ `_ascii` HERE TOO. This is the line that ANNOUNCES a real leak, and with a non-ASCII
         # branch name in `rev_range` it died mid-sentence under a hook's cp1252 stdout — the guard

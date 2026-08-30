@@ -381,10 +381,37 @@ def test_scan_added_passes_a_clean_line():
     assert _hits("abc", [("notes.md", 1, "/srv/data/example is fine")]) == []
 
 
-def test_binary_suffixes_are_skipped_exactly_as_the_tree_scan_skips_them():
-    """If the two scans disagree about which files count, one of them is lying about coverage."""
+def test_a_binary_SUFFIX_no_longer_hides_TEXT_from_the_range_scan():
+    """⭐ THIS TEST USED TO PIN THE DEFECT (keystone#22), and its old assertion is the change.
+
+    It required every `SKIP_SUFFIXES` name to swallow a leak in an ADDED LINE, on the reasoning
+    that the two scans must agree about which files count. They must — but they were agreeing on
+    the wrong answer: a file called `deploy-notes.pdf` holding an ordinary ASCII runbook was read
+    by neither, and `git add`ing a text file under a renamed extension defeated the whole guard.
+
+    A line ARRIVING HERE has already passed a content check stricter than any filename: git serves
+    a text diff only for a blob it judged to be text, and refuses one (`Binary files … differ`)
+    for anything else, which is the `unscannable` path below and still filtered by `_skipped`.
+    The suffix's job is to stop a wasted read, not to stop a scan.
+    """
     for suffix in guard.SKIP_SUFFIXES:
-        assert _hits("abc", [(f"assets/asset{suffix}", 1, _LEAK)]) == [], suffix
+        assert _hits("abc", [(f"assets/asset{suffix}", 1, _LEAK)]), (
+            f"a leak in a TEXT line was dropped because the file is named {suffix}")
+
+
+def test_a_binary_asset_is_still_not_REPORTED_as_unreadable_by_either_scan():
+    """The half that did not change, stated separately now that the two are separate questions.
+
+    An ordinary image git serves as a binary diff must not appear in the "not scanned, so NOT
+    CLEARED" list — reporting one on every run is the false-red that gets a guard switched off,
+    and it is what `_skipped` still exists for.
+    """
+    for suffix in guard.SKIP_SUFFIXES:
+        diff = (f"diff --git a/assets/asset{suffix} b/assets/asset{suffix}\n"
+                "new file mode 100644\n"
+                f"Binary files /dev/null and b/assets/asset{suffix} differ\n")
+        _, blind = guard.scan_added("abc", guard.parse_diff(diff), COMPILED)
+        assert blind == [], suffix
 
 
 def test_the_guards_own_source_is_skipped_in_range_mode_BY_EXACT_PATH_ONLY():
@@ -1254,21 +1281,31 @@ def test_a_CLEAN_non_ascii_revision_range_does_not_crash_either(tmp_path: Path) 
 
 @pytest.mark.timeout(300)
 def test_a_leak_STAGED_then_TIDIED_is_a_STATED_LIMIT_of_the_tree_scan(tmp_path: Path) -> None:
-    """⚠️ AN HONEST PIN OF A KNOWN GAP — not a claim that it is fine. Issue #33.
+    """⚠️ A PROPERTY OF THE TREE SCAN, pinned so it stays deliberate. Issue #33, now CLOSED.
 
     The tree scan reads the WORKTREE. Stage a leak, overwrite the file with a clean version and do
-    not re-stage: the index (and so the commit) still carries the leak, and this layer says clean.
+    not re-stage: the index (and so the commit) still carries the leak, and this layer says clean —
+    honestly, because the worktree really is clean. That is not a defect in the tree scan; it is
+    the answer to a different question.
 
-    Both halves are asserted, because the SECOND is what makes the gap tolerable: the `--range`
-    scan on the push path DOES catch it, so it cannot reach the remote through the hooks or CI.
+    ⭐ WHAT CHANGED, and why this test did NOT invert. An earlier version of this docstring
+    predicted that closing #33 would make the TREE scan exit 1. It did not: the fix was a THIRD
+    scan, `--staged`, which asks git what the commit will record, and `.githooks/pre-commit` runs
+    both. Making the tree scan read the index instead would have broken the tree scan's own job —
+    CI has nothing staged, so it would have had nothing to read.
 
-    ⛔ WHY THIS IS A PIN AND NOT A FIX. Two implementations that closed it were written and
-    removed: reading the staged blob per-file made the pre-commit hook take 78 s on a 1000-file
-    worktree, and reading it via `cat-file --batch` desynchronised on a gitlink (`:<path>` on a
-    submodule returns a COMMIT, whose body the parser must skip), mis-attributing one file's
-    content to another and exiting 0 on an unread staged leak — reachable by any repo with a
-    modified submodule. When #33 is done this test INVERTS: the tree scan should exit 1 and the
-    assertion below should be the thing that changes, deliberately and visibly.
+    All three layers are asserted below, because each covers what the others do not:
+      * the tree scan sees the whole tracked tree and says clean here — the premise;
+      * `--staged` sees the INDEX and catches it at COMMIT time — the fix for #33;
+      * `--range` sees what each commit ADDED and catches it on the PUSH path — the backstop that
+        kept this from ever reaching a remote while #33 was open.
+
+    ⛔ THE TWO SHAPES THAT WERE TRIED AND REMOVED stay recorded so they are not re-attempted:
+    reading the staged blob per-file made the pre-commit hook take 78 s on a 1000-file worktree,
+    and reading it via `cat-file --batch` desynchronised on a gitlink (`:<path>` on a submodule
+    returns a COMMIT, whose body the parser must skip), mis-attributing one file's content to
+    another and exiting 0 on an unread staged leak. `--staged` is neither: it is
+    `git diff --cached` through the existing, well-tested `parse_diff`.
     """
     repo = tmp_path / "stagedtidied"
     _init(repo)
@@ -1282,8 +1319,15 @@ def test_a_leak_STAGED_then_TIDIED_is_a_STATED_LIMIT_of_the_tree_scan(tmp_path: 
 
     tree = _run_guard(repo)
     assert tree.returncode == 0, (
-        f"the TREE scan now catches this — #33 has been implemented, so invert this test and "
-        f"delete the KNOWN LIMIT from the guard: {tree.stdout}")
+        f"the TREE scan now catches this — if that is deliberate, `--staged` is redundant and "
+        f"this test and the guard's KNOWN LIMITS both need rewriting: {tree.stdout}")
+
+    # ...the COMMIT-time layer catches it, which is what #33 asked for...
+    staged = _run_guard(repo, "--staged")
+    assert staged.returncode == 1, (
+        f"the --staged scan missed a leak that is in the INDEX — that is #33 reopened, and the "
+        f"pre-commit hook is back to clearing commits it never read: {staged.stdout}")
+    assert "cfg.txt" in staged.stdout, staged.stdout
 
     # ...and the layer that actually gates the remote DOES catch it.
     _git(repo, "commit", "-q", "-m", "publish the staged leak")
@@ -1523,14 +1567,21 @@ def test_the_self_exemption_follows_the_FILE_not_a_hardcoded_path(tmp_path: Path
     Copy the guard to a different path and run it: it scanned ITSELF (every synthetic deny case
     became a finding) while exempting an unrelated file at `scripts/…` — the exemption on the one
     file that does not need it, and gone from the one that does.
+
+    ⚠️ AN ORDINARY CLEAN FILE IS TRACKED ALONGSIDE IT, and it is not decoration. A tree whose ONLY
+    tracked file is the guard is a tree the scan reads NOTHING from, which the zero-scan floor
+    (keystone#22) now refuses rather than reports clean — correctly, since a scan that opened no
+    file cannot clear anything. Without the second file this test's exit code would be reporting
+    the floor rather than the self-exemption, which is the question it exists to ask.
     """
     repo = tmp_path / "moved"
     _init(repo)
+    (repo / "README.md").write_text("an ordinary clean file\n", encoding="utf-8")
     tools = repo / "tools"
     tools.mkdir()
     copied = tools / "check_no_internal_info.py"
     copied.write_bytes(_SCRIPT.read_bytes())
-    _git(repo, "add", "tools/check_no_internal_info.py")
+    _git(repo, "add", "README.md", "tools/check_no_internal_info.py")
 
     proc = subprocess.run([sys.executable, str(copied), "--repo", str(repo)],
                           capture_output=True, text=True, timeout=300)

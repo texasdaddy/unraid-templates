@@ -75,7 +75,12 @@ jobs:
             # carries that `main` has not already had reviewed. Fetch the base explicitly
             # rather than assuming checkout left a remote-tracking ref behind.
             git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
-            range="origin/main..$PUSH_HEAD"
+            # ⭐ `$GITHUB_REF` (refs/tags/<name>), NOT `$PUSH_HEAD`. The commits covered are the
+            # same either way, but the REF is what NAMES the tag object — and its name, its
+            # tagger and its message are published by this push. The guard scans a tag only when
+            # the range names it, so with the bare commit sha a tag cut at an already-merged
+            # commit resolved to zero commits and the whole tag object went unread.
+            range="origin/main..$GITHUB_REF"
           elif [ -z "$PUSH_BEFORE" ] || [ "$PUSH_BEFORE" = "$z40" ]; then
             # The branch was created by this push, so there is no previous tip. Scan the commit
             # itself rather than reporting clean — "I could not work out a range" must never be

@@ -26,17 +26,46 @@ if python3 -c "" >/dev/null 2>&1; then PY=python3; else PY=python; fi
 z40="0000000000000000000000000000000000000000"
 status=0
 
-while read -r _local_ref local_sha _remote_ref remote_sha; do
+while read -r local_ref local_sha remote_ref remote_sha; do
     # A branch DELETION pushes the null sha as the local side. Nothing is being published.
     [ "$local_sha" = "$z40" ] && continue
-    if [ "$remote_sha" = "$z40" ]; then
-        # A brand-new branch: there is no remote counterpart to diff against, so scan every
-        # commit on it that is not already on some other remote-tracking ref. Without this a
-        # first push — the most likely moment for a leak — would scan zero commits.
-        range="$local_sha --not --remotes"
-    else
-        range="$remote_sha..$local_sha"
-    fi
+    # ⚠️ `$remote_ref` DECIDES WHETHER THIS IS A TAG PUSH — it is what lands on the remote, and a
+    # refspec may rename (`git push origin clean:refs/tags/v1`). The RANGE is still built from
+    # `$local_ref`, because that is what names an object in THIS clone.
+    #
+    # ⛔ THE NAME IS NOT SCANNED AS A NAME, and that is a deliberate revert — see issue #49. A
+    # version of this passed both names to the guard so a leaking ref NAME could not be published
+    # under a clean local one; it produced a production bypass in three consecutive verification
+    # rounds and was withdrawn as beyond this package's scope.
+    #
+    # ⚠️ AN ANNOTATED TAG'S NAME IS STILL READ — INCIDENTALLY. `git cat-file tag` emits a
+    # `tag <name>` header inside the object, and the guard scans the whole object, so an annotated
+    # tag called after a host IS caught. What is unread is a name with no object behind it: a
+    # LIGHTWEIGHT tag, or a BRANCH. #49 carries the repros.
+    case "$remote_ref" in
+        refs/tags/*)
+            # ⭐ A TAG PUSH IS SCANNED BY REF, NOT BY WHAT ITS COMMIT REACHES, and the difference
+            # is the whole reason this branch exists. Cutting a tag at an already-pushed commit is
+            # the ordinary release gesture, and there `<sha> --not --remotes` resolves to ZERO
+            # commits — so the tag's own object, tagger and message reached the remote with the
+            # guard printing "no internal info added across 0 commit(s)" and exiting 0. Passing the
+            # LOCAL ref name in the range is what puts the tag OBJECT in front of the guard.
+            range="$local_ref --not --remotes"
+            ;;
+        *)
+            if [ "$remote_sha" = "$z40" ]; then
+                # A brand-new branch: there is no remote counterpart to diff against, so scan every
+                # commit on it that is not already on some other remote-tracking ref. Without this a
+                # first push — the most likely moment for a leak — would scan zero commits.
+                range="$local_sha --not --remotes"
+            else
+                range="$remote_sha..$local_sha"
+            fi
+            # ⚠️ A BRANCH PUSH SENDS NO TAGS (only --tags / --follow-tags do), and the range names
+            # none, so the guard scans none. That is deliberate: scanning every local tag here
+            # blocked ordinary branch pushes on a private `wip` tag that was never being sent.
+            ;;
+    esac
     "$PY" scripts/check_no_internal_info.py --range "$range" || status=1
 done
 

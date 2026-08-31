@@ -80,21 +80,20 @@ KNOWN LIMITS (state them; do not pretend to coverage)
         real false positive (issue #32). The right bound rejects a following LABEL, and `*` is not
         one. Not repaired here because the repair touches the frozen pattern above; pinned as
         known behaviour by a test so it is discoverable rather than folklore.
-      * ⭐ THE TREE SCAN READS THE WORKTREE, so a leak that is STAGED and then tidied in the
-        worktree without re-staging is not seen by THIS layer: `git add cfg.txt` while it holds a
-        leak, then overwrite cfg.txt with a clean version and do not re-stage. The index — and so
-        the commit — still carries the leak. The `--range` scan on the push path DOES catch it, so
-        it cannot reach the remote through the hooks or CI; the gap is that the pre-commit layer
-        on its own says clean. Issue #33.
-        A version that also read the staged blob was written and then REMOVED, twice over: reading
-        it per-file made the pre-commit hook take 78 s on a 1000-file worktree, and reading it in
-        one `cat-file --batch` DESYNCHRONISED on a gitlink — `:<path>` on a submodule returns a
-        COMMIT object, whose body the parser must skip — which mis-attributed one file's content
-        to another and could exit 0 on an unread staged leak. Any repository with a modified
-        submodule reaches that. The right shape is almost certainly
-        `git diff --cached --unified=0` fed through the existing, well-tested `parse_diff`, which
-        asks exactly "what will this commit ADD" and needs no new protocol parser. Until that
-        lands this is a stated limit, not a claim — see #33.
+      * THE TREE SCAN READS THE WORKTREE, and that is still true — but it is no longer a GAP,
+        because it is no longer the only thing the commit-time layer runs. `git add cfg.txt` while
+        it holds a leak, then overwrite cfg.txt with a clean version and do not re-stage: the tree
+        scan is honestly clean and the index — and so the commit — still carries the leak (issue
+        #33). `--staged` is the scan that answers the index's question, and `.githooks/pre-commit`
+        runs both. The two shapes tried and REMOVED before it stay recorded so they are not
+        re-attempted: reading each staged blob made the hook take 78 s on a 1000-file worktree,
+        and one `cat-file --batch` DESYNCHRONISED on a gitlink — `:<path>` on a submodule returns
+        a COMMIT object whose body the parser must skip — mis-attributing one file's content to
+        another and exiting 0 on a staged leak it never read. `--staged` is neither: it is
+        `git diff --cached --unified=0` through the existing, well-tested `parse_diff`.
+        ⚠️ WHAT REMAINS, stated rather than claimed away: `--staged` sees what the commit ADDS
+        relative to HEAD. A leak already present in HEAD is not "staged" and is not reported by
+        it — that is the tree scan's question, which is why both still run.
       * A CUSTOM Unraid pool name (`/mnt/tank`, `/mnt/nvme`) has no shape here — the pool list is
         a fixed set of stock names. Widening to `/mnt/[\w-]+/` would fire on ordinary container
         paths. Custom names are the project-side guard's job.
@@ -131,9 +130,31 @@ WHY --range EXISTS (the working-tree scan is not enough)
          file's first commit adds every one of its lines. It is the layer that actually closes
          this, which is why it runs on the push path and in CI rather than only locally.
 
+WHAT A SCAN LOOKS AT (five surfaces, not one)
+    A push publishes a commit OBJECT, and every field of it is permanent. The scans read:
+      * FILE CONTENT — the tracked worktree, the index, and the lines each commit adds;
+      * FILE PATHS — a leak in a filename or a directory name is published on every file listing
+        and in every clone, and was read by nothing at all until keystone#20;
+      * COMMIT IDENTITY — author and committer name/email;
+      * COMMIT MESSAGES — subject and body, rendered on every commit page (keystone#21 / #39);
+      * ANNOTATED TAGS the push NAMES — the whole tag OBJECT, which carries the tag's name, its
+        tagger and its message together. Scoped by the REF being pushed, not by what its commit
+        reaches: a tag cut at an already-pushed commit is the ordinary release gesture and covers
+        zero new commits, while a purely local scratch tag must not block a branch push that never
+        sends it.
+        ⚠️ A LIGHTWEIGHT tag has no object, so a leak that exists only as a ref NAME — a
+        lightweight tag, or a branch called after a host — is read by NO layer. That is issue #49,
+        and it is a deliberate revert rather than an omission; `refs_being_published` carries the
+        reasoning and the three designs that failed.
+    Three of the last four can be removed only by rewriting history, which is why they belong on
+    the same push-path gate as a leaked line rather than in a checklist. A TAG is the exception —
+    it is a ref, and `git tag -d` plus `git push --delete` clears it — but it is still published,
+    and catching it before it goes out is still cheaper than after.
+
 USAGE
     python scripts/check_no_internal_info.py            # scan tracked files, exit 1 on a hit
     python scripts/check_no_internal_info.py --selftest # prove the patterns still bite
+    python scripts/check_no_internal_info.py --staged   # scan the INDEX - what a commit records
     python scripts/check_no_internal_info.py --range origin/main..HEAD  # scan the COMMITS
 
     As a pre-commit + pre-push hook (one-time, per clone):
@@ -283,10 +304,88 @@ PATTERNS: list[tuple[str, str]] = [
     #     prefix to anchor on it fires inside ordinary escaped text.
     #   * percent-encoded separators (`C:%5CUsers%5Coperator`) are not matched — the same
     #     encoding limit the docstring already declares for base64 and percent-encoding.
+    #
+    # ⚠️ `runneradmin` IS IN THE EXCLUSION LIST FOR THE SAME REASON THE FOUR BUILT-INS ARE: it is
+    # the GitHub-hosted Windows runner's account, it names nobody, and it turns up in ordinary CI
+    # output — a workflow log, a stack trace, a commit message describing a CI fix. Once commit
+    # MESSAGES became a scanned surface it produced a false red on exactly that
+    # ("ci: fix path handling for C:\\Users\\runneradmin\\AppData\\Local\\Temp"), which is a red
+    # nobody can clear without rewriting an already-reviewed commit. Same class as the built-ins,
+    # same carve-out, one more spelling.
     ("windows profile path",
      r"(?<![\w])(?:[A-Za-z]:|/mnt/[a-z]|%\w+%)[\\/]+Users[\\/]+"
-     r"(?!(?:Public|Default|Default User|All Users)(?![\w.-]))[\w.-]+"),
+     r"(?!(?:Public|Default|Default User|All Users|runneradmin)(?![\w.-]))[\w.-]+"),
 ]
+
+# ⭐⭐ THE DENYLIST ABOVE IS WRITTEN FOR FILE CONTENT, AND TWO OF THE FIVE SURFACES ARE NOT CONTENT.
+# A repo-relative PATH and a free-prose COMMIT MESSAGE have different grammar from a line of code,
+# and three of the patterns rely on bounds that only hold in the grammar they were written for.
+# Applied verbatim they reddened trees that leak nothing — measured, all of these:
+#
+#   * `zshrc.local`, `vimrc.local`, `gitconfig.local`, `tmux.conf.local`, `Makefile.local`,
+#     `packages/app.local/` — the standard machine-local-override convention. `private lan domain`
+#     rejects a following LABEL (`settings.local.json` passes) but a `/` or end-of-string satisfies
+#     its bound, which is exactly what a segment-terminal `.local` filename is. A dotfiles repo
+#     became permanently red, and `git commit` was refused.
+#   * `db/migrations/<uuid>.sql`, `test/fixtures/<uuid>.json`, `cassettes/<uuid>.yml` — a UUID
+#     FILENAME is a naming convention. The pattern exists for a Cloudflare policy or tenant id,
+#     which is a value written INSIDE a file, and the content scan still catches it there.
+#   * `docs/mnt/user/notes.md` — a repo-relative path can never BE an absolute pool path. The
+#     pattern can only match one directory deep, where it means a doc or fixture tree, not an
+#     estate's storage layout.
+#   * a commit message naming `config.local`, one citing `printer.local` as an mDNS example, one
+#     quoting a fixture UUID. Worse than an ordinary false red: a message cannot be edited without
+#     rewriting history, and a push is blocked over commits the pusher did not write.
+#
+# So each surface gets an explicit, documented override set. `None` REMOVES a pattern from that
+# surface; a string REPLACES its regex. Nothing is loosened for file content, which is the surface
+# the bounds were designed for and where they are correct.
+#
+# ⛔ THIS IS NOT A BLANKET SKIP, and the difference matters: every removal below is a pattern whose
+# SHAPE cannot occur meaningfully on that surface, never a decision to look away from a place a
+# leak can hide. The `.lan` half of `private lan domain` is KEPT on both surfaces, because
+# `<host>.lan` has no filename convention behind it and is the exact shape the path scan exists
+# for (`docs/<host>.lan/`, `<host>.lan.conf`).
+_LAN_ONLY = r"(?<![\w-])[\w-]+\.lan(?![\w-])"
+
+# ⭐ THE RIGHT BOUND IS `(?![\w-])`, DELIBERATELY WIDER THAN THE CONTENT PATTERN'S `(?![\w.-])`.
+# Content must reject a following dot so `settings.local.json` passes; with `.local` gone there is
+# nothing left for a following dot to protect, so allowing one CLOSES two cases the content
+# pattern is documented to miss: the filename `<host>.lan.conf`, and the sentence-final
+# `deployed from <host>.lan.` in a commit message.
+PATH_PATTERN_OVERRIDES: dict[str, str | None] = {
+    "private lan domain": _LAN_ONLY,
+    "unraid pool path": None,
+    "uuid (access policy / tenant id)": None,
+}
+# ⛔ AND THE POOL PATH IS LEFT-BOUNDED ON THIS SURFACE. The content pattern needs only a LEADING
+# SLASH, which any nested repo-relative path supplies — so a commit message that merely NAMED one
+# of the paths `_MUST_PASS_PATHS` blesses ("docs: add docs/mnt/user/notes.md") blocked the push,
+# while the file and its filename both passed. That is the same defect corrected on the path
+# surface, one dict down. Requiring that nothing path-like precede `/mnt/` keeps the real case —
+# "moved appdata to /mnt/user/appdata/svc" — and drops the mention of a repo path.
+# ⚠️ THE BOUND REJECTS `[\w.-]`, AND DELIBERATELY NOT `/`. Excluding `/` as well looked tidier and
+# cost a real catch: `file:///mnt/user/...` and a bare `//mnt/user/...` are ABSOLUTE pool paths, and
+# the character before them is a slash. What the bound is actually for is a path SEGMENT
+# continuation — `docs/mnt/user/notes.md`, where the preceding character is a word character.
+# (`host/mnt/user/...` is genuinely indistinguishable from `docs/mnt/user/...` and stays missed;
+# that ambiguity is irreducible in text and is stated rather than papered over.)
+_ABS_POOL_PATH = r"(?<![\w.-])/mnt/(?:apps|user|cache|remotes|disks|disk\d+)\b"
+
+MESSAGE_PATTERN_OVERRIDES: dict[str, str | None] = {
+    "private lan domain": _LAN_ONLY,
+    "unraid pool path": _ABS_POOL_PATH,
+    "uuid (access policy / tenant id)": None,
+}
+
+# ⚠️ WHAT THE OVERRIDES REMOVE, STATED IN FULL — because this file's own KNOWN LIMITS block exists
+# precisely because three pattern comments once said "stated in KNOWN LIMITS" while that section
+# did not in fact state them. Beyond the two whole patterns dropped from paths, `_LAN_ONLY` drops
+# a THIRD thing on BOTH new surfaces: the `.local` half of `private lan domain`. So a genuine mDNS
+# host — `printer-b.local` — is NOT caught in a filename, a directory name, a commit message or a
+# tag. That is deliberate and it is not separable: `zshrc.local` and `printer-b.local` are the same
+# string shape, and the corpora require the first to pass. It is caught in file CONTENT, which is
+# where such a host is actually configured. Do not read the surviving LABEL as coverage.
 
 # Per-PATH exemptions for a single pattern, as (pattern label, path regex).
 #
@@ -414,6 +513,21 @@ ALLOW_SPANS: tuple[str, ...] = (
 
 # Text-bearing formats are NEVER skipped — an SVG is XML and carries <title>/<desc>/href, and
 # the leak an earlier batch removed was literally an icon URL inside one.
+#
+# ⭐ THIS IS A HINT ABOUT WHERE NOT TO WASTE A READ, NOT AN EXEMPTION (keystone#22). It was the
+# latter, and a file named `deploy-notes.pdf` holding an ordinary ASCII runbook — a LAN host, an
+# appdata path and an RFC1918 address, all in plain text — was therefore read by NEITHER scan and
+# exited 0. Renaming a text file must not defeat a guard. What each scan does now:
+#   * the tree scan asks `_looks_binary` of the BYTES and only skips if they really are binary;
+#   * the range scan scans added lines regardless of suffix — git already refused a text diff for
+#     anything it judged binary, which is a content check stricter than any filename.
+# What the list still earns, stated per scan rather than rounded up to "both". In the RANGE and
+# `--staged` scans it stops a 100 MB `.png` being re-diffed with `--text`, and it stops an ordinary
+# image being REPORTED as "unreadable, so not cleared". In the TREE scan it does neither: that scan
+# reads every tracked file's bytes before deciding anything, so the suffix only chooses which
+# QUESTION is asked of them (`_looks_binary`, or the #242 NUL refusal). Reading an asset in full on
+# every tree scan is a real cost the suffix used to avoid; it is a slowdown, not a defect, and
+# batching it is left as its own change rather than smuggled in here.
 SKIP_SUFFIXES = (".png", ".jpg", ".jpeg", ".ico", ".gif", ".pdf", ".zip", ".gz",
                  ".woff", ".woff2", ".ttf", ".db", ".sqlite")
 
@@ -460,9 +574,11 @@ def _self_rel_path(root: Path | None = None) -> str:
     the guard is run from; the constant stays as the fallback for an exotic loader with no
     resolvable path, and for the project-side guard, which reads it to know what NOT to skip.
 
-    ⚡ CACHED: `_skipped` calls this once per tracked file, and each call makes two
+    ⚡ CACHED: `_is_self` calls this once per tracked file, and each call makes two
     `Path.resolve()` syscalls — ~1.7 ms per file against ~0.8 us for a constant compare, so a
-    large repository would pay seconds for an answer that cannot change during a run.
+    large repository would pay seconds for an answer that cannot change during a run. (This used
+    to name `_skipped` as the per-file caller. `_skipped` is not called by the tree scan at all;
+    the caching is still right, the named caller was not.)
     """
     if root is None:
         return SELF_PATH
@@ -472,14 +588,79 @@ def _self_rel_path(root: Path | None = None) -> str:
         return SELF_PATH
 
 
-def _skipped(rel_path: str, root: Path | None = None) -> bool:
-    """Files BOTH scans decline to read: known binary suffixes, and this scanner's own source.
+def _is_self(rel_path: str, root: Path | None = None) -> bool:
+    """Is this the scanner's own source? The ONE file whose CONTENT no scan reads.
 
-    Shared on purpose. If the two scans disagreed about which files count, one of them would be
-    lying about its coverage — which is why `root` is threaded all the way through the range scan
-    as well, rather than the tree scan alone getting the resolved answer.
+    ⛔ THE ONLY UNCONDITIONAL CONTENT EXEMPTION IN THIS FILE, and it is deliberately separate from
+    the binary-suffix question now. They used to be one predicate (`_skipped`) answering two very
+    different questions: "this file carries synthetic deny cases by design" versus "this file is
+    probably an image, so reading it is pointless". The second is a GUESS FROM A FILENAME, and
+    treating a guess as an exemption is what let an ASCII leak in a file named `.pdf` walk past
+    both scans (keystone#22). One is a fact about a known path; the other is a prediction, and a
+    prediction now has to be CHECKED against the bytes — see `_looks_binary`.
+
+    This exempts the file's CONTENT only. Its PATH is scanned like every other path (`scan_path`):
+    renaming this guard to something that names the estate is a leak whatever the file contains.
     """
-    return rel_path.lower().endswith(SKIP_SUFFIXES) or rel_path == _self_rel_path(root)
+    return rel_path == _self_rel_path(root)
+
+
+def _binary_suffix(rel_path: str) -> bool:
+    """Does the NAME claim this is a binary asset? A HINT, never a verdict — see `_looks_binary`."""
+    return rel_path.lower().endswith(SKIP_SUFFIXES)
+
+
+def _skipped(rel_path: str, root: Path | None = None) -> bool:
+    """Files neither scan will REPORT AS UNREADABLE: declared binary assets, and this own source.
+
+    ⚠️ WHAT THIS STILL DOES, AND WHAT IT NO LONGER DOES. It still answers "is it pointless to
+    complain that this file could not be decoded" — a `.png` git serves as a binary diff, or a
+    blob the range scan would otherwise re-diff byte by byte. It is NO LONGER the gate on whether
+    CONTENT gets scanned: a skipped suffix whose bytes turn out to be text is now scanned by both
+    scans (`_looks_binary` in the tree scan; `scan_added` no longer filtering added lines by
+    suffix). The suffix list stops the guard WASTING a read; it no longer stops it LOOKING at text.
+
+    ⚠️ WHERE IT IS ACTUALLY CALLED, stated because the previous version of this docstring named the
+    wrong callers and rested an argument on them. Its call sites are `resolve_unscannable` and
+    `scan_added` — the RANGE scan and the `--staged` scan. **The tree scan does not call it at
+    all**: it asks `_is_self` and `_binary_suffix` directly, because it holds the bytes and can ask
+    the better question. So the read-avoidance above is real in `resolve_unscannable` (where it
+    stops a 100 MB `.png` being re-diffed) and is NOT true of the tree scan, which reads every
+    tracked file before deciding anything.
+
+    `root` is threaded through the range scan for the same reason the tree scan resolves it: the
+    self-exemption has to land on THIS file wherever the guard is run from.
+    """
+    return _binary_suffix(rel_path) or _is_self(rel_path, root)
+
+
+def _looks_binary(data: bytes) -> bool:
+    """Is this blob genuinely not UTF-8 TEXT? Asked of the BYTES, never of the filename.
+
+    ⭐ THIS IS THE HALF THAT MAKES `SKIP_SUFFIXES` SAFE (keystone#22). The suffix list used to be
+    trusted outright, so `deploy-notes.pdf` holding an ordinary ASCII runbook — a LAN host, an
+    appdata path and an RFC1918 address, all in plain text — was read by neither scan and exited
+    0. Renaming a text file must not be a way to defeat a guard.
+
+    TWO tests. The NUL one comes first because it is what git itself uses to call a blob binary,
+    and because it is the cheap answer for every real image:
+      * a NUL byte anywhere — no legitimate UTF-8 source contains one;
+      * it does not decode as UTF-8 at all — a real PNG/JPEG/PDF stream, a latin-1 file.
+
+    ⚠️ SCOPED, deliberately: this is consulted ONLY for a path whose suffix already claims to be
+    binary. A NUL-bearing blob at such a path is skipped SILENTLY, where a NUL-bearing blob at any
+    other path is REFUSED and reported (the #242 BOM-less-UTF-16 posture, unchanged). So a UTF-16
+    payload hidden in a file named `.pdf` is still not read — exactly as before this change,
+    no better and no worse. Widening that means re-litigating which suffixes are assets, which is
+    issue #38's design call and not this one's.
+    """
+    if b"\x00" in data:
+        return True
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    return False
 
 
 def gitlinks(root: Path) -> set[str]:
@@ -518,6 +699,37 @@ def compile_patterns() -> list[tuple[str, re.Pattern[str]]]:
     the tests exercise what ships.
     """
     return [(label, re.compile(rx, re.IGNORECASE)) for label, rx in PATTERNS]
+
+
+def compile_for(overrides: dict[str, str | None]) -> list[tuple[str, re.Pattern[str]]]:
+    """`compile_patterns()` with a surface's overrides applied — see PATH_PATTERN_OVERRIDES.
+
+    ⛔ DERIVED FROM `PATTERNS`, never a second hand-written list. A parallel copy would drift the
+    moment a pattern is added, and the drift would be SILENT and in the fail-open direction: the
+    new pattern would simply never reach the path or message surface. Deriving it means a pattern
+    added tomorrow applies everywhere unless someone writes down an override and says why.
+
+    ⚠️ AN OVERRIDE KEY THAT NAMES NO PATTERN IS AN ERROR, not a no-op. A renamed label would
+    otherwise leave the override silently inert — the content bound would come back on a surface
+    it was measured to false-red, and nothing would say so.
+    """
+    known = {label for label, _ in PATTERNS}
+    unknown = set(overrides) - known
+    if unknown:
+        raise ValueError(
+            f"override(s) naming no pattern: {sorted(unknown)} - a renamed label would leave the "
+            f"override inert, so this is an error rather than a silent no-op")
+    # ⛔ AN EMPTY STRING IS THE SAME SILENT INERTNESS, one step further in. `"" or rx` falls back
+    # to the CONTENT pattern, so spelling an override `""` — a plausible way to write "disable
+    # this" — quietly restored the exact bound the surface was measured to false-red on, and
+    # nothing said so. Use `None` to remove a pattern; there is no third meaning.
+    empty = sorted(k for k, v in overrides.items() if v is not None and not v)
+    if empty:
+        raise ValueError(
+            f"empty override(s) for {empty} - an empty pattern silently falls back to the content "
+            f"one. Use None to REMOVE a pattern from this surface")
+    return [(label, re.compile(overrides.get(label, rx) or rx, re.IGNORECASE))
+            for label, rx in PATTERNS if overrides.get(label, rx) is not None]
 
 
 def _exempt(label: str, rel_path: str) -> bool:
@@ -683,6 +895,62 @@ def scan_text(text: str, compiled: list[tuple[str, re.Pattern[str]]],
                 hits.append((lineno, label, m.group(0)))
                 break
     return hits
+
+
+@functools.cache
+def path_patterns() -> tuple[tuple[str, re.Pattern[str]], ...]:
+    """The denylist as it applies to a PATH. See PATH_PATTERN_OVERRIDES for why it differs."""
+    return tuple(compile_for(PATH_PATTERN_OVERRIDES))
+
+
+@functools.cache
+def message_patterns() -> tuple[tuple[str, re.Pattern[str]], ...]:
+    """The denylist as it applies to a commit MESSAGE or a TAG object."""
+    return tuple(compile_for(MESSAGE_PATTERN_OVERRIDES))
+
+
+def scan_path(rel_path: str) -> list[tuple[str, str]]:
+    """(label, matched text) for every hit in a repo-relative PATH STRING.
+
+    ⛔ TAKES NO `compiled` ARGUMENT, deliberately. Handing this function the CONTENT pattern set is
+    exactly the defect that made it redden `zshrc.local`, `db/migrations/<uuid>.sql` and
+    `docs/mnt/user/notes.md`, and an optional parameter is an invitation to reintroduce it. There
+    is one correct pattern set for a path; it is derived from `PATTERNS` by `compile_for`, so a
+    pattern added tomorrow reaches this surface unless someone writes an override and says why.
+
+    ⭐ A PATH IS PUBLISHED CONTENT (keystone#20). Neither scan looked at one: the tree scan read
+    `git ls-files` only to open the file, and the range scan read a path only to decide what to
+    skip. So a tracked `192.168.77.77.conf`, or a `docs/<host>.lan-runbook/` directory, reached a
+    public remote with BOTH scans exiting 0 on perfectly clean file contents. A filename is
+    rendered on every GitHub file listing and in every clone; it is not metadata the guard may
+    look past.
+
+    ⚠️ THE SAME PATTERNS AND THE SAME ALLOWLIST, via `scan_text`, rather than a second matcher.
+    Two matchers would drift, and the allow-spans are needed here for real: `.env.local` is a
+    FILENAME containing a `private lan domain` match by construction, and `config.local.yml` and
+    `.claude/settings.local.json` are ordinary paths in ordinary repositories. They pass for the
+    same structural reason they pass as file content, which is the property worth having — one
+    definition of "permitted", not two that agree today.
+
+    ⛔ NO SELF-EXEMPTION AND NO SUFFIX SKIP HERE. `_is_self` and `_binary_suffix` are about
+    READING a file; nothing about `icons/` or about this scanner's own source makes its NAME
+    exempt. A path is a short string, so scanning every one of them costs nothing.
+
+    KNOWN LIMITS OF THIS SURFACE, stated rather than implied (see `_MUST_PASS_PATHS` /
+    `_MUST_FAIL_PATHS`, which `selftest` runs):
+      * `<host>.lan-runbook/` is NOT matched — the `.lan` bound rejects a following hyphen, and
+        loosening it would fire on ordinary hyphenated names.
+      * A four-component VERSION directory in the `10.` range (`docs/10.0.0.1/`) IS matched, and
+        that is a known over-match: `10.0.0.1` as a version and as an address are the same string.
+        `192.168.*` and `172.16-31.*` have no such collision. Rename the directory, or add the
+        literal to `ALLOW_LITERALS`.
+      * `uuid` and `unraid pool path` do not apply here at all — see PATH_PATTERN_OVERRIDES.
+
+    Line numbers are dropped: a path is one line by construction, and reporting `:1` on every
+    finding would read as a line inside the file, which is exactly what this is not.
+    """
+    return [(label, match)
+            for _, label, match in scan_text(rel_path, list(path_patterns()), rel_path)]
 
 
 # --------------------------------------------------------------- scanning the COMMITS
@@ -1055,6 +1323,45 @@ def parse_diff(diff: str) -> ParsedDiff:
     return ParsedDiff(added, unscannable)
 
 
+def first_parent(root: Path, sha: str) -> str:
+    """`<sha>^`, or the empty tree for a root commit.
+
+    Extracted because TWO callers need it — `added_lines` and `changed_paths` — and they must
+    diff against the same base or they would disagree about what one commit contributed.
+    """
+    try:
+        return _git(root, "rev-parse", "--verify", f"{sha}^").strip() or _EMPTY_TREE
+    except subprocess.CalledProcessError:
+        return _EMPTY_TREE  # the root commit has no parent
+
+
+def changed_paths(root: Path, *revs: str) -> list[str]:
+    """New-side paths a diff introduces or modifies — DELETIONS EXCLUDED.
+
+    ⭐ `--name-only -z`, NOT the paths `parse_diff` derives from the `diff --git` header. That is
+    two sources for one fact only in appearance: they answer different questions and one of them
+    is byte-exact. `-z` makes git emit RAW, NUL-terminated paths, so the entire C-quoting class
+    (issue #37 — a path holding a quote, a backslash or a control byte, which the header form
+    cannot reconstruct at all) simply does not arise here. A path scan built on the header would
+    have inherited that gap on day one.
+
+    ⛔ `--diff-filter=d` — A DELETION PUBLISHES NOTHING NEW, and its path was already published by
+    whichever commit added it. Reporting it would make the commit that REMOVES a badly-named file
+    fail forever, which is the same trap the removed-lines rule avoids: a guard that punishes
+    cleanup gets switched off. Modified paths ARE included: re-scanning a path is the safe
+    direction to be wrong in, and a guard may re-scan where it may not skip.
+    """
+    out = _git(root, *_DIFF_CONFIG, "diff", *_DIFF_FLAGS, "--name-only", "-z",
+               "--diff-filter=d", *revs)
+    return [p for p in out.split("\0") if p]
+
+
+def scan_paths(shown: str, paths: list[str]) -> list[str]:
+    """Findings in a set of PATH strings, labelled so they read as paths and not as file lines."""
+    return [f"{shown}<path> {rel}: {label}: {match!r}"
+            for rel in paths for label, match in scan_path(rel)]
+
+
 def added_lines(root: Path, sha: str) -> ParsedDiff:
     """`parse_diff` over this commit's diff against its FIRST parent, then RESOLVE the paths git
     served as binary by actually reading them.
@@ -1083,11 +1390,20 @@ def added_lines(root: Path, sha: str) -> ParsedDiff:
 
     Skipped suffixes are filtered FIRST, so a 100 MB `.png` is never fetched only to be discarded.
     """
-    try:
-        parent = _git(root, "rev-parse", "--verify", f"{sha}^").strip() or _EMPTY_TREE
-    except subprocess.CalledProcessError:
-        parent = _EMPTY_TREE  # the root commit has no parent
+    parent = first_parent(root, sha)
     parsed = parse_diff(_git(root, *_DIFF_CONFIG, "diff", *_DIFF_FLAGS, parent, sha))
+    return resolve_unscannable(root, parsed, (parent, sha))
+
+
+def resolve_unscannable(root: Path, parsed: ParsedDiff, revs: tuple[str, ...]) -> ParsedDiff:
+    """Re-diff with `--text` whatever git served as binary, and keep whatever still cannot be read.
+
+    ⭐ EXTRACTED SO `--staged` GETS IT TOO. This was inline in `added_lines`, so the range scan
+    resolved a `.gitattributes`-marked lockfile correctly while the new index scan would have
+    REPORTED the same ordinary file as "not scanned, so NOT CLEARED" and blocked the commit — a
+    false red on correct work, in the layer a developer meets most often. One implementation, both
+    callers; `revs` is what distinguishes them (`(parent, sha)` versus `("--cached", base)`).
+    """
     # ⚠️ A MARKER IS NOT A PATH and must never reach a pathspec — it is already the final answer.
     # Feeding one to the re-diff below would match nothing, git would exit 0 with empty output,
     # and the run would clear a diff it could not read at all.
@@ -1112,7 +1428,7 @@ def added_lines(root: Path, sha: str) -> ParsedDiff:
             # nothing, and "matches nothing" is the exact state that reads as clean below.
             raw = subprocess.run(
                 ["git", *_DIFF_CONFIG, "diff", *_DIFF_FLAGS, "--text",
-                 parent, sha, "--", f":(literal){path}"],
+                 *revs, "--", f":(literal){path}"],
                 cwd=root, capture_output=True, check=True, timeout=_GIT_TIMEOUT_S).stdout
             text = raw.decode("utf-8")
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, UnicodeDecodeError):
@@ -1145,11 +1461,24 @@ def added_lines(root: Path, sha: str) -> ParsedDiff:
 
 def scan_added(sha: str, parsed: ParsedDiff, compiled: list[tuple[str, re.Pattern[str]]],
                root: Path | None = None) -> tuple[list[str], list[str]]:
-    """(findings, unscannable) for one commit. Skips the same files the tree scan skips, or the
-    two scans would disagree about what this repository contains."""
+    """(findings, unscannable) for one commit.
+
+    ⚠️ THIS NO LONGER SKIPS "the same files the tree scan skips", and the old summary line saying
+    so was left in place while the paragraph below contradicted it. What the two scans share is the
+    RULE — content decides, not the filename — not an identical file list: the tree scan asks
+    `_looks_binary` of bytes it has, and this asks nothing, because git already refused to serve a
+    text diff for a blob it judged binary. Same answer, reached from what each scan can see.
+
+    ⭐ `_is_self`, NOT `_skipped`, ON THE ADDED LINES (keystone#22). git only serves a TEXT diff
+    for a blob it judged to be text, so lines arriving here have already passed a content check
+    stricter than any filename — and dropping them because the file is called `.pdf` is the
+    filename-trust half of #22 on the range side. The tree scan's twin is `_looks_binary`. The
+    `unscannable` list below still uses `_skipped`: that one is about not complaining that a
+    genuine `.png` could not be decoded, which is a question about assets, not about text.
+    """
     findings: list[str] = []
     for path, lineno, content in parsed.added:
-        if _skipped(path, root):
+        if _is_self(path, root):
             continue
         for _, label, match in scan_text(content, compiled, path):
             findings.append(f"{sha[:10]} {_shown(path)}:{lineno}: {label}: {match!r}")
@@ -1232,6 +1561,140 @@ def scan_identity(sha: str, ident: list[tuple[str, str]],
     return findings
 
 
+# ------------------------------------------------------- the COMMIT'S OWN message, and TAGS
+# ⭐ A COMMIT PUBLISHES ITS MESSAGE (keystone#21 / #39). The range scan read the commit's IDENTITY
+# and its DIFF and nothing else, so a leak written into a commit BODY — "deployed from <host>.lan,
+# policy <uuid>" — was published by `git push`, rendered on the commit page, and both scans exited
+# 0. It is exactly as permanent as a leaked line and costs the same history rewrite to remove,
+# which is why it belongs on this gate rather than in a checklist.
+#
+# ⛔ A SEPARATE CALL, NOT A FIFTH `_IDENT_FORMAT` FIELD. `%B` is multi-line, and `commit_identity`
+# fails CLOSED on a field count that is not exactly four — appending it would make every commit
+# with a two-line message raise "refusing to report on an identity that was not fully read".
+# The identity read stays NUL-delimited and exact; the message is read on its own.
+
+
+_MESSAGE_FORMAT = "%B"
+
+
+def commit_message(root: Path, sha: str) -> str:
+    """This commit's full message, subject and body.
+
+    `--no-show-signature` for the same reason `commit_identity` passes it: with
+    `log.showSignature=true` git prepends the signature-verification block to stdout, and that
+    text carries a key path (`C:/Users/<name>/.ssh/allowed_signers`) and a signer principal —
+    a FABRICATED finding attributed to a commit message that is in fact clean.
+    """
+    return _git(root, "show", "-s", "--no-show-signature", f"--format={_MESSAGE_FORMAT}", sha)
+
+
+def scan_message(sha: str, message: str) -> list[str]:
+    """Findings in a commit's own message. Uses the MESSAGE pattern set — see `scan_path` for why
+    a surface that is not file content does not get the content bounds."""
+    return [f"{sha[:10]} <commit message>:{lineno}: {label}: {match!r}"
+            for lineno, label, match in scan_text(message, list(message_patterns()))]
+
+
+def _rev_tokens(rev_range: str) -> list[str]:
+    """The REVISION names in a range selector, with the options and the `..`/`...` stripped.
+
+    `<sha> --not --remotes`, `A..B` and `A...B` are all forms this is handed, and only the
+    revision halves name an object.
+    """
+    out: list[str] = []
+    for token in rev_range.split():
+        if token.startswith("-"):
+            continue
+        for part in re.split(r"\.{2,3}", token):
+            if part:
+                out.append(part)
+    return out
+
+
+def refs_being_published(root: Path, rev_range: str) -> list[tuple[str, str, str]]:
+    """[(kind, sha, text)] for every TAG OBJECT the range NAMES.
+
+    ⛔⛔ REF **NAMES** ARE NOT SCANNED HERE, AND THAT IS A DELIBERATE REVERT RATHER THAN AN
+    OVERSIGHT — see issue #49. A version of this also matched every `refs/`-bearing token as a
+    NAME, and a `--ref-name` argument carried the name a push publishes (which is `<remote_ref>`,
+    not `<local_ref>`, because a refspec may rename). It was withdrawn after producing a production
+    bypass in three consecutive verification rounds:
+
+      1. scoping tags by commit-reachability missed the ordinary tag push entirely;
+      2. reading only the LOCAL ref let `git push origin clean:refs/tags/<host>.lan` publish a
+         leaking name under a clean one;
+      3. and once both were repaired, `refs/heads/<host>.lan-deploy` (one trailing hyphen), a
+         UUID-named ref and a `.local`-named ref all still published clean, while the LOCAL name
+         produced a false red whose printed remedy was inert against it.
+
+    Ref-name scanning is not in this package's acceptance criteria — those name a leak in a commit
+    MESSAGE and in an annotated tag MESSAGE — and an addition that cannot converge inside a package
+    does not get to hold it. What survives is what the criteria actually ask for, and it is
+    unaffected by the revert: an annotated tag's OBJECT, which carries its name, its tagger and its
+    message together.
+
+    ⚠️ THE GAP THAT REMAINS, stated rather than left to be discovered: a LIGHTWEIGHT tag has no
+    object, so a leak that exists only as a ref name — `refs/tags/<host>.lan` — is NOT caught by
+    any layer. #49 carries the measured repros and the failed designs.
+
+    ⛔⛔ SCOPED BY WHAT IS BEING PUSHED, NOT BY COMMIT REACHABILITY — and that correction is the
+    whole of this function. The first version asked "does this tag point at a commit in the range",
+    which is wrong in BOTH directions and was measured wrong in both:
+
+      * IT MISSED EVERY REAL TAG PUSH. Cutting a tag at an already-pushed commit is this repo's
+        documented release workflow, and there the range resolves to ZERO commits — so the tag
+        object, its name, its tagger and its message all reached the remote with the guard printing
+        `no internal info added across 0 commit(s)` and exiting 0. A tag pointing at a BLOB was
+        skipped too, even with the commit in range, because `%(*objectname)` peels to the blob.
+      * IT REDDENED PUSHES THAT PUBLISH NO TAG AT ALL. `git push origin main` does not send tags —
+        only `--tags`/`--follow-tags` do — so a purely local scratch tag on an in-range commit
+        blocked an ordinary branch push, and the remediation the guard printed ("rewrite the
+        offending commits") was not even the right fix (`git tag -d` was).
+
+    Both disappear if the question is "what refs is this push sending", which the caller already
+    knows: `.githooks/pre-push` is handed `<local_ref>` on stdin, and CI has `GITHUB_REF`. Both now
+    put the REF in the range they pass, so the range NAMES the tag and this reads it.
+
+    ⭐ NESTED TAGS ARE WALKED. `git tag -a outer -m … inner` produces a chain, and reading only the
+    outermost object left the inner one — with its own message — published and unread once its own
+    ref was deleted. The loop follows `object <sha>` while the type is still `tag`, so every level
+    is read rather than the one that happens to be on top.
+    """
+    found: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for token in _rev_tokens(rev_range):
+        try:
+            sha = _git(root, "rev-parse", "--verify", "-q", token).strip()
+        except subprocess.CalledProcessError:
+            continue
+        # Walk the tag chain. Bounded by `seen` so a malformed cycle cannot loop forever.
+        while sha and sha not in seen:
+            seen.add(sha)
+            try:
+                if _git(root, "cat-file", "-t", sha).strip() != "tag":
+                    break
+                body = _git(root, "cat-file", "tag", sha)
+            except subprocess.CalledProcessError:
+                break
+            found.append(("tag object", sha, body))
+            nxt = ""
+            for line in _lines(body):
+                if line.startswith("object "):
+                    nxt = line[len("object "):].strip()
+                    break
+                if not line.strip():
+                    break   # the header ended; there is no `object` line to follow
+            sha = nxt
+    return found
+
+
+def scan_tags(tags: list[tuple[str, str, str]]) -> list[str]:
+    """Findings in tag objects. Uses the MESSAGE pattern set."""
+    return [f"{sha[:10]} <{kind}>:{lineno}: {label}: {match!r}"
+            for kind, sha, body in tags
+            for lineno, label, match in scan_text(body, list(message_patterns()))]
+
+
 class RangeResult(NamedTuple):
     findings: list[str]
     unscannable: list[str]
@@ -1240,15 +1703,32 @@ class RangeResult(NamedTuple):
 
 def scan_range(root: Path, rev_range: str,
                compiled: list[tuple[str, re.Pattern[str]]]) -> RangeResult:
-    """Scan every line added by every commit in `rev_range`."""
+    """Everything each commit in `rev_range` PUBLISHES: its added lines, the PATHS it introduces,
+    its author/committer identity, its MESSAGE, and any tag pointing at it.
+
+    ⭐ FIVE SURFACES, not one. Pushing publishes a commit OBJECT, and every field of it is
+    permanent and rendered on the commit page. Reading only the diff — which is all this did —
+    left three of the five unread: a leak in a filename (keystone#20), a leak in the commit
+    message (keystone#21 / #39), and a leak in a tag's name, tagger or message.
+
+    ⚠️ "PERMANENT" IS TRUE OF FOUR OF THE FIVE, and the fifth is worth naming rather than rounding
+    up. A commit's diff, its paths, its identity and its message can only be removed by rewriting
+    history. A TAG is a ref: `git tag -d` plus `git push --delete` removes it with no rewrite. It
+    is on this gate because it is still PUBLISHED and still cheap to catch first, not because it is
+    equally unrecoverable.
+    """
     findings: list[str] = []
     unscannable: list[str] = []
     commits = commits_in_range(root, rev_range)
     for sha in commits:
+        parent = first_parent(root, sha)
         hits, blind = scan_added(sha, added_lines(root, sha), compiled, root)
         findings += hits
+        findings += scan_paths(f"{sha[:10]} ", changed_paths(root, parent, sha))
         findings += scan_identity(sha, commit_identity(root, sha), compiled)
+        findings += scan_message(sha, commit_message(root, sha))
         unscannable += blind
+    findings += scan_tags(refs_being_published(root, rev_range))
     return RangeResult(findings, unscannable, len(commits))
 
 
@@ -1381,6 +1861,103 @@ _MUST_FAIL_ADJACENT: list[tuple[str, str]] = [
 # domain suffix a permitted span could be appended to.
 
 
+# ⭐⭐ THE PATH AND MESSAGE SURFACES GET THEIR OWN CORPORA, and they are not decoration: those two
+# surfaces run a DIFFERENT pattern set (PATH_PATTERN_OVERRIDES / MESSAGE_PATTERN_OVERRIDES), so
+# `_MUST_PASS` — a list of CONTENT lines — proves nothing about either. Without these, the whole
+# new surface had zero coverage in `selftest`, which is the layer `pre-commit` and CI actually run,
+# and every false red below was found by an adversarial sweep instead of by the guard's own tests.
+#
+# ⚠️ THE MUST-PASS HALF IS THE POINT. Each entry is a path that occurs in ordinary repositories and
+# that DID redden before the overrides existed. They are the regression test for the overrides.
+_MUST_PASS_PATHS: list[str] = [
+    "README.md",
+    "templates/service.xml",
+    "icons/service.png",
+    ".github/workflows/ci.yml",
+    ".env.example",
+    # The `.local` FILENAME family. The content bound rejects a following LABEL, so
+    # `settings.local.json` was always fine — but a segment-TERMINAL `.local` satisfies it, and
+    # these are the standard machine-local-override convention. Every one blocked a commit.
+    ".env.local",
+    "home/zshrc.local",
+    "home/vimrc.local",
+    "home/gitconfig.local",
+    "home/tmux.conf.local",
+    "Makefile.local",
+    "packages/app.local/index.js",
+    ".claude/settings.local.json",
+    "src/config.local.yml",
+    "compose.local.yaml",
+    "nginx/conf.d/site.local.conf",
+    # A UUID FILENAME is a naming convention, not a tenant id.
+    "db/migrations/11111111-2222-3333-4444-555555555555.sql",
+    "test/fixtures/11111111-2222-3333-4444-555555555555.json",
+    # A repo-relative path can never BE an absolute pool path.
+    "docs/mnt/user/notes.md",
+    "tests/fixtures/mnt/cache/appdata/svc/config.yml",
+    "mnt-user-backup.sh",
+    # Ordinary near-misses that must stay clean.
+    "docs/1.2.3/index.html",
+    "src/net.ts",
+    "locales/en-US/messages.json",
+    "vendor/example.com/pkg/x.go",
+]
+
+_MUST_FAIL_PATHS: list[tuple[str, str]] = [
+    ("private IPv4 (RFC1918)", "192.168.77.77.conf"),
+    ("private IPv4 (RFC1918)", "docs/192.168.77.77/index.md"),
+    ("cgnat address", "100.127.255.254.conf"),
+    # ⭐ `.lan` KEEPS ITS BOUND LOOSE ON THIS SURFACE, so a following EXTENSION does not hide it.
+    # `.local` cannot have the same treatment: `zshrc.local` above is the same string shape.
+    ("private lan domain", "docs/host-a.lan/readme.md"),
+    ("private lan domain", "host-a.lan.conf"),
+    # ⚠️ AN ACCEPTED OVER-MATCH, pinned so it is a decision rather than a surprise. In file CONTENT
+    # `host-a.lan.example.com` is correctly NOT a `.lan` host (a further label follows); the path
+    # surface's looser bound reports it. Same trade as the four-part version directory: the bound
+    # exists so an ordinary EXTENSION cannot hide a host, and that is worth one contrived miss.
+    ("private lan domain", "docs/host-a.lan.example.com/x.md"),
+    ("tailnet name", "docs/host-a.tailnet-example.ts.net.md"),
+    ("personal mail address", "inbox/someone@gmail.invalid.txt"),
+    ("windows profile path", "docs/C:/Users/operator/notes.md"),
+]
+
+# Ordinary commit messages. Every one of these blocked a PUSH — and a message cannot be edited
+# without rewriting history, so a false red here is far more expensive than one on a file.
+_MUST_PASS_MESSAGES: list[str] = [
+    "Merge pull request #1 from texasdaddy/feature",
+    'Revert "add the thing"\n\nThis reverts commit 3d3c42e5aac5ba805825da76410c181273ba90b1.',
+    "cherry-pick the fix\n\n(cherry picked from commit 3d3c42e5aac5ba805825da76410c181273ba90b1)",
+    "Rename config.local to config.defaults",
+    "chore: load tmux.conf.local from the user home",
+    "feat: support Avahi hostnames like printer.local on the LAN",
+    "test: add a fixture for policy id 11111111-2222-3333-4444-555555555555",
+    r"ci: fix path handling for C:\Users\runneradmin\AppData\Local\Temp",
+    "docs: the example host is svc.your-domain.example at 198.51.100.5",
+    # ⭐ A message that merely NAMES a repo path. The content pattern needs only a leading slash,
+    # which any nested path supplies, so these blocked the push while the file and the filename
+    # both passed — the regression test for the `_ABS_POOL_PATH` left bound.
+    "docs: add docs/mnt/user/notes.md",
+    "test: fixtures now live under tests/fixtures/mnt/cache/appdata/svc",
+    "fix: close the issue at https://github.com/texasdaddy/tape/issues/31\n\n"
+    "Co-Authored-By: Someone <1234+someone@users.noreply.github.com>",
+]
+
+_MUST_FAIL_MESSAGES: list[tuple[str, str]] = [
+    ("private lan domain", "release cut on host-a.lan"),
+    # The sentence-final form the CONTENT pattern is documented to miss; the message bound catches
+    # it, because with `.local` gone there is nothing for a trailing-dot rejection to protect.
+    ("private lan domain", "deployed from host-a.lan."),
+    ("private IPv4 (RFC1918)", "point the agent at 192.168.77.77 for now"),
+    ("unraid pool path", "moved appdata to /mnt/user/appdata/svc"),
+    # ⭐ THE URL FORMS. Excluding `/` from the left bound (to stop `docs/mnt/user/...`) also
+    # excluded these, which ARE absolute pool paths — the character in front is merely a slash.
+    ("unraid pool path", "docs: see file:///mnt/user/appdata/svc for the runbook"),
+    ("unraid pool path", "docs: see //mnt/user/appdata/svc"),
+    ("personal mail address", "reported by someone@gmail.invalid"),
+    (r"windows profile path", r"cache now lives in C:\Users\operator\AppData\Local"),
+]
+
+
 def selftest(compiled: list[tuple[str, re.Pattern[str]]]) -> int:
     bad: list[str] = []
     exercised: set[str] = set()
@@ -1411,6 +1988,28 @@ def selftest(compiled: list[tuple[str, re.Pattern[str]]]) -> int:
     if missing:
         bad.append(f"pattern(s) with no deny case, so nothing proves they still work: "
                    f"{sorted(missing)}")
+
+    # ⭐ THE TWO SURFACES THAT DO NOT RUN THIS PATTERN SET. `_MUST_FAIL`/`_MUST_PASS` above are
+    # CONTENT lines and prove nothing about a path or a message, which run the override sets. Both
+    # directions are checked for both surfaces, because the must-PASS half is what pins the
+    # overrides and the must-FAIL half is what stops an override quietly gutting the surface.
+    for rel in _MUST_PASS_PATHS:
+        hits = scan_path(rel)
+        if hits:
+            bad.append(f"false positive on the PATH {rel!r}: {hits}")
+    for want_label, rel in _MUST_FAIL_PATHS:
+        labels = {label for label, _ in scan_path(rel)}
+        if want_label not in labels:
+            bad.append(f"PATH not caught (wanted {want_label}, got {sorted(labels)}): {rel!r}")
+    for msg in _MUST_PASS_MESSAGES:
+        hits = scan_text(msg, list(message_patterns()))
+        if hits:
+            bad.append(f"false positive on the MESSAGE {msg!r}: {hits}")
+    for want_label, msg in _MUST_FAIL_MESSAGES:
+        labels = {label for _, label, _ in scan_text(msg, list(message_patterns()))}
+        if want_label not in labels:
+            bad.append(f"MESSAGE not caught (wanted {want_label}, got {sorted(labels)}): {msg!r}")
+
     if bad:
         print("SELFTEST FAILED:")
         for b in bad:
@@ -1418,14 +2017,18 @@ def selftest(compiled: list[tuple[str, re.Pattern[str]]]) -> int:
         return 1
     print(f"selftest ok: {len(_MUST_FAIL) + len(_MUST_FAIL_ADJACENT) + 1} denied shapes caught "
           f"across {len(PATTERNS)} patterns, {len(_MUST_PASS)} allowed shapes passed")
+    print(f"  paths: {len(_MUST_FAIL_PATHS)} denied, {len(_MUST_PASS_PATHS)} allowed; "
+          f"messages: {len(_MUST_FAIL_MESSAGES)} denied, {len(_MUST_PASS_MESSAGES)} allowed")
     return 0
 
 
 # ------------------------------------------------------------------------ the command line
-USAGE = """usage: check_no_internal_info.py [--selftest | --range <revision-range>] [--repo <path>]
+USAGE = """usage: check_no_internal_info.py
+           [--selftest | --staged | --range <revision-range>] [--repo <path>]
 
   (no arguments)              scan the tracked working TREE
   --selftest                  prove the denylist patterns still bite
+  --staged                    scan what is in the INDEX - what `git commit` would record
   --range <A..B>              scan the lines ADDED by every commit in the range
   --range=<A..B>              the same, joined form
   --repo <path>               the repository to scan (default: the one containing $PWD)
@@ -1448,6 +2051,7 @@ class Args(NamedTuple):
     rev_range: str | None
     repo: str | None
     help: bool
+    staged: bool = False
 
 
 def _value_for(flag: str, argv: list[str], i: int) -> str:
@@ -1479,6 +2083,7 @@ def parse_args(argv: list[str]) -> Args:
     rev_range: str | None = None
     repo: str | None = None
     want_help = False
+    staged = False
     i = 0
     while i < len(argv):
         arg = argv[i]
@@ -1486,6 +2091,8 @@ def parse_args(argv: list[str]) -> Args:
             want_help = True
         elif arg == "--selftest":
             selftest = True
+        elif arg == "--staged":
+            staged = True
         elif arg == "--range":
             rev_range = _value_for("--range", argv, i)
             i += 1
@@ -1511,15 +2118,21 @@ def parse_args(argv: list[str]) -> Args:
             # clean — the same silent substitution this whole change exists to remove.
             raise UsageError(f"unrecognised argument: {arg!r}")
         i += 1
-    if selftest and rev_range is not None:
-        raise UsageError("--selftest and --range do different things; run them one at a time")
-    if want_help and (selftest or rev_range is not None):
+    # ⛔ EVERY PAIR, not just the pair that existed first. Three scan modes make three pairs, and
+    # writing only the one that used to be there is the "fixed the instance, not the class" shape
+    # this file has been bitten by repeatedly. Each combination would otherwise run ONE of the two
+    # scans the caller asked for and report success — the silent substitution `parse_args` exists
+    # to make impossible.
+    if sum((selftest, rev_range is not None, staged)) > 1:
+        raise UsageError("--selftest, --range and --staged do different things; "
+                         "run them one at a time")
+    if want_help and (selftest or staged or rev_range is not None):
         # `--range A..B --help` printed the usage and exited 0 — an accepted argument combination
         # that substitutes "no scan" for a scan and reports success. That is the same shape as the
         # ignored-argument defect, just harder to reach, so it is an error rather than a silent
         # preference.
         raise UsageError("--help does not combine with a scan; run one or the other")
-    return Args(selftest, rev_range, repo, want_help)
+    return Args(selftest, rev_range, repo, want_help, staged)
 
 
 def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
@@ -1529,9 +2142,20 @@ def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
     # Submodule entries, resolved once. See `gitlinks` for why they cannot be told apart from a
     # staged-but-deleted file by catching exceptions.
     submodules = gitlinks(root)
-    for path in tracked_files(root):
+    tracked = tracked_files(root)
+    for path in tracked:
         rel = path.relative_to(root).as_posix()
-        if _skipped(rel, root):
+        # ⭐ THE PATH IS SCANNED FIRST, AND FOR EVERY TRACKED FILE — before any skip, any
+        # submodule check and any read (keystone#20). A filename is published content: it needs no
+        # decoding, it cannot be binary, and neither the self-exemption nor the binary-suffix hint
+        # has anything to say about it. Doing it here rather than inside the read means an
+        # `icons/<host>.lan.png` and a `docs/<addr>/` directory are caught even though the file
+        # itself is never opened. (`<host>.lan.png` is caught because the PATH surface runs a
+        # LOOSER `.lan` bound than file content does — see PATH_PATTERN_OVERRIDES. It was NOT
+        # caught when this comment first asserted it; the claim came before the behaviour.)
+        findings += [f"{rel}: <path>: {label}: {match!r}"
+                     for label, match in scan_path(rel)]
+        if _is_self(rel, root):
             continue
         # ⛔ A GITLINK IS SKIPPED ONLY IF IT IS NOT A READABLE FILE. Trusting the index mode alone
         # would be a bypass: `git update-index --cacheinfo 160000,<sha>,<path>` marks ANY tracked
@@ -1542,21 +2166,27 @@ def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
         # scanned like anything else. Fail-closed on ambiguity.
         if rel in submodules and not path.is_file():
             continue
+        raw: bytes | None = None
+        text: str | None = None
+        absent_from_worktree = False
         try:
             # ⚠️ READ BYTES AND DECODE — do NOT use `read_text`, which applies UNIVERSAL NEWLINES
             # and translates `\r\n` and a lone `\r` to `\n` BEFORE any splitting. That left
             # `_lines` powerless here: the tree scan counted a CR-bearing file's lines differently
-            # from the range scan (raw bytes from git) and from `staged_text` (which decodes a
+            # from the range scan (raw bytes from git) and from `staged_blob` (which reads a
             # blob and translates nothing) — three reads, three answers, for one file. Reading
             # bytes makes all three agree instead of leaving one definition of "line" in `_lines`
             # and a second hidden in the reader.
             #
             # ⚠️ NOT `read_text(newline="")` either: `Path.read_text` only accepts `newline` from
             # Python 3.13, and CI pins 3.12, so that spelling raises TypeError on every file.
-            # The exceptions below are unchanged — `read_bytes` raises the same FileNotFoundError
-            # and OSError subclasses (a checked-out submodule is still IsADirectoryError /
-            # PermissionError), and `.decode` raises the same UnicodeDecodeError.
-            text = path.read_bytes().decode("utf-8")
+            #
+            # ⭐ THE DECODE MOVED OUT of this `try` when the suffix stopped being trusted: the
+            # answer to "it did not decode" now depends on WHICH file it is, and a bare
+            # `except UnicodeDecodeError` here could not ask that. `read_bytes` still raises the
+            # same FileNotFoundError and OSError subclasses (a checked-out submodule is still
+            # IsADirectoryError / PermissionError), which is all this `try` ever needed to cover.
+            raw = path.read_bytes()
         except FileNotFoundError:
             # ⚠️ NOT SILENT, and not `continue`. A tracked file missing from the worktree is
             # STAGED-BUT-DELETED (or mid-rebase): its content is still in the INDEX and still goes
@@ -1575,17 +2205,26 @@ def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
             # carries a body, and not consuming it desynchronised the stream — see #33), and
             # adding a third batch reader to fix a SLOWDOWN rather than a correctness defect was
             # the wrong trade at the end of that package. #34 carries the design.
-            text = staged_text(root, rel)
-            if text is None:
-                # ⚠️ DO NOT NAME A CAUSE THIS DOES NOT KNOW. `staged_text` returns None for two
-                # different reasons — the blob is not UTF-8, OR `git cat-file` refused the path
-                # (an UNMERGED path has no stage-0 entry) — and this message used to assert the
-                # first. On a conflicted file that is also absent from the worktree it therefore
-                # sent the operator after an encoding problem that did not exist. Naming a wrong
-                # cause is the same defect class as a wrong claim anywhere else in this file.
+            #
+            # ⛔⛔ BYTES, NOT TEXT, AND THE SAME BYTES-DECIDE RULE AS THE WORKTREE READ. This
+            # branch used to decode here and report anything that would not decode — and once the
+            # suffix stopped gating the loop, an ordinary tracked `icons/logo.png` DELETED from
+            # the worktree without staging the deletion (an everyday mid-edit gesture) reached
+            # this line, failed to decode, and REDDENED the commit. Worse, the remedy printed with
+            # it was inert: it said "add its suffix to SKIP_SUFFIXES", and `.png` already is one.
+            # Handing the bytes to the shared block below means one rule decides "is this an
+            # asset" for both sources, which is what `_skipped`'s two-scans-must-agree note has
+            # always been about.
+            absent_from_worktree = True
+            raw = staged_blob(root, rel)
+            if raw is None:
+                # ⚠️ DO NOT NAME A CAUSE THIS DOES NOT KNOW. The remaining reason `git cat-file`
+                # refuses `:<path>` is that there is no stage-0 entry — an UNMERGED path. The
+                # encoding half of this message moved to where the decode now happens, rather than
+                # being asserted here about a step that no longer decodes anything.
                 undecodable.append(
-                    f"{rel} (absent from the worktree, and its staged content could not be read: "
-                    f"not UTF-8, or the path is unmerged and has no stage-0 entry)")
+                    f"{rel} (absent from the worktree, and git could not read its staged content: "
+                    f"the path is probably unmerged and has no stage-0 entry)")
                 continue
         except OSError as exc:
             # Anything else unreadable — a permission problem, a broken symlink. Reported rather
@@ -1593,23 +2232,53 @@ def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
             # it goes unexamined.
             undecodable.append(f"{rel} (unreadable: {type(exc).__name__})")
             continue
-        except UnicodeDecodeError:
-            # NOT silent: a file this scanner cannot read is a file it cannot vouch for.
-            undecodable.append(rel)
-            continue
+        if raw is not None:
+            # ⭐⭐ THE SUFFIX IS A HINT, NOT A VERDICT (keystone#22). `SKIP_SUFFIXES` used to end
+            # the matter before the file was opened, so `deploy-notes.pdf` holding a plain ASCII
+            # runbook — LAN host, appdata path, RFC1918 address — was never read by either scan and
+            # exited 0. The bytes now decide: an asset that really is one is skipped exactly as
+            # before, and one that is text is scanned exactly like any other text file.
+            #
+            # ⚠️ THE TWO BRANCHES DIFFER IN WHAT A FAILED DECODE MEANS, and that asymmetry is
+            # deliberate rather than an oversight. At a `.png` it means "yes, an image" — skip it
+            # silently, which is the whole point of the suffix list and keeps issue #38 exactly
+            # where it was. At any other path it means "I could not read this", which is REPORTED,
+            # because a file this scanner cannot read is a file it cannot vouch for.
+            if _binary_suffix(rel):
+                if _looks_binary(raw):
+                    continue
+                # `_looks_binary` already proved this decodes; it cannot raise here.
+                text = raw.decode("utf-8")
+            else:
+                try:
+                    text = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    # NOT silent: a file this scanner cannot read is a file it cannot vouch for.
+                    undecodable.append(
+                        f"{rel} (absent from the worktree, and its staged content is not UTF-8)"
+                        if absent_from_worktree else rel)
+                    continue
         # ⛔⛔ A SUCCESSFUL DECODE IS NOT PROOF IT IS TEXT (issue #242). BOM-less UTF-16LE of ASCII
         # is `A\x00G\x00E\x00…` — every byte under 0x80, so it IS valid UTF-8. `read_text`
         # succeeded, the decoded content was NUL-separated so no pattern could match, and the file
         # was counted in the "scanned" total. The guard vouched for a file it had not read.
         #
         # ⭐ PLACED AFTER THE `try`, DELIBERATELY, so it covers BOTH sources of `text` — the
-        # worktree read AND the staged blob from `staged_text`. Those are two of the three decode
+        # worktree read AND the staged blob from `staged_blob`. Those are two of the three decode
         # sites in this file, and the sibling repo's attempt at this reached only one of them
         # because it was written at the reads rather than at what they produce (tape#242).
+        # (`text` is necessarily a str here: both sources set `raw`, and every path that leaves it
+        # unset has already `continue`d. Asserted by construction rather than re-checked, because a
+        # defensive `text is None` branch could only print a NUL message about something that is
+        # not a NUL problem.)
         if "\x00" in text:
+            # `absent_from_worktree` threaded in here too: this is the one branch that could
+            # report a staged blob without saying the file is not on disk, which sent the operator
+            # looking for a file that is not there.
+            where = " (absent from the worktree)" if absent_from_worktree else ""
             undecodable.append(
-                f"{rel} (contains a NUL byte, so it is not UTF-8 text - BOM-less UTF-16/UTF-32 "
-                f"decodes as valid UTF-8 and would scan as nothing)")
+                f"{rel}{where} (contains a NUL byte, so it is not UTF-8 text - BOM-less "
+                f"UTF-16/UTF-32 decodes as valid UTF-8 and would scan as nothing)")
             continue
         scanned += 1
         findings += [f"{rel}:{n}: {label}: {match!r}"
@@ -1632,12 +2301,48 @@ def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
               f"{SELF_PATH} with a comment saying why.")
     if findings or undecodable:
         return 1
+    if tracked and scanned == 0:
+        # ⛔⛔ A RUN THAT SCANNED NOTHING IS NOT A CLEAN RUN (keystone#22, second half). This
+        # printed `no internal info found (0 tracked text files scanned)` and exited 0 — a
+        # cheerful pass, in the same words as a real one, for a scan that opened no file at all.
+        # Every way of getting here is a failure worth stopping on: `--repo` aimed at the wrong
+        # directory, a tree whose every file is an asset, or someone widening SKIP_SUFFIXES until
+        # nothing is left to read.
+        #
+        # ⚠️ IT IS NOT THE SAME QUESTION AS "were there findings". Findings and unreadable files
+        # are both reported ABOVE and both already exit 1; this is the third state neither of them
+        # covers — no findings BECAUSE there was no input. The count was printed all along, which
+        # is what makes this cheap: the number was right there in the success message and nothing
+        # acted on it.
+        #
+        # ⛔ `tracked and` IS LOAD-BEARING, AND ITS ABSENCE BLOCKED A LEGITIMATE ACTION. An EMPTY
+        # tracked list is not "a scan that skipped everything", it is a scan with nothing to do —
+        # and `git commit --allow-empty -m initial`, the standard way to start a repository, has
+        # exactly that shape. Without this the pre-commit hook refused it and the repository could
+        # not be bootstrapped at all. The acceptance this exists for says "a 0-files-scanned run
+        # against a NON-EMPTY tree", and the empty tree is the case it deliberately does not name.
+        print(f"REFUSING to report clean: {len(tracked)} tracked path(s), but ZERO were read as "
+              "text, so no file CONTENT was scanned.")
+        print("A scan that opened no file cannot clear a tree. Check that --repo points at the "
+              "right repository and that SKIP_SUFFIXES has not grown to cover everything. If this "
+              "really is an assets-only tree, every path was still checked - add one text file "
+              "(a README) so the content scan has something to vouch for.")
+        return 1
+    if not tracked:
+        # ⚠️ NAME THE ROOT WHEN THERE WAS NOTHING TO SCAN. An empty tracked list is legitimate (a
+        # fresh repository, `git commit --allow-empty`), so it is not an error — but it is also
+        # what a mis-aimed `--repo` looks like, and `no internal info found (0 ...)` is
+        # indistinguishable from a real clean run. Saying WHICH repository was empty makes the
+        # wrong-directory case visible without reddening the right one.
+        print(f"no internal info found (0 tracked text files scanned; {_ascii(str(root))} has no "
+              f"tracked files at all - check --repo if that is a surprise)")
+        return 0
     print(f"no internal info found ({scanned} tracked text files scanned)")
     return 0
 
 
-def staged_text(root: Path, rel: str) -> str | None:
-    """What `git commit` would record for a tracked file that is NOT in the worktree, or None.
+def staged_blob(root: Path, rel: str) -> bytes | None:
+    """The BYTES `git commit` would record for a tracked file that is NOT in the worktree, or None.
 
     ⭐ THIS IS THE ANSWER TO THE STAGED-BUT-DELETED CASE, and it is strictly better than the
     "cannot read it, cannot vouch for it" report it replaces — in BOTH directions:
@@ -1650,15 +2355,87 @@ def staged_text(root: Path, rel: str) -> str | None:
         the wrong instruction for someone whose intent was to keep the deletion. Reading the blob
         answers the real question, which is what the COMMIT will contain.
 
-    `:<path>` is the index revision of the file. Returning None means the staged content is not
-    UTF-8 text, which falls back to the honest "not scanned, so not cleared".
+    ⛔ RETURNS BYTES, NOT TEXT, and that is the second half of the same false-red story. It used to
+    decode here and return None for a blob that is not UTF-8 — so once the binary SUFFIX stopped
+    gating the loop, `rm icons/logo.png` (without staging the deletion) reddened the commit, with a
+    remedy that was inert because `.png` was already in SKIP_SUFFIXES. Handing the caller the bytes
+    lets ONE rule decide "is this an asset", for the worktree read and the staged blob alike.
+
+    `:<path>` is the index revision of the file. None now means only that git refused the path —
+    in practice an UNMERGED path, which has no stage-0 entry.
     """
     try:
-        raw = subprocess.run(["git", "cat-file", "blob", f":{rel}"], cwd=root,
-                             capture_output=True, check=True, timeout=_GIT_TIMEOUT_S).stdout
-        return raw.decode("utf-8")
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, UnicodeDecodeError):
+        return subprocess.run(["git", "cat-file", "blob", f":{rel}"], cwd=root,
+                              capture_output=True, check=True, timeout=_GIT_TIMEOUT_S).stdout
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return None
+
+
+def staged_diff(root: Path) -> tuple[ParsedDiff, list[str]]:
+    """(what the INDEX would commit, the paths it introduces) — `git diff --cached`.
+
+    ⭐ THIS IS THE ANSWER TO #33 / keystone#23. The tree scan reads the WORKTREE, so a leak that
+    is `git add`ed and then tidied in the worktree without re-staging is invisible to the
+    pre-commit layer: the index — and therefore the commit — still carries it, and the hook exits
+    0 while `git show HEAD:<file>` returns the leak. The range scan on the push path did catch it,
+    so it could not reach the remote; the gap was that the layer running at COMMIT time answered a
+    question about a different tree from the one being committed.
+
+    ⛔ `git diff --cached` THROUGH `parse_diff`, and NOT a per-file `cat-file` of every staged
+    blob. Both of the other shapes were written and REMOVED from this file already, and their
+    failures are recorded in the module docstring: reading each blob made the hook take 78 s on a
+    1000-file worktree, and a batched `cat-file --batch` DESYNCHRONISED on a gitlink — `:<path>`
+    on a submodule returns a COMMIT object whose body the parser must skip — mis-attributing one
+    file's content to another and exiting 0 on a staged leak it never read. `--cached` asks git
+    exactly "what will this commit ADD" and needs no new protocol parser: it reuses the
+    well-tested `parse_diff`, the allow-spans, the binary/NUL posture and the marker machinery
+    that the range scan has been exercising all along.
+
+    ⚠️ THE BASE IS THE EMPTY TREE WHEN THERE IS NO HEAD. On the very first commit of a repository
+    `git diff --cached` has no `HEAD` to resolve and dies 128 — and the initial commit is exactly
+    when a whole tree is staged at once, so failing there would leave the first and largest commit
+    unscanned by this layer.
+    """
+    base = "HEAD" if resolves(root, "HEAD") else _EMPTY_TREE
+    parsed = parse_diff(_git(root, *_DIFF_CONFIG, "diff", *_DIFF_FLAGS, "--cached", base))
+    # ⛔ THE SAME `--text` RESOLUTION THE RANGE SCAN DOES, and not an optional refinement: without
+    # it an ordinary `.gitattributes`-marked lockfile — git reports `Binary files … differ` for a
+    # `-diff` attribute — would be reported "not scanned, so NOT CLEARED" and BLOCK the commit,
+    # a false red on correct work in the layer a developer meets most often.
+    return resolve_unscannable(root, parsed, ("--cached", base)), changed_paths(
+        root, "--cached", base)
+
+
+def _scan_staged(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
+    """Scan the INDEX. Same reporting posture as the range scan: unread is never cleared."""
+    parsed, paths = staged_diff(root)
+    findings, unscannable = scan_added("", parsed, compiled, root)
+    # `scan_added` prefixes each finding with `sha[:10] ` and there is no sha here, so the prefix
+    # is empty and the lines read `<file>:<line>: ...`. Same for the path findings below.
+    findings += scan_paths("", paths)
+    if unscannable:
+        print(f"BINARY / UNREADABLE in {len(unscannable)} staged file(s) - not scanned, so NOT "
+              f"CLEARED:")
+        for u in unscannable:
+            print("  " + _ascii(u.strip()))
+        print("Add a binary suffix to SKIP_SUFFIXES if that is what it is, or stage the file as "
+              "UTF-8 text.\n")
+    if findings:
+        print(f"INTERNAL INFO FOUND in {len(findings)} place(s) STAGED FOR COMMIT - this repo is "
+              "public:\n")
+        for f in findings:
+            print("  " + _ascii(f.strip()))
+        print("\nThis is what the INDEX holds, which is what the commit will record - tidying the "
+              "working copy without re-staging does NOT remove it.")
+        print("Replace with a placeholder (<your-unraid-host>, your-domain.example, "
+              "/mnt/POOL/..., RFC5737 addresses), then `git add` the corrected file.")
+        print("A `<path>` finding is the FILE NAME, not its contents: `git mv` it to a neutral "
+              "name and stage the rename.")
+    if findings or unscannable:
+        return 1
+    print(f"no internal info staged ({len(parsed.added)} added line(s), "
+          f"{len(paths)} path(s) checked)")
+    return 0
 
 
 def is_shallow(root: Path) -> bool:
@@ -1722,12 +2499,24 @@ def _scan_commits(root: Path, rev_range: str,
               + "- this repo is public and pushing publishes HISTORY:\n")
         for f in result.findings:
             print("  " + _ascii(f))
+        # ⚠️ THE ADVICE MUST MATCH THE CAUSE — the same rule `_unparsed_header` exists for, applied
+        # to the surfaces added since. "Rewrite the offending commits" is right for a leaked LINE
+        # and for the identity, and WRONG for the other two: a `<tag object>` finding is cleared by
+        # deleting the tag, and a `<path>` finding by renaming the file. Printing one remedy for
+        # five surfaces sent the operator to rewrite history over a scratch tag.
         print("\nRemoving it in a LATER commit does not help: the value stays readable at "
               "the commit that added it. Rewrite the offending commits (git rebase -i / "
               "filter-repo) BEFORE pushing, then re-run this.")
         print("A `<author email>` / `<committer email>` finding is the COMMIT'S OWN identity, "
               "not its diff: fix `git config user.email` (the fleet identity is the GitHub "
               "noreply address), then rewrite the commits so the metadata is corrected too.")
+        print("A `<commit message>` finding is the message, not the diff - it needs the same "
+              "rewrite (`git commit --amend` for the tip, `git rebase -i` further back).")
+        print("A `<tag object>` finding needs NO history rewrite: the tag is a ref. "
+              "`git tag -d <name>` (and `git push origin --delete <name>` if it is already out) "
+              "clears it, or re-cut it with `git tag -a -f`.")
+        print("A `<path>` finding is the FILE NAME, not its contents: `git mv` it to a neutral "
+              "name in the offending commit.")
     if result.findings or result.unscannable:
         return 1
     # ⚠️ `_ascii` HERE TOO — this is the FOURTH `rev_range` site and the only one on the SUCCESS
@@ -1763,6 +2552,8 @@ def main(argv: list[str]) -> int:
     root = repo_root(args.repo)
     if args.rev_range is not None:
         return _scan_commits(root, args.rev_range, compiled)
+    if args.staged:
+        return _scan_staged(root, compiled)
     return _scan_tree(root, compiled)
 
 

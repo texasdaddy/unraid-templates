@@ -1,7 +1,13 @@
 #!/bin/sh
 # Blocks a commit that would put internal identifying information into this public repo.
 # Opt in per clone (one time):   git config core.hooksPath .githooks
-# CI runs the same two commands, so this is a convenience, not the enforcement point.
+#
+# ⚠️ THIS IS NOT PURELY A CONVENIENCE ANY MORE, and the sentence that used to say so is now
+# inverted. CI runs the selftest, the TREE scan and the RANGE scan — it does NOT run `--staged`,
+# because a CI checkout has nothing staged for `git diff --cached` to read. So the index scan below
+# is enforced ONLY here, in an opt-in per-clone hook. The push path still catches a staged leak
+# (the range scan reads what each commit ADDED), so nothing reaches the remote unscanned; what is
+# hook-only is catching it one step earlier, at the commit rather than at the push.
 #
 # This runs at COMMIT time, which is after `git add` by construction — so the tree scan below
 # sees newly added files. Run by hand BEFORE staging it would not: `git ls-files` lists tracked
@@ -9,9 +15,17 @@
 # found". That is how a synthetic internal hostname reached a public remote. `.githooks/pre-push`
 # scans the COMMITS being sent, which is the layer that catches it either way.
 #
+# ⭐ TWO SCANS, BECAUSE THE WORKTREE AND THE INDEX ARE DIFFERENT TREES (issue #33). The tree scan
+# reads the files on disk; the commit records the INDEX. `git add cfg.txt` while it holds a leak,
+# then overwrite cfg.txt with a clean version and do not re-stage, and the tree scan is honestly
+# clean while the commit still carries the leak. `--staged` asks git what the commit will actually
+# contain. Both are kept: the tree scan is the one that sees a file staged-but-deleted from the
+# worktree and the whole tracked tree besides, and `--staged` is the one that sees the index.
+#
 # NOT `command -v python3`: on Windows that finds the Microsoft Store App Execution Alias
 # stub, which then aborts the commit with "Python was not found" and no mention of this
 # guard. Probing with a real invocation picks the interpreter that actually runs.
 if python3 -c "" >/dev/null 2>&1; then PY=python3; else PY=python; fi
 "$PY" scripts/check_no_internal_info.py --selftest || exit 1
-exec "$PY" scripts/check_no_internal_info.py
+"$PY" scripts/check_no_internal_info.py || exit 1
+exec "$PY" scripts/check_no_internal_info.py --staged

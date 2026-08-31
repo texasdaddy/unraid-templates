@@ -353,10 +353,28 @@ PATH_PATTERN_OVERRIDES: dict[str, str | None] = {
     "unraid pool path": None,
     "uuid (access policy / tenant id)": None,
 }
+# ⛔ AND THE POOL PATH IS LEFT-BOUNDED ON THIS SURFACE. The content pattern needs only a LEADING
+# SLASH, which any nested repo-relative path supplies — so a commit message that merely NAMED one
+# of the paths `_MUST_PASS_PATHS` blesses ("docs: add docs/mnt/user/notes.md") blocked the push,
+# while the file and its filename both passed. That is the same defect corrected on the path
+# surface, one dict down. Requiring that nothing path-like precede `/mnt/` keeps the real case —
+# "moved appdata to /mnt/user/appdata/svc" — and drops the mention of a repo path.
+_ABS_POOL_PATH = r"(?<![\w./-])/mnt/(?:apps|user|cache|remotes|disks|disk\d+)\b"
+
 MESSAGE_PATTERN_OVERRIDES: dict[str, str | None] = {
     "private lan domain": _LAN_ONLY,
+    "unraid pool path": _ABS_POOL_PATH,
     "uuid (access policy / tenant id)": None,
 }
+
+# ⚠️ WHAT THE OVERRIDES REMOVE, STATED IN FULL — because this file's own KNOWN LIMITS block exists
+# precisely because three pattern comments once said "stated in KNOWN LIMITS" while that section
+# did not in fact state them. Beyond the two whole patterns dropped from paths, `_LAN_ONLY` drops
+# a THIRD thing on BOTH new surfaces: the `.local` half of `private lan domain`. So a genuine mDNS
+# host — `printer-b.local` — is NOT caught in a filename, a directory name, a commit message or a
+# tag. That is deliberate and it is not separable: `zshrc.local` and `printer-b.local` are the same
+# string shape, and the corpora require the first to pass. It is caught in file CONTENT, which is
+# where such a host is actually configured. Do not read the surviving LABEL as coverage.
 
 # Per-PATH exemptions for a single pattern, as (pattern label, path regex).
 #
@@ -690,6 +708,15 @@ def compile_for(overrides: dict[str, str | None]) -> list[tuple[str, re.Pattern[
         raise ValueError(
             f"override(s) naming no pattern: {sorted(unknown)} - a renamed label would leave the "
             f"override inert, so this is an error rather than a silent no-op")
+    # ⛔ AN EMPTY STRING IS THE SAME SILENT INERTNESS, one step further in. `"" or rx` falls back
+    # to the CONTENT pattern, so spelling an override `""` — a plausible way to write "disable
+    # this" — quietly restored the exact bound the surface was measured to false-red on, and
+    # nothing said so. Use `None` to remove a pattern; there is no third meaning.
+    empty = sorted(k for k, v in overrides.items() if v is not None and not v)
+    if empty:
+        raise ValueError(
+            f"empty override(s) for {empty} - an empty pattern silently falls back to the content "
+            f"one. Use None to REMOVE a pattern from this surface")
     return [(label, re.compile(overrides.get(label, rx) or rx, re.IGNORECASE))
             for label, rx in PATTERNS if overrides.get(label, rx) is not None]
 
@@ -1573,8 +1600,33 @@ def _rev_tokens(rev_range: str) -> list[str]:
     return out
 
 
-def refs_being_published(root: Path, rev_range: str) -> list[tuple[str, str]]:
-    """[(sha, text)] for every TAG OBJECT the range NAMES, plus the ref names it names.
+def scan_ref_names(names: tuple[str, ...]) -> list[str]:
+    """Findings in ref NAMES the caller says are being published.
+
+    ⛔⛔ THE NAME THAT LANDS ON THE REMOTE IS `<remote_ref>`, NOT `<local_ref>`, and reading only
+    the local one was a live bypass. A push refspec may RENAME:
+
+        git push origin clean-tag:refs/tags/<host>.lan
+
+    `.githooks/pre-push` is handed both on stdin. The hook used to build everything from
+    `$local_ref`, so the guard scanned `refs/tags/clean-tag`, reported clean, and
+    `refs/tags/<host>.lan` landed on the remote. Nothing downstream caught it either: CI's push
+    trigger is `branches: [main]` + `tags: ["v*"]`, and neither matches. The same trick works for a
+    branch (`main:refs/heads/<host>.lan`) and with `HEAD:` as the source, which does not even look
+    like a tag push.
+
+    ⚠️ A SEPARATE ARGUMENT RATHER THAN A RANGE TOKEN, and it has to be. `<remote_ref>` names
+    nothing in the LOCAL clone, so putting it in the range would make `git rev-list` exit 128 and
+    turn every renaming push into a false red. This is a name to match patterns against; it is not
+    a revision, and it never reaches `rev-list`.
+    """
+    return [f"<ref name> {name}: {label}: {match!r}"
+            for name in names
+            for _, label, match in scan_text(name, list(message_patterns()))]
+
+
+def refs_being_published(root: Path, rev_range: str) -> list[tuple[str, str, str]]:
+    """[(kind, sha, text)] for every TAG OBJECT the range NAMES, plus the ref names it names.
 
     ⛔⛔ SCOPED BY WHAT IS BEING PUSHED, NOT BY COMMIT REACHABILITY — and that correction is the
     whole of this function. The first version asked "does this tag point at a commit in the range",
@@ -1602,12 +1654,15 @@ def refs_being_published(root: Path, rev_range: str) -> list[tuple[str, str]]:
     ref was deleted. The loop follows `object <sha>` while the type is still `tag`, so every level
     is read rather than the one that happens to be on top.
     """
-    found: list[tuple[str, str]] = []
+    found: list[tuple[str, str, str]] = []
     seen: set[str] = set()
     for token in _rev_tokens(rev_range):
         if "refs/" in token:
-            # The NAME publishes whether or not there is an object behind it.
-            found.append(("0" * 10, token))
+            # ⚠️ `<ref name>`, NOT `<tag object>`. A `refs/`-bearing token may name a BRANCH, and
+            # labelling one a tag object printed the tag remedy for it — `git tag -d refs/…` does
+            # not work on a branch. The NAME publishes whether or not there is an object behind it,
+            # which is the whole reason this branch exists (a lightweight tag has only a name).
+            found.append(("ref name", "0" * 10, token))
         try:
             sha = _git(root, "rev-parse", "--verify", "-q", token).strip()
         except subprocess.CalledProcessError:
@@ -1621,7 +1676,7 @@ def refs_being_published(root: Path, rev_range: str) -> list[tuple[str, str]]:
                 body = _git(root, "cat-file", "tag", sha)
             except subprocess.CalledProcessError:
                 break
-            found.append((sha, body))
+            found.append(("tag object", sha, body))
             nxt = ""
             for line in _lines(body):
                 if line.startswith("object "):
@@ -1633,10 +1688,10 @@ def refs_being_published(root: Path, rev_range: str) -> list[tuple[str, str]]:
     return found
 
 
-def scan_tags(tags: list[tuple[str, str]]) -> list[str]:
+def scan_tags(tags: list[tuple[str, str, str]]) -> list[str]:
     """Findings in tag objects and ref names. Uses the MESSAGE pattern set."""
-    return [f"{sha[:10]} <tag object>:{lineno}: {label}: {match!r}"
-            for sha, body in tags
+    return [f"{sha[:10]} <{kind}>:{lineno}: {label}: {match!r}"
+            for kind, sha, body in tags
             for lineno, label, match in scan_text(body, list(message_patterns()))]
 
 
@@ -1856,6 +1911,11 @@ _MUST_FAIL_PATHS: list[tuple[str, str]] = [
     # `.local` cannot have the same treatment: `zshrc.local` above is the same string shape.
     ("private lan domain", "docs/host-a.lan/readme.md"),
     ("private lan domain", "host-a.lan.conf"),
+    # ⚠️ AN ACCEPTED OVER-MATCH, pinned so it is a decision rather than a surprise. In file CONTENT
+    # `host-a.lan.example.com` is correctly NOT a `.lan` host (a further label follows); the path
+    # surface's looser bound reports it. Same trade as the four-part version directory: the bound
+    # exists so an ordinary EXTENSION cannot hide a host, and that is worth one contrived miss.
+    ("private lan domain", "docs/host-a.lan.example.com/x.md"),
     ("tailnet name", "docs/host-a.tailnet-example.ts.net.md"),
     ("personal mail address", "inbox/someone@gmail.invalid.txt"),
     ("windows profile path", "docs/C:/Users/operator/notes.md"),
@@ -1873,6 +1933,11 @@ _MUST_PASS_MESSAGES: list[str] = [
     "test: add a fixture for policy id 11111111-2222-3333-4444-555555555555",
     r"ci: fix path handling for C:\Users\runneradmin\AppData\Local\Temp",
     "docs: the example host is svc.your-domain.example at 198.51.100.5",
+    # ⭐ A message that merely NAMES a repo path. The content pattern needs only a leading slash,
+    # which any nested path supplies, so these blocked the push while the file and the filename
+    # both passed — the regression test for the `_ABS_POOL_PATH` left bound.
+    "docs: add docs/mnt/user/notes.md",
+    "test: fixtures now live under tests/fixtures/mnt/cache/appdata/svc",
     "fix: close the issue at https://github.com/texasdaddy/tape/issues/31\n\n"
     "Co-Authored-By: Someone <1234+someone@users.noreply.github.com>",
 ]
@@ -1962,6 +2027,9 @@ USAGE = """usage: check_no_internal_info.py
   --staged                    scan what is in the INDEX - what `git commit` would record
   --range <A..B>              scan the lines ADDED by every commit in the range
   --range=<A..B>              the same, joined form
+  --ref-name <ref>            also scan this REF NAME (repeatable; needs --range).
+                              For a push that RENAMES, the name that lands on the
+                              remote is not a revision this clone can resolve.
   --repo <path>               the repository to scan (default: the one containing $PWD)
   -h, --help                  this message
 
@@ -1983,6 +2051,7 @@ class Args(NamedTuple):
     repo: str | None
     help: bool
     staged: bool = False
+    ref_names: tuple[str, ...] = ()
 
 
 def _value_for(flag: str, argv: list[str], i: int) -> str:
@@ -2015,6 +2084,7 @@ def parse_args(argv: list[str]) -> Args:
     repo: str | None = None
     want_help = False
     staged = False
+    ref_names: list[str] = []
     i = 0
     while i < len(argv):
         arg = argv[i]
@@ -2024,6 +2094,14 @@ def parse_args(argv: list[str]) -> Args:
             selftest = True
         elif arg == "--staged":
             staged = True
+        elif arg == "--ref-name":
+            ref_names.append(_value_for("--ref-name", argv, i))
+            i += 1
+        elif arg.startswith("--ref-name="):
+            value = arg[len("--ref-name="):]
+            if not value:
+                raise UsageError("--ref-name needs a ref, e.g. --ref-name refs/tags/v1.0.0")
+            ref_names.append(value)
         elif arg == "--range":
             rev_range = _value_for("--range", argv, i)
             i += 1
@@ -2063,7 +2141,13 @@ def parse_args(argv: list[str]) -> Args:
         # ignored-argument defect, just harder to reach, so it is an error rather than a silent
         # preference.
         raise UsageError("--help does not combine with a scan; run one or the other")
-    return Args(selftest, rev_range, repo, want_help, staged)
+    if ref_names and rev_range is None:
+        # ⛔ NOT SILENTLY IGNORED. `--ref-name` decorates the commit-range scan; on its own it
+        # would read like a scan and perform a TREE scan instead — the exact silent substitution
+        # this parser exists to make impossible.
+        raise UsageError("--ref-name only means something with --range: it names a ref this push "
+                         "publishes, alongside the commits being scanned")
+    return Args(selftest, rev_range, repo, want_help, staged, tuple(ref_names))
 
 
 def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
@@ -2203,9 +2287,13 @@ def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
         # defensive `text is None` branch could only print a NUL message about something that is
         # not a NUL problem.)
         if "\x00" in text:
+            # `absent_from_worktree` threaded in here too: this is the one branch that could
+            # report a staged blob without saying the file is not on disk, which sent the operator
+            # looking for a file that is not there.
+            where = " (absent from the worktree)" if absent_from_worktree else ""
             undecodable.append(
-                f"{rel} (contains a NUL byte, so it is not UTF-8 text - BOM-less UTF-16/UTF-32 "
-                f"decodes as valid UTF-8 and would scan as nothing)")
+                f"{rel}{where} (contains a NUL byte, so it is not UTF-8 text - BOM-less "
+                f"UTF-16/UTF-32 decodes as valid UTF-8 and would scan as nothing)")
             continue
         scanned += 1
         findings += [f"{rel}:{n}: {label}: {match!r}"
@@ -2255,6 +2343,15 @@ def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
               "really is an assets-only tree, every path was still checked - add one text file "
               "(a README) so the content scan has something to vouch for.")
         return 1
+    if not tracked:
+        # ⚠️ NAME THE ROOT WHEN THERE WAS NOTHING TO SCAN. An empty tracked list is legitimate (a
+        # fresh repository, `git commit --allow-empty`), so it is not an error — but it is also
+        # what a mis-aimed `--repo` looks like, and `no internal info found (0 ...)` is
+        # indistinguishable from a real clean run. Saying WHICH repository was empty makes the
+        # wrong-directory case visible without reddening the right one.
+        print(f"no internal info found (0 tracked text files scanned; {_ascii(str(root))} has no "
+              f"tracked files at all - check --repo if that is a surprise)")
+        return 0
     print(f"no internal info found ({scanned} tracked text files scanned)")
     return 0
 
@@ -2365,7 +2462,8 @@ def is_shallow(root: Path) -> bool:
 
 
 def _scan_commits(root: Path, rev_range: str,
-                  compiled: list[tuple[str, re.Pattern[str]]]) -> int:
+                  compiled: list[tuple[str, re.Pattern[str]]],
+                  ref_names: tuple[str, ...] = ()) -> int:
     if is_shallow(root):
         # ⛔ A SHALLOW CLONE DOES NOT FAIL LOUDLY ON ITS OWN. `git rev-list` succeeds against the
         # truncated history and returns the truncated count, and the boundary commit's missing
@@ -2391,6 +2489,11 @@ def _scan_commits(root: Path, rev_range: str,
         print(_ascii(f"could not scan {rev_range!r}: git exited {exc.returncode}. ")
               + "Fetch the base ref (CI needs fetch-depth: 0) or check the range.")
         return 1
+    # The names the caller says this push publishes — see `scan_ref_names`. Appended AFTER the
+    # range scan so a name is reported even when the range covers zero commits, which is exactly
+    # the shape a tag push takes.
+    result = RangeResult(result.findings + scan_ref_names(ref_names),
+                         result.unscannable, result.commits)
     if result.unscannable:
         # Same posture as the tree scan's `undecodable` list: a blob this cannot read is a blob
         # it cannot vouch for.
@@ -2433,6 +2536,9 @@ def _scan_commits(root: Path, rev_range: str,
         print("A `<tag object>` finding needs NO history rewrite: the tag is a ref. "
               "`git tag -d <name>` (and `git push origin --delete <name>` if it is already out) "
               "clears it, or re-cut it with `git tag -a -f`.")
+        print("A `<ref name>` finding is the NAME a ref is being pushed UNDER - including the "
+              "right-hand side of a renaming refspec. Push it under a neutral name, or rename the "
+              "branch/tag; no history rewrite is needed for that either.")
         print("A `<path>` finding is the FILE NAME, not its contents: `git mv` it to a neutral "
               "name in the offending commit.")
     if result.findings or result.unscannable:
@@ -2469,7 +2575,7 @@ def main(argv: list[str]) -> int:
 
     root = repo_root(args.repo)
     if args.rev_range is not None:
-        return _scan_commits(root, args.rev_range, compiled)
+        return _scan_commits(root, args.rev_range, compiled, args.ref_names)
     if args.staged:
         return _scan_staged(root, compiled)
     return _scan_tree(root, compiled)

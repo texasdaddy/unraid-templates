@@ -192,24 +192,101 @@ def test_scan_path_finds_a_leak_in_a_path_string() -> None:
     assert guard.scan_path(f"{_HOST}.conf"), "an extension must not hide a `.lan` host"
 
 
+def test_compile_for_REJECTS_an_override_that_would_be_silently_inert() -> None:
+    """⭐ `compile_for` had ZERO direct tests, and it is the mechanism that decides what each
+    surface scans. Both of its documented refusals are pinned here.
+
+    An override key naming no pattern (a renamed label) and an override VALUE of `""` reach the
+    same bad end: the content bound comes back on a surface it was measured to false-red on, and
+    nothing says so. `""` is the sharper one, because it is a plausible way to spell "disable
+    this" and `"" or rx` silently means "keep the original".
+    """
+    with pytest.raises(ValueError, match="naming no pattern"):
+        guard.compile_for({"a label that does not exist": None})
+    with pytest.raises(ValueError, match="empty override"):
+        guard.compile_for({"unraid pool path": ""})
+    # ...and the two legitimate spellings still work.
+    removed = {label for label, _ in guard.compile_for({"unraid pool path": None})}
+    assert "unraid pool path" not in removed
+    replaced = dict(guard.compile_for({"unraid pool path": r"ZZ-NOT-A-POOL"}))
+    assert replaced["unraid pool path"].pattern == r"ZZ-NOT-A-POOL"
+
+
+def test_a_NEW_pattern_reaches_every_surface_unless_an_override_says_otherwise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⭐ THE PROPERTY `compile_for` EXISTS FOR, and it was untestable through the cached
+    accessors: a pattern added tomorrow must apply on the path and message surfaces too, or the
+    override dicts become a silent, fail-OPEN allowlist that nobody maintains.
+
+    ⚠️ The `cache_clear` calls are load-bearing. `path_patterns()`/`message_patterns()` are
+    `functools.cache`d, so without them this test is ORDER-DEPENDENT: green if it happens to run
+    before anything warms the cache, silently vacuous afterwards. The suite already knows this
+    hazard — it clears `_self_rel_path` the same way.
+
+    ⛔ AND NOTHING MAY CALL THE CACHED ACCESSORS AFTER THE `finally` AND BEFORE `monkeypatch`
+    UNDOES `PATTERNS` — that would re-warm the cache WITH the sentinel and poison every later test
+    in the process. So the negative is asserted BEFORE the patch, not after it, which proves the
+    rebuild just as well and cannot leave anything behind.
+    """
+    assert guard.scan_path("docs/ZZSENTINELZZ/x.md") == [], (
+        "premise: the sentinel must not match before it is added, or this proves nothing")
+    monkeypatch.setattr(guard, "PATTERNS", [*guard.PATTERNS, ("sentinel", r"ZZSENTINELZZ")])
+    guard.path_patterns.cache_clear()
+    guard.message_patterns.cache_clear()
+    try:
+        assert guard.scan_path("docs/ZZSENTINELZZ/x.md"), (
+            "a pattern added to PATTERNS did not reach the PATH surface")
+        assert guard.scan_message("abc", "mentions ZZSENTINELZZ"), (
+            "a pattern added to PATTERNS did not reach the MESSAGE surface")
+    finally:
+        guard.path_patterns.cache_clear()
+        guard.message_patterns.cache_clear()
+
+
 def test_the_PATH_surface_runs_a_DIFFERENT_pattern_set_and_says_which() -> None:
     """⭐⭐ A PATH IS NOT FILE CONTENT, and three patterns rely on bounds that only hold in the
     grammar they were written for. Applied verbatim to paths they reddened trees that leak nothing
     — measured, and one of them refused a `git commit` end-to-end. `PATH_PATTERN_OVERRIDES` is the
     correction; this pins WHICH patterns it removes, so removing a fourth is a deliberate act
     rather than a quiet widening of the blind spot.
+
+    ⚠️ ASSERTS THE COMPILED PATTERN, NOT THE LABEL. It used to check that the LABEL survived — and
+    a label survives while half its regex is replaced, so a third narrowing (`.local`, dropped by
+    `_LAN_ONLY`) walked straight past a test whose docstring claimed to stop exactly that.
     """
-    labels = {label for label, _ in guard.path_patterns()}
-    assert "uuid (access policy / tenant id)" not in labels, (
+    compiled = dict(guard.path_patterns())
+    assert "uuid (access policy / tenant id)" not in compiled, (
         "a UUID FILENAME is a naming convention — migrations, fixtures, cassettes, snapshots. "
         "The pattern exists for a policy or tenant id, which is a value written INSIDE a file, "
         "and the content scan still catches it there")
-    assert "unraid pool path" not in labels, (
+    assert "unraid pool path" not in compiled, (
         "a repo-relative path can never BE an absolute pool path; the pattern can only match one "
         "directory deep, where it means a docs or fixtures tree")
-    # ...and everything else still applies here.
-    assert {"private IPv4 (RFC1918)", "cgnat address", "tailnet name", "personal mail address",
-            "windows profile path", "private lan domain"} <= labels, sorted(labels)
+    assert compiled["private lan domain"].pattern == guard._LAN_ONLY, (
+        "the `.lan`-only variant is a THIRD narrowing — it drops `.local` — and it must stay "
+        "visible here rather than hiding behind a surviving label")
+    # ...and everything else applies here UNCHANGED, byte for byte against the content pattern.
+    content = dict(guard.compile_patterns())
+    for label in ("private IPv4 (RFC1918)", "cgnat address", "tailnet name",
+                  "personal mail address", "windows profile path"):
+        assert compiled[label].pattern == content[label].pattern, label
+
+
+def test_the_MESSAGE_surface_keeps_the_pool_path_but_ANCHORS_it() -> None:
+    """⛔ THE POOL PATH NEEDS ONLY A LEADING SLASH, which any nested repo path supplies — so a
+    commit message that merely NAMED one of the paths `_MUST_PASS_PATHS` blesses blocked the push,
+    while the file and its filename both passed. That is the path-surface defect repeated one dict
+    down, and a message cannot be edited without rewriting history.
+
+    Both directions, because an anchor that swallowed the real case would be worse than the bug.
+    """
+    compiled = dict(guard.message_patterns())
+    assert compiled["unraid pool path"].pattern == guard._ABS_POOL_PATH
+    assert guard.scan_message("abc", "docs: add docs" + _MNT_USER + "/notes.md") == [], (
+        "a message naming a repo path must not block the push")
+    assert guard.scan_message("abc", "moved appdata to " + _MNT_USER + "/appdata/svc"), (
+        "a message naming an ABSOLUTE pool path is still the leak this pattern exists for")
 
 
 def test_the_path_scan_INHERITS_the_patterns_LIMITS_and_says_so() -> None:
@@ -542,6 +619,80 @@ def test_a_leak_in_a_tag_on_a_BLOB_is_scanned(tmp_path: Path) -> None:
     assert res.returncode == 1, f"a tag on a blob went unread:\n{_out(res)}"
 
 
+def test_a_RENAMING_refspec_publishes_a_name_the_hook_still_scans(tmp_path: Path) -> None:
+    """⭐⭐ THE NAME THAT LANDS ON THE REMOTE IS `<remote_ref>`, NOT `<local_ref>`.
+
+    Measured bypass: with the hook reading only the local ref,
+
+        git push origin clean-tag:refs/tags/<host>.lan
+
+    scanned `refs/tags/clean-tag`, printed `no internal info added across 0 commit(s)`, exited 0,
+    and put `refs/tags/<host>.lan` on the remote. Nothing downstream caught it — CI's push trigger
+    is `branches: [main]` + `tags: ["v*"]`, and a ref named after a host matches neither, so the
+    workflow does not even run. `HEAD:refs/tags/<addr>` is the same trick without anything that
+    looks like a tag push, and `main:refs/heads/<host>.lan` does it for a branch.
+
+    This drives the REAL hook against a REAL bare remote, because the defect lives in which of two
+    stdin fields the hook reads — a unit test of the guard could not see it.
+    """
+    remote = tmp_path / "rename-remote.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True, timeout=300)
+    repo = tmp_path / "rename"
+    _seeded(repo)
+    (repo / "scripts").mkdir(exist_ok=True)
+    for src in (_REPO_ROOT / "scripts").glob("*.py"):
+        shutil.copy(src, repo / "scripts" / src.name)
+    shutil.copytree(_REPO_ROOT / ".githooks", repo / ".githooks")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "bring in the guard and its hooks")
+    _git(repo, "config", "core.hooksPath", ".githooks")
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "-q", "origin", "main")
+    _git(repo, "tag", "clean-tag")
+
+    attempt = subprocess.run(
+        ["git", *_PINNED, "push", "origin", f"clean-tag:refs/tags/{_HOST}"],
+        cwd=repo, capture_output=True, check=False, timeout=300)
+    out = attempt.stdout.decode("utf-8", "replace") + attempt.stderr.decode("utf-8", "replace")
+    landed = subprocess.run(["git", *_PINNED, "ls-remote", "--tags", str(remote)],
+                            capture_output=True, check=True, timeout=300
+                            ).stdout.decode("utf-8", "replace")
+
+    assert attempt.returncode != 0, f"the renamed ref name was not scanned:\n{out}"
+    assert _HOST not in landed, f"the leaking name reached the remote:\n{landed}"
+
+
+def test_an_ORDINARY_push_is_not_reddened_by_the_ref_name_scan(tmp_path: Path) -> None:
+    """The other half: both ref names are handed to the guard on every push, so an ordinary one
+    must stay clean. A guard that reddens every push is not a guard."""
+    remote = tmp_path / "plain-remote.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True, timeout=300)
+    repo = tmp_path / "plain"
+    _seeded(repo)
+    (repo / "scripts").mkdir(exist_ok=True)
+    for src in (_REPO_ROOT / "scripts").glob("*.py"):
+        shutil.copy(src, repo / "scripts" / src.name)
+    shutil.copytree(_REPO_ROOT / ".githooks", repo / ".githooks")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "bring in the guard and its hooks")
+    _git(repo, "config", "core.hooksPath", ".githooks")
+    _git(repo, "remote", "add", "origin", str(remote))
+
+    attempt = subprocess.run(["git", *_PINNED, "push", "origin", "main"], cwd=repo,
+                             capture_output=True, check=False, timeout=300)
+    out = attempt.stdout.decode("utf-8", "replace") + attempt.stderr.decode("utf-8", "replace")
+    assert attempt.returncode == 0, f"an ordinary first push was blocked:\n{out}"
+
+
+def test_ref_name_needs_a_range_rather_than_silently_doing_a_tree_scan(tmp_path: Path) -> None:
+    """`--ref-name` decorates the range scan. Alone it would read like a scan and perform a TREE
+    scan instead — the silent substitution `parse_args` exists to make impossible."""
+    repo = tmp_path / "refname_alone"
+    _seeded(repo)
+    res = _cli(repo, "--ref-name", f"refs/tags/{_HOST}")
+    assert res.returncode == 2, f"--ref-name without --range must be a usage error:\n{_out(res)}"
+
+
 def test_a_tag_THIS_PUSH_DOES_NOT_SEND_is_NOT_scanned(tmp_path: Path) -> None:
     """⛔⛔ SCOPING IS A CORRECTNESS PROPERTY IN BOTH DIRECTIONS, and this is the half that bites
     the innocent. `git push origin main` sends NO tags — only `--tags`/`--follow-tags` do — so a
@@ -616,15 +767,35 @@ def test_the_MESSAGE_surface_runs_a_DIFFERENT_pattern_set_and_says_which() -> No
     """The message twin of the path override test: pin WHICH patterns free prose drops, so
     dropping a further one is a deliberate act rather than a quiet widening of the blind spot.
     """
-    labels = {label for label, _ in guard.message_patterns()}
-    assert "uuid (access policy / tenant id)" not in labels, (
+    compiled = dict(guard.message_patterns())
+    assert "uuid (access policy / tenant id)" not in compiled, (
         "a message quoting a fixture id is ordinary; the id itself is caught where it LIVES")
-    # ⭐ `unraid pool path` STAYS on this surface: a message saying appdata moved to a stock pool
-    # root really does publish the storage layout, and no ordinary message carries that shape by
-    # accident. (Unlike a PATH, where the same shape can only ever be a docs or fixtures tree.)
-    assert "unraid pool path" in labels
-    assert {"private IPv4 (RFC1918)", "cgnat address", "tailnet name", "personal mail address",
-            "windows profile path", "private lan domain"} <= labels, sorted(labels)
+    # ⭐ `unraid pool path` STAYS on this surface, ANCHORED — a message saying appdata moved to a
+    # stock pool root really does publish the storage layout. (Unlike a PATH, where the same shape
+    # can only ever be a docs or fixtures tree, so it is dropped entirely.)
+    assert "unraid pool path" in compiled
+    assert compiled["private lan domain"].pattern == guard._LAN_ONLY, (
+        "the `.lan`-only variant drops `.local` here too — assert the PATTERN, not the label")
+    content = dict(guard.compile_patterns())
+    for label in ("private IPv4 (RFC1918)", "cgnat address", "tailnet name",
+                  "personal mail address", "windows profile path"):
+        assert compiled[label].pattern == content[label].pattern, label
+
+
+def test_the_dropped_local_half_is_DECLARED_not_merely_absent() -> None:
+    """⚠️ A DECLARED GAP, pinned in both directions so it stays a decision.
+
+    `_LAN_ONLY` drops the `.local` half of `private lan domain` from BOTH new surfaces, so a
+    genuine mDNS host is not caught in a filename, a directory, a message or a tag. It is not
+    separable: the machine-local override filenames the corpora require to PASS are the same string
+    shape. It IS caught in file content, which is where such a host is actually configured.
+    """
+    host = "printer-b" + _LOCAL
+    assert guard.scan_path(f"docs/{host}/readme.md") == [], "declared: not caught on a path"
+    assert guard.scan_message("abc", f"wire up {host}") == [], "declared: not caught in a message"
+    assert guard.scan_text(f"AGENT_URL=http://{host}:9999/mcp", COMPILED), (
+        "...but it MUST still be caught in file CONTENT, which is the half that makes the trade "
+        "acceptable. If this ever stops firing, the gap is no longer declared, it is total")
 
 
 def test_the_message_read_returns_ONLY_the_message(tmp_path: Path) -> None:

@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<!--
+  iron-tide - a self-hosted real-time strategy game (its own repo:
+  github.com/texasdaddy/iron-tide). Static site built by that repo's CI -> GHCR.
+  Deploys the Unraid way: UI import -> pick a port -> Apply.
+
+  This one is unusual for this repo in that it has NOTHING to configure. There
+  is no database, no volume, no environment variable and no secret: the game is
+  plain ES modules served by nginx, and everything it draws or plays is
+  generated in the browser at load time. Player settings, keybindings and
+  tutorial progress live in each browser's local storage, so the container is
+  genuinely stateless and can be deleted and recreated without losing anything.
+
+  The image runs as uid 101 with no root master process and listens on 8080
+  inside the container; only the host port below is worth choosing.
+-->
+<Container version="2">
+  <Name>iron-tide</Name>
+  <Repository>ghcr.io/texasdaddy/iron-tide:stable</Repository>
+  <Registry>https://github.com/texasdaddy/iron-tide/pkgs/container/iron-tide</Registry>
+  <Network>bridge</Network>                                          <!-- neutral default; pick br0 + a fixed IP in the UI if you prefer. -->
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support/>
+  <Project>https://github.com/texasdaddy/iron-tide</Project>
+  <Overview>IRON TIDE - a real-time strategy game of streaming economies and mechanised war, in the tradition of the 1997 Cavedog title but sharing none of its content. Metal and energy are spent continuously while you build rather than deducted when you click, so when your commitments outrun your income everything you are building slows down together. Two factions, twenty-nine unit types, seeded procedural maps, fog of war with a separate radar layer that reports position without identity, reclaimable wreckage, and a Commander whose death ends the match. A fifteen-step first-run tutorial teaches the controls by watching what you actually do. Nothing to configure: no volumes, no environment variables, no secrets, no database. The whole game is a few hundred kilobytes of text - unit sprites are drawn with canvas vector calls at load, terrain is a seeded heightmap shaded in the browser, and every sound effect is synthesised with the Web Audio API, so there is not a single image or audio file in the image. Stateless: settings and keybindings live in your browser, so this container can be deleted and recreated freely. Also installs from Safari on an iPhone or iPad as a fullscreen offline app with touch controls - serve it over HTTPS through your reverse proxy for that to work.</Overview>
+  <Category>GameServers: Other:</Category>
+  <WebUI>http://[IP]:[PORT:8080]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/templates/iron-tide.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/icons/iron-tide.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <DateInstalled/>
+  <Description>IRON TIDE - a self-hosted real-time strategy game. Stateless; nothing to configure but the port.</Description>
+  <Config Name="HTTP Port" Target="8080" Default="8420" Mode="tcp" Description="Host port the game is served on. The container always listens on 8080 internally - change the host side only. Open the WebUI at this port and play; there is nothing else to set up." Type="Port" Display="always" Required="true" Mask="false">8420</Config>
+</Container>

@@ -568,11 +568,13 @@ def test_a_tag_CUT_AT_AN_ALREADY_PUSHED_COMMIT_is_still_scanned(tmp_path: Path) 
     assert ci_form.returncode == 1, f"the CI form missed it:\n{_out(ci_form)}"
 
 
-def test_a_leak_in_a_LIGHTWEIGHT_TAG_NAME_reds_the_range_scan(tmp_path: Path) -> None:
-    """A lightweight tag has no object, no tagger and no message — only a NAME, which publishes.
+def test_a_LIGHTWEIGHT_tag_carries_nothing_this_package_scans(tmp_path: Path) -> None:
+    """⚠️ THE OTHER HALF OF THE #49 GAP, at the guard rather than the hook.
 
-    Excluding the cheap kind because it carries no message would leave exactly one hole, and the
-    ref NAME is the only thing there is to scan.
+    A lightweight tag has no object, no tagger and no message — only a NAME. This package scans
+    annotated tag OBJECTS (which is what its acceptance names), so a lightweight tag contributes
+    nothing to scan and its name goes unread. Pinned so the boundary is visible next to the
+    annotated-tag tests that DO catch things, rather than being inferred from their absence.
     """
     repo = tmp_path / "tag_name"
     _seeded(repo)
@@ -580,9 +582,12 @@ def test_a_leak_in_a_LIGHTWEIGHT_TAG_NAME_reds_the_range_scan(tmp_path: Path) ->
     _commit(repo, "clean subject")
     _git(repo, "tag", f"release-{_HOST}")
 
-    assert f"release-{_HOST}" in _git(repo, "tag", "-l")
+    assert f"release-{_HOST}" in _git(repo, "tag", "-l"), "vacuity guard: the tag must exist"
+    assert guard.refs_being_published(repo, f"refs/tags/release-{_HOST} --not --remotes") == [], (
+        "a lightweight tag has no object to read")
     res = _cli(repo, "--range", f"refs/tags/release-{_HOST} --not --remotes")
-    assert res.returncode == 1, f"a leak in a tag NAME was published:\n{_out(res)}"
+    assert res.returncode == 0, (
+        f"a leaking tag NAME is now caught — #49 has been closed, so invert this:\n{_out(res)}")
 
 
 def test_a_leak_in_a_NESTED_tag_is_read_at_every_level(tmp_path: Path) -> None:
@@ -619,25 +624,31 @@ def test_a_leak_in_a_tag_on_a_BLOB_is_scanned(tmp_path: Path) -> None:
     assert res.returncode == 1, f"a tag on a blob went unread:\n{_out(res)}"
 
 
-def test_a_RENAMING_refspec_publishes_a_name_the_hook_still_scans(tmp_path: Path) -> None:
-    """⭐⭐ THE NAME THAT LANDS ON THE REMOTE IS `<remote_ref>`, NOT `<local_ref>`.
+def test_a_leaking_REF_NAME_is_a_STATED_GAP_and_an_ORDINARY_push_still_works(
+    tmp_path: Path,
+) -> None:
+    """⚠️ A DECLARED GAP, driven end to end so it is a measured fact rather than a belief.
 
-    Measured bypass: with the hook reading only the local ref,
+    A ref NAME is published, and nothing scans one. `git push origin clean-tag:refs/tags/<host>.lan`
+    puts a leaking name on the remote with the guard reporting clean, and CI does not catch it
+    either: its push trigger is `branches: [main]` + `tags: ["v*"]`, which a ref named after a host
+    matches neither of, so the workflow never runs.
 
-        git push origin clean-tag:refs/tags/<host>.lan
+    ⛔ THIS IS A REVERT, NOT AN OVERSIGHT — issue #49. Ref-name scanning was built, and then
+    withdrawn after producing a production bypass in three consecutive verification rounds: first
+    the local-vs-remote ref confusion above, then — once that was closed — `<host>.lan-deploy` (one
+    trailing hyphen), a UUID-named ref and a `.local`-named ref all still published clean, while
+    the LOCAL name produced a false red whose printed remedy was inert against it. It is outside
+    this package's acceptance criteria, which name a leak in a commit MESSAGE and in an annotated
+    tag MESSAGE, and an addition that cannot converge does not get to hold the package.
 
-    scanned `refs/tags/clean-tag`, printed `no internal info added across 0 commit(s)`, exited 0,
-    and put `refs/tags/<host>.lan` on the remote. Nothing downstream caught it — CI's push trigger
-    is `branches: [main]` + `tags: ["v*"]`, and a ref named after a host matches neither, so the
-    workflow does not even run. `HEAD:refs/tags/<addr>` is the same trick without anything that
-    looks like a tag push, and `main:refs/heads/<host>.lan` does it for a branch.
-
-    This drives the REAL hook against a REAL bare remote, because the defect lives in which of two
-    stdin fields the hook reads — a unit test of the guard could not see it.
+    Pinned in BOTH directions so the revert stays deliberate: the gap is real, and an ordinary push
+    is not reddened by any leftover of the withdrawn machinery. If someone closes #49, the first
+    assertion inverts and this docstring is what tells them why it was ever here.
     """
-    remote = tmp_path / "rename-remote.git"
+    remote = tmp_path / "refname-remote.git"
     subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True, timeout=300)
-    repo = tmp_path / "rename"
+    repo = tmp_path / "refname"
     _seeded(repo)
     (repo / "scripts").mkdir(exist_ok=True)
     for src in (_REPO_ROOT / "scripts").glob("*.py"):
@@ -647,50 +658,23 @@ def test_a_RENAMING_refspec_publishes_a_name_the_hook_still_scans(tmp_path: Path
     _git(repo, "commit", "-q", "-m", "bring in the guard and its hooks")
     _git(repo, "config", "core.hooksPath", ".githooks")
     _git(repo, "remote", "add", "origin", str(remote))
-    _git(repo, "push", "-q", "origin", "main")
-    _git(repo, "tag", "clean-tag")
 
-    attempt = subprocess.run(
-        ["git", *_PINNED, "push", "origin", f"clean-tag:refs/tags/{_HOST}"],
-        cwd=repo, capture_output=True, check=False, timeout=300)
-    out = attempt.stdout.decode("utf-8", "replace") + attempt.stderr.decode("utf-8", "replace")
+    # The false-red direction FIRST: an ordinary push must go through.
+    ordinary = subprocess.run(["git", *_PINNED, "push", "origin", "main"], cwd=repo,
+                              capture_output=True, check=False, timeout=300)
+    out = ordinary.stdout.decode("utf-8", "replace") + ordinary.stderr.decode("utf-8", "replace")
+    assert ordinary.returncode == 0, f"an ordinary first push was blocked:\n{out}"
+
+    # ...and the stated gap.
+    _git(repo, "tag", "clean-tag")
+    renamed = subprocess.run(["git", *_PINNED, "push", "origin", f"clean-tag:refs/tags/{_HOST}"],
+                             cwd=repo, capture_output=True, check=False, timeout=300)
     landed = subprocess.run(["git", *_PINNED, "ls-remote", "--tags", str(remote)],
                             capture_output=True, check=True, timeout=300
                             ).stdout.decode("utf-8", "replace")
-
-    assert attempt.returncode != 0, f"the renamed ref name was not scanned:\n{out}"
-    assert _HOST not in landed, f"the leaking name reached the remote:\n{landed}"
-
-
-def test_an_ORDINARY_push_is_not_reddened_by_the_ref_name_scan(tmp_path: Path) -> None:
-    """The other half: both ref names are handed to the guard on every push, so an ordinary one
-    must stay clean. A guard that reddens every push is not a guard."""
-    remote = tmp_path / "plain-remote.git"
-    subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True, timeout=300)
-    repo = tmp_path / "plain"
-    _seeded(repo)
-    (repo / "scripts").mkdir(exist_ok=True)
-    for src in (_REPO_ROOT / "scripts").glob("*.py"):
-        shutil.copy(src, repo / "scripts" / src.name)
-    shutil.copytree(_REPO_ROOT / ".githooks", repo / ".githooks")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", "bring in the guard and its hooks")
-    _git(repo, "config", "core.hooksPath", ".githooks")
-    _git(repo, "remote", "add", "origin", str(remote))
-
-    attempt = subprocess.run(["git", *_PINNED, "push", "origin", "main"], cwd=repo,
-                             capture_output=True, check=False, timeout=300)
-    out = attempt.stdout.decode("utf-8", "replace") + attempt.stderr.decode("utf-8", "replace")
-    assert attempt.returncode == 0, f"an ordinary first push was blocked:\n{out}"
-
-
-def test_ref_name_needs_a_range_rather_than_silently_doing_a_tree_scan(tmp_path: Path) -> None:
-    """`--ref-name` decorates the range scan. Alone it would read like a scan and perform a TREE
-    scan instead — the silent substitution `parse_args` exists to make impossible."""
-    repo = tmp_path / "refname_alone"
-    _seeded(repo)
-    res = _cli(repo, "--ref-name", f"refs/tags/{_HOST}")
-    assert res.returncode == 2, f"--ref-name without --range must be a usage error:\n{_out(res)}"
+    assert renamed.returncode == 0 and _HOST in landed, (
+        "a leaking ref NAME is now caught — #49 has been closed, so invert this assertion and "
+        "delete the stated gap from `refs_being_published` and `.githooks/pre-push`")
 
 
 def test_a_tag_THIS_PUSH_DOES_NOT_SEND_is_NOT_scanned(tmp_path: Path) -> None:

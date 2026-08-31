@@ -1381,17 +1381,36 @@ def test_an_UNSTAGED_deletion_of_a_clean_file_does_NOT_block_the_commit(tmp_path
 @pytest.mark.timeout(300)
 def test_staged_content_that_is_not_UTF8_is_still_reported_as_not_cleared(tmp_path: Path) -> None:
     """The fallback still fails closed. Reading the blob answers the question when it CAN be
-    decoded; when it cannot, the honest answer is unchanged — not scanned, so not cleared."""
+    decoded; when it cannot, the honest answer is unchanged — not scanned, so not cleared.
+
+    ⚠️ THE PATH MATTERS AS MUCH AS THE VERDICT HERE. `wide.txt` has no binary suffix, so it must be
+    REPORTED. The same bytes at a path that DOES claim to be an asset (`wide.pdf`) are skipped
+    silently instead — that is the split `_looks_binary` exists for, and pinning both together is
+    what stops one of them quietly adopting the other's behaviour.
+
+    ⚠️ ASSERTS THE PROPERTY, NOT THE SENTENCE. This used to require the literal phrase "could not
+    be read", which the message no longer uses — it now names the actual cause (the staged content
+    is not UTF-8) rather than the two possible causes it used to hedge between. A test pinned to
+    wording reddens on a message that got MORE accurate, so it asks for the file, the
+    not-scanned-so-not-cleared verdict, and the exit code instead.
+    """
     repo = tmp_path / "stagedbin"
     _init(repo)
+    wide = f"AGENT={_HOST}\n".encode("utf-16")
     blob = repo / "wide.txt"
-    blob.write_bytes(f"AGENT={_HOST}\n".encode("utf-16"))
-    _git(repo, "add", "wide.txt")
+    blob.write_bytes(wide)
+    asset = repo / "wide.pdf"
+    asset.write_bytes(wide)
+    _git(repo, "add", "wide.txt", "wide.pdf")
     blob.unlink()
+    asset.unlink()
 
     proc = _run_guard(repo)
     assert proc.returncode == 1, f"undecodable staged content was cleared: {proc.stdout}"
-    assert "wide.txt" in proc.stdout and "could not be read" in proc.stdout, proc.stdout
+    assert "not scanned, so not cleared" in proc.stdout, proc.stdout
+    assert "wide.txt" in proc.stdout, proc.stdout
+    assert "wide.pdf" not in proc.stdout, (
+        f"a declared binary asset must be skipped silently, not reported: {proc.stdout}")
 
 
 @pytest.mark.timeout(300)

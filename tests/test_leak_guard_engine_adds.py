@@ -575,6 +575,11 @@ def test_a_LIGHTWEIGHT_tag_carries_nothing_this_package_scans(tmp_path: Path) ->
     annotated tag OBJECTS (which is what its acceptance names), so a lightweight tag contributes
     nothing to scan and its name goes unread. Pinned so the boundary is visible next to the
     annotated-tag tests that DO catch things, rather than being inferred from their absence.
+
+    ⚠️ THE CONTRAST IS THE POINT, and it is asserted rather than described: an ANNOTATED tag with
+    the SAME leaking name and a clean message IS caught, because `git cat-file tag` puts a
+    `tag <name>` header inside the object. "The name is not scanned" is true only of a name with
+    no object behind it.
     """
     repo = tmp_path / "tag_name"
     _seeded(repo)
@@ -588,6 +593,13 @@ def test_a_LIGHTWEIGHT_tag_carries_nothing_this_package_scans(tmp_path: Path) ->
     res = _cli(repo, "--range", f"refs/tags/release-{_HOST} --not --remotes")
     assert res.returncode == 0, (
         f"a leaking tag NAME is now caught — #49 has been closed, so invert this:\n{_out(res)}")
+
+    # ...and the contrast: the SAME name as an ANNOTATED tag IS caught, via the object's header.
+    _git(repo, "tag", "-a", f"annotated-{_HOST}", "-m", "an entirely clean message")
+    annotated = _cli(repo, "--range", f"refs/tags/annotated-{_HOST} --not --remotes")
+    assert annotated.returncode == 1, (
+        f"an ANNOTATED tag's name is inside its object and must be read:\n{_out(annotated)}")
+    assert "<tag object>" in _out(annotated), _out(annotated)
 
 
 def test_a_leak_in_a_NESTED_tag_is_read_at_every_level(tmp_path: Path) -> None:

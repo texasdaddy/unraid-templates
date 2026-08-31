@@ -33,12 +33,15 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     # refspec may rename (`git push origin clean:refs/tags/v1`). The RANGE is still built from
     # `$local_ref`, because that is what names an object in THIS clone.
     #
-    # ⛔ THE NAME ITSELF IS NOT SCANNED, and that is a deliberate revert — see issue #49. A version
-    # of this passed both names to the guard so a leaking ref NAME could not be published under a
-    # clean local one; it produced a production bypass in three consecutive verification rounds and
-    # was withdrawn as beyond this package's scope. A leak that exists ONLY as a ref name — a
-    # lightweight tag or a branch called after a host — is therefore not caught by any layer. #49
-    # carries the repros.
+    # ⛔ THE NAME IS NOT SCANNED AS A NAME, and that is a deliberate revert — see issue #49. A
+    # version of this passed both names to the guard so a leaking ref NAME could not be published
+    # under a clean local one; it produced a production bypass in three consecutive verification
+    # rounds and was withdrawn as beyond this package's scope.
+    #
+    # ⚠️ AN ANNOTATED TAG'S NAME IS STILL READ — INCIDENTALLY. `git cat-file tag` emits a
+    # `tag <name>` header inside the object, and the guard scans the whole object, so an annotated
+    # tag called after a host IS caught. What is unread is a name with no object behind it: a
+    # LIGHTWEIGHT tag, or a BRANCH. #49 carries the repros.
     case "$remote_ref" in
         refs/tags/*)
             # ⭐ A TAG PUSH IS SCANNED BY REF, NOT BY WHAT ITS COMMIT REACHES, and the difference

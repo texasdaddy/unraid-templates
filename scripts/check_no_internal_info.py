@@ -137,10 +137,15 @@ WHAT A SCAN LOOKS AT (five surfaces, not one)
         and in every clone, and was read by nothing at all until keystone#20;
       * COMMIT IDENTITY — author and committer name/email;
       * COMMIT MESSAGES — subject and body, rendered on every commit page (keystone#21 / #39);
-      * TAGS the push NAMES — an annotated tag's name, tagger and message, and a lightweight tag's
-        name. Scoped by the REF being pushed, not by what its commit reaches: a tag cut at an
-        already-pushed commit is the ordinary release gesture and covers zero new commits, while a
-        purely local scratch tag must not block a branch push that never sends it.
+      * ANNOTATED TAGS the push NAMES — the whole tag OBJECT, which carries the tag's name, its
+        tagger and its message together. Scoped by the REF being pushed, not by what its commit
+        reaches: a tag cut at an already-pushed commit is the ordinary release gesture and covers
+        zero new commits, while a purely local scratch tag must not block a branch push that never
+        sends it.
+        ⚠️ A LIGHTWEIGHT tag has no object, so a leak that exists only as a ref NAME — a
+        lightweight tag, or a branch called after a host — is read by NO layer. That is issue #49,
+        and it is a deliberate revert rather than an omission; `refs_being_published` carries the
+        reasoning and the three designs that failed.
     Three of the last four can be removed only by rewriting history, which is why they belong on
     the same push-path gate as a leaked line rather than in a checklist. A TAG is the exception —
     it is a ref, and `git tag -d` plus `git push --delete` clears it — but it is still published,

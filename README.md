@@ -24,6 +24,8 @@ https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/icons/<name>.
 | github-runner (one instance per repo) | `icons/github-runner.png` | `templates/github-runner.xml` |
 | the-desk (prod) | `icons/the-desk.png` | `templates/the-desk.xml` |
 | iron-tide | `icons/iron-tide.png` | `templates/iron-tide.xml` |
+| tldw-redis (start 1st) | `icons/tldw-redis.png` | `templates/tldw-redis.xml` |
+| tldw-server (start 2nd) | `icons/tldw-server.png` | `templates/tldw-server.xml` |
 
 Every template + icon in this repo must have a row here — keep this table in sync when adding either (the reauth-bot icon was added 2026-07-25 but not listed until 2026-07-27). Scripts have their own manifest under [Scripts](#scripts); the same rule applies there.
 

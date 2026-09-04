@@ -1,0 +1,103 @@
+<?xml version="1.0"?>
+<!--
+  tldw-server - the API half of tl;dw (Too Long, Didn't Watch), a third-party FastAPI
+  backend that ingests media, transcribes it and serves RAG over the result, with an MCP
+  server for agent access: github.com/rmusser01/tldw_server. Not a Keystone service;
+  nothing here is specific to any host or operator.
+
+  TWO CONTAINERS: tldw-redis starts first, then this one. Unraid templates have no
+  equivalent of compose's depends_on or healthchecks, so the ordering cannot be expressed
+  mechanically - it is stated here and in the sibling's Overview because that is the only
+  place an operator sees it before the fact.
+
+  There is no tldw-webui template in this repository yet, deliberately. In the published
+  WebUI image the Next.js rewrite that forwards /api/* to the backend is BAKED INTO THE
+  BUILD OUTPUT - `http://app:8000` is a literal in server.js and routes-manifest.json,
+  because upstream passes it as a build argument and builds its own image. So the one
+  thing a template would need to move cannot be moved by setting a variable at runtime.
+  Packaging it needs a host-side Docker network with this container aliased `app`, which
+  is a decision about this repository's conventions rather than a detail. The measurement
+  and the options are in issue #55.
+
+  WIRING IS BY VARIABLE. REDIS_URL below is blank and you fill in a real address on import.
+  Upstream addresses Redis as redis://redis:6379, a compose service name that resolves only
+  on a user-defined Docker network - a host-side object a template cannot create. Filling in
+  an address is honest about the dependency and survives a container rename. This leg does
+  work on the stock bridge network: a container reaching the host's own address at a
+  published port is routable.
+
+  ⚠️ SECRETS: BLANK MEANS "GENERATE A NEW ONE", WHICH IS NOT THE SAME AS SAFE. The image's
+  entrypoint (Dockerfiles/entrypoints/tldw-app-first-run.sh at the pinned release) fills in
+  a generated value for a secret it considers unset, and the two paths are not the same:
+
+    SINGLE_USER_API_KEY is replaced when it is blank, shorter than 16 characters, or one of
+    a list of known placeholders that includes upstream's own `change-me`. So the compose
+    default can never become a working API key here.
+
+    MCP_JWT_SECRET, MCP_API_KEY_SALT and BYOK_ENCRYPTION_KEY are replaced only when blank or
+    beginning with `CHANGE_ME` - matched case-sensitively, with no length check at all.
+    A short or lowercase-placeholder MCP secret is passed through unchanged, and upstream's
+    own floor for the two MCP secrets is 32 characters.
+
+  Whatever it generates is written to /app/tldw_Server_API/Config_Files/.env, INSIDE the
+  container. That file survives a restart but not an update or a recreate, while the marker
+  saying auth was already initialised does survive - it lives on the /app/Databases mount.
+  So the practical consequence is not per-restart churn, it is this: every image UPDATE
+  regenerates whatever you left blank, invalidating every key and token already issued. The
+  container log carries one line per generated secret; the values themselves are never
+  printed. Note that one of those lines is printed even when you DID supply your own key -
+  the file is written before your value is applied - so it is not evidence your setting was
+  ignored. Set the secrets explicitly and they are stable.
+
+  BYOK_ENCRYPTION_KEY is the fourth secret on that list and this template offers no field
+  for it, because the feature it belongs to (storing per-user provider API keys through the
+  application) is off unless you go looking for it. If you do use it, set the variable
+  yourself with Add another Path, Port, Variable, Label or Device - and set it BEFORE you
+  store the first provider key. It rotates on every update like the others, and the
+  upstream guard meant to catch that does not fire in this configuration: it looks for the
+  users database at a path derived from DATABASE_URL, and the relative SQLite URL shipped
+  here resolves to a location that does not exist, so the count comes back zero and a fresh
+  key is generated. Stored provider keys then become permanently unreadable, with no error.
+-->
+<Container version="2">
+  <Name>tldw-server</Name>
+  <Repository>ghcr.io/rmusser01/tldw_server:0.1.38</Repository>
+  <Registry>https://github.com/rmusser01/tldw_server/pkgs/container/tldw_server</Registry>
+  <Network>bridge</Network>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support/>
+  <Project>https://github.com/rmusser01/tldw_server</Project>
+  <Overview>tl;dw (Too Long, Didn't Watch) - the API server: an API-first FastAPI backend that ingests media, transcribes it locally and serves RAG over the resulting corpus, with an MCP server for agent access. TWO CONTAINERS, STARTED IN ORDER: tldw-redis first, then tldw-server. There is no template equivalent of compose depends_on, so nothing enforces that ordering for you - this container expects Redis to be reachable at REDIS_URL when it starts. There is no tldw-webui template here yet: in the published WebUI image the rewrite that forwards browser API calls to the backend is baked into the build output, so the one thing a template would need to move cannot be moved by setting a variable at runtime. WIRING: set REDIS_URL to the address of your tldw-redis container - this machine's address and the host port you published it on. Upstream's default of redis://redis:6379 is a compose service name and will not resolve on bridge. STORAGE: the /app/Databases mount holds the SQLite databases and therefore the ingested corpus - it is the only thing here worth backing up, and losing it loses everything ingested. Read that field's note about directory ownership before you Apply; the container runs as a fixed non-root user and offers no PUID/PGID. SECRETS: set SINGLE_USER_API_KEY, MCP_JWT_SECRET and MCP_API_KEY_SALT yourself (openssl rand -base64 32). Left blank, the image generates them and stores them inside the container rather than on the mount, so the next image update rotates them and silently invalidates every key and token already issued. EXPOSURE: this publishes an HTTP API on every interface of this machine. It authenticates callers with SINGLE_USER_API_KEY, but the first-run setup flow is reachable remotely by default (upstream ships that setting for a deployment bound to loopback only, which this is not) - so bring it up on a network you trust, and finish the setup flow promptly. WHAT TO EXPECT: upstream describes itself as 0.1.41 beta - "expect rough edges and please report issues" - and the published image trails the source tree, so the pinned 0.1.38 is older still. It pulls media with yt-dlp and ffmpeg and transcribes with faster_whisper, so it is CPU-hungry and slow under load rather than a lightweight container; transcription is CPU-bound in this template and GPU support is unverified, which is why no GPU passthrough fields are offered here. It also enforces an outbound egress policy that blocks media URLs pointing at private networks, which is normally what you want and surprising if you aim it at something on your own LAN.</Overview>
+  <Category>Productivity: Tools:Utilities</Category>
+  <WebUI>http://[IP]:[PORT:8000]/ready</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/templates/tldw-server.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/icons/tldw-server.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <DateInstalled/>
+  <Description>tl;dw API server - media ingest, local transcription and RAG, with an MCP server. Needs tldw-redis running first.</Description>
+
+  <!-- ===== Ports and volumes ===== -->
+  <Config Name="HTTP Port" Target="8000" Default="8412" Mode="tcp" Description="Host port for the API. The container always listens on 8000 internally - change the host side only. The default here is deliberately not 8000: that is a popular port and upstream's own quickstart takes it, so a neutral value avoids a collision on a busy host. ⚠️ Unlike upstream's compose file, which binds the API to loopback only, this publishes it on EVERY interface of this machine - which is the point of a container you reach from elsewhere, and worth knowing before you start it on an untrusted network. Whatever you choose, this is the address any MCP client must be pointed at." Type="Port" Display="always" Required="true" Mask="false">8412</Config>
+  <Config Name="Databases" Target="/app/Databases" Default="" Mode="rw" Description="REQUIRED. The SQLite databases live here, which means the ingested corpus does too - every transcript, every embedding, everything the RAG answers from. Set an absolute path on a POOL (e.g. /mnt/&lt;pool&gt;/appdata/tldw-server/Databases). Leave it unmounted and the corpus is written into the container layer and destroyed by the next update, having reported no error at any point. This mount also holds the marker file that records that first-run auth initialisation already happened. ⚠️ OWNERSHIP MATTERS HERE, because this is the one place this image differs from a normal Unraid container: it runs as a FIXED non-root user and offers no PUID/PGID setting, and upstream's own compose file sidesteps the question by using a named Docker volume rather than a host path. If this directory ends up owned by root and not group-writable - which is what happens when Docker creates it for you rather than you creating it under an appdata share - the container cannot write its database, first-run auth initialisation fails, and the container prints an AUTH INITIALIZATION FAILED banner and stops. If you see that banner, the fix is the directory's ownership, not any setting on this page." Type="Path" Display="always" Required="true" Mask="false"/>
+
+  <!-- ===== Secrets. Blank does not fail closed - see the header comment. ===== -->
+  <Config Name="SINGLE_USER_API_KEY" Target="SINGLE_USER_API_KEY" Default="" Mode="" Description="The API key every caller presents in single-user mode. SET THIS - generate one with: openssl rand -base64 32. Upstream ships the literal placeholder change-me in its compose file; this template deliberately carries no default, and the image refuses change-me, a handful of similar placeholders, and anything under 16 characters, generating a strong key instead - so a blank field cannot leave you with a known credential. What a blank field does leave you with is a key the container generated for itself and wrote to a file inside its own filesystem. That value is never printed to the log, so recovering it means reading it out of the running container, and it is replaced the next time the container is updated or recreated, which breaks every client you had configured. Note that Unraid does not enforce the Required flag - a blank value here will not stop the container starting." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="MCP_JWT_SECRET" Target="MCP_JWT_SECRET" Default="" Mode="" Description="Signing secret for the MCP server's tokens. SET THIS - openssl rand -base64 32, which gives you the 32 characters upstream asks for. Upstream auto-generates the MCP secrets per process only when MCP is running with local-only loopback defaults, and states plainly that those ephemeral secrets do not persist across restarts; any deployment reached from another machine is expected to set them explicitly, which is this one. ⚠️ The image only fills this in when it is blank or begins with CHANGE_ME, matched case-sensitively, and it applies no minimum length - so unlike the API key above, a short or oddly-spelled placeholder is passed through to the application unchanged rather than replaced." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="MCP_API_KEY_SALT" Target="MCP_API_KEY_SALT" Default="" Mode="" Description="Salt for MCP API-key hashing. SET THIS - openssl rand -base64 32. This is the one most worth getting right, because its failure is quiet and delayed: left blank, the container generates a salt the first time it runs and stores it in a file that survives a restart but NOT an update or a recreate. So everything works for weeks, and then the next image update issues a new salt and every MCP token you had handed out stops being recognised. Nothing reports an error - the tokens simply no longer authenticate - and working that out from scratch costs an hour. The same caveat as the JWT secret applies: the image replaces this only when it is blank or begins with CHANGE_ME, and enforces no minimum length of its own." Type="Variable" Display="always" Required="true" Mask="true"/>
+
+  <!-- ===== Wiring ===== -->
+  <Config Name="REDIS_URL" Target="REDIS_URL" Default="" Mode="" Description="Where the tldw-redis container is. REQUIRED in this deployment: fill in redis://&lt;server-ip&gt;:&lt;host-port&gt;/0 using the address of the machine running these containers and the host port you gave tldw-redis (6380 if you took its default). Upstream's default is redis://redis:6379, which resolves only on a user-defined Docker network - on the stock bridge network there is no such name to resolve, which is why this is filled in by hand rather than defaulted. Start tldw-redis before this container. ⚠️ This field is deliberately NOT masked, because it is the one most often mistyped and a hidden value is far harder to diagnose - so if you protect your Redis with a password, be aware the URL carrying it is readable on this page." Type="Variable" Display="always" Required="true" Mask="false"/>
+
+  <!-- ===== Session and CSRF posture ===== -->
+  <Config Name="SESSION_COOKIE_SECURE" Target="SESSION_COOKIE_SECURE" Default="1" Mode="" Description="Marks the session cookie Secure, so a browser will only ever send it over HTTPS. The application's own default at this release is already secure; this field ships the same value explicitly so that the posture is visible on this page rather than implied, and so lowering it has to be a deliberate act. ⚠️ Secure means what it says: a browser will not return this cookie to a plain http:// address, so any browser-driven session against this container needs HTTPS in front of it - a reverse proxy is the normal answer. Setting 0 makes browser sessions work over plain HTTP at the cost of sending the cookie in clear text on your network; an API client presenting the API key is unaffected either way." Type="Variable" Display="always" Required="false" Mask="false">1</Config>
+  <Config Name="CSRF_ENABLED" Target="CSRF_ENABLED" Default="0" Mode="" Description="Cross-site request forgery protection for browser-driven requests. Shipped OFF, matching the application's own behaviour in single-user mode, and chosen rather than inherited: this protection issues a double-submit cookie that carries the Secure flag from the setting above and must be readable by JavaScript, so with the secure cookie on and no HTTPS in front the browser discards it and every write it guards fails with a 403 naming CSRF rather than the real cause. Note that at these defaults the browser session cookie is equally undeliverable, so over plain HTTP there is no authenticated browser session for CSRF to protect in the first place. ⚠️ TURN THIS ON - set 1 - the same day you put HTTPS in front of this container. That is the point at which browser sessions start working and this protection stops being inert, and it will not switch itself on. Requests authenticating with the API key rather than a browser session are unaffected either way." Type="Variable" Display="always" Required="false" Mask="false">0</Config>
+
+  <!-- ===== Everything below has a working default ===== -->
+  <Config Name="AUTH_MODE" Target="AUTH_MODE" Default="single_user" Mode="" Description="single_user (one API key) or multi_user (JWT plus a Postgres users database). LEAVE THIS ALONE: this template supports single_user only, and multi_user does not merely need extra settings, it actively refuses to start here. The entrypoint rejects a DATABASE_URL supplied through the container environment when the mode is multi_user - and DATABASE_URL is always supplied here, by the field below - so switching the mode stops the container at boot with an error about the database URL. Making multi_user work needs settings this template does not offer, and changing the mode also re-triggers first-run auth initialisation, because the marker file on the mount is per-mode." Type="Variable" Display="advanced" Required="false" Mask="false">single_user</Config>
+  <Config Name="DATABASE_URL" Target="DATABASE_URL" Default="sqlite:///./Databases/users.db" Mode="" Description="The users/auth database. The relative path resolves under the container's working directory, which puts the file on the /app/Databases mount above - so leave it alone unless you are moving to Postgres, in which case the mount stops being where your data is. Masked because a Postgres URL carries the database password inside it." Type="Variable" Display="advanced" Required="false" Mask="true">sqlite:///./Databases/users.db</Config>
+  <Config Name="UVICORN_WORKERS" Target="UVICORN_WORKERS" Default="2" Mode="" Description="How many Uvicorn worker processes serve the API. Upstream notes that SQLite together with multiple Uvicorn workers can increase lock contention, and recommends Postgres or splitting the background jobs into their own containers for heavier workloads - this template is the light single-user profile, where 2 is upstream's own default. If ingest and browsing start blocking each other under load, this is the first number to look at." Type="Variable" Display="advanced" Required="false" Mask="false">2</Config>
+  <Config Name="TLDW_SETUP_ALLOW_REMOTE" Target="TLDW_SETUP_ALLOW_REMOTE" Default="1" Mode="" Description="Allows the first-run setup flow to be completed from another machine rather than only from the container's own loopback. It has to be 1 for a container you administer from your desktop, which is what this is. ⚠️ Upstream also defaults it to 1, but upstream binds the API to loopback only, so nothing outside the host could reach the setup flow anyway; this template publishes the port on every interface, so here the setting genuinely does open a remotely-reachable setup flow. That is the trade this container makes to be usable at all - complete the setup promptly rather than leaving a fresh container sitting on the network, and set 0 afterwards if you want it closed." Type="Variable" Display="advanced" Required="false" Mask="false">1</Config>
+  <Config Name="LOG_LEVEL" Target="LOG_LEVEL" Default="info" Mode="" Description="debug, info, warning or error. Worth setting to debug once while you are first getting ingest working, because that is where the media pipeline reports what yt-dlp and ffmpeg actually did." Type="Variable" Display="advanced" Required="false" Mask="false">info</Config>
+</Container>

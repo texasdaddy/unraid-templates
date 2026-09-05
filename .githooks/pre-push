@@ -58,11 +58,18 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     # same as a first push to a brand-new remote, and the safe direction. (The tracking refs are
     # a CACHE of the remote; one rewound elsewhere can be stale-ahead — a limit the wide form
     # shared.)
-    if [ -n "$remote_name" ] && git config --get "remote.$remote_name.url" >/dev/null 2>&1; then
-        not_pushed="--not --remotes=$remote_name"
-    else
-        not_pushed=""
-    fi
+    # A name git itself refuses (`git remote add` rejects `*`, `?`, `[` and whitespace) can
+    # still be hand-written into .git/config; `--remotes=a*` would then be a GLOB that crosses
+    # into other remotes' refs, and a space would split the range. Neither narrows: scan all.
+    case "$remote_name" in
+        *[*?\[]*|*[[:space:]]*) not_pushed="" ;;
+        *)
+            if [ -n "$remote_name" ] && git config --get "remote.$remote_name.url" >/dev/null 2>&1; then
+                not_pushed="--not --remotes=$remote_name"
+            else
+                not_pushed=""
+            fi ;;
+    esac
     case "$remote_ref" in
         refs/tags/*)
             # ⭐ A TAG PUSH IS SCANNED BY REF, NOT BY WHAT ITS COMMIT REACHES, and the difference

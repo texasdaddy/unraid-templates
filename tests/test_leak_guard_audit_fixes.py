@@ -371,6 +371,15 @@ def test_pre_push_scans_what_the_TARGET_remote_lacks_not_what_any_remote_has(tmp
     assert "--remotes" not in _clean(blocked_url), "a URL push excludes nothing"
     assert f"private lan domain: '{_HOST}'" in _clean(blocked_url)
 
+    # a name git refuses but a hand-edited config can carry: `--remotes=a*` is a glob that
+    # would cross into private's refs and exclude the leak; the hook must not narrow to it
+    glob_remote = _bare(tmp_path / "glob.git")
+    _git(repo, "config", "remote.a*.url", str(glob_remote))
+    blocked_glob = _git(repo, "push", "a*", "main", check=False)
+    assert blocked_glob.returncode != 0, _clean(blocked_glob)
+    assert "--remotes" not in _clean(blocked_glob), "a glob-shaped name excludes nothing"
+    assert _git(tmp_path, "ls-remote", "--heads", str(glob_remote)).stdout.strip() == ""
+
 
 @pytest.mark.timeout(300)
 def test_a_url_push_of_a_CLEAN_history_is_not_reddened(tmp_path: Path):
@@ -391,6 +400,7 @@ def test_the_hook_asks_git_whether_the_push_names_a_configured_remote():
     assert 'not_pushed=""' in src, "a URL push excludes nothing"
     assert src.count("${not_pushed:+ $not_pushed}") == 2, "BOTH range forms use the narrowed form"
     assert "[!A-Za-z0-9" not in src, "the character-class test is gone"
+    assert "*[*?\\[]*|*[[:space:]]*) not_pushed=\"\"" in src, "a glob or whitespace name never narrows"
 
 
 # ------------------------------------------------------------------------------------- #44

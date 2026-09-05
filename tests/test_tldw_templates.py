@@ -43,7 +43,8 @@ ORDER_PHRASE = "tldw-redis first, then tldw-server"
 
 # Credential variables this set requires the operator to fill in. The repo-wide rule makes
 # every credential-shaped field blank and masked; these must additionally be marked
-# required, and the shape rule must actually SEE them (the vacuity check below).
+# required, and are re-asserted below BY NAME so a rename out of the shape cannot silently
+# drop one from the repo-wide rule.
 REQUIRED_SECRETS = {
     "tldw-server": {"SINGLE_USER_API_KEY", "MCP_JWT_SECRET", "MCP_API_KEY_SALT"},
     "tldw-redis": set(),

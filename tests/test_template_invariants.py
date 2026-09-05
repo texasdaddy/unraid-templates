@@ -59,7 +59,10 @@ CREDENTIAL_SHAPE = re.compile(
 
 # Names that LOOK credential-shaped and are not. Keep it SMALL: every entry is a hole.
 #   SEL_PASS — reauth-bot's CSS selector for the password FIELD on a login page; a selector,
-#              not a secret, and the first false positive this rule met outside tl;dw.
+#              not a secret, and the first false positive this rule met in a shipped template.
+#   SORT_KEY, PARTITION_KEY, SECOND_PASS — no template carries these yet; they are the
+#              ordinary non-secret spellings a wider version of this rule met, kept so the
+#              first template that needs one adds a field rather than deleting the rule.
 NOT_A_CREDENTIAL = frozenset({"SORT_KEY", "PARTITION_KEY", "SECOND_PASS", "SEL_PASS"})
 
 # Values upstreams ship as placeholders. Checked against CREDENTIAL-SHAPED fields only —

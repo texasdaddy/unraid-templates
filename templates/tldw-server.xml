@@ -62,10 +62,17 @@
   not exist - so the count came back zero and the guard never fired (issue #58). This
   template therefore ships DATABASE_URL in the ABSOLUTE form, sqlite:////app/Databases/
   users.db: the same file, and a path the guard resolves correctly, measured against the
-  entrypoint's own code. So the failure mode for a blank BYOK key is now a container that
-  refuses to start after an update and says why in its log, not provider keys that become
-  unreadable with no error. Supply the prior key (or upstream's BYOK_SECONDARY_ENCRYPTION_KEY
-  rotation) and it starts.
+  entrypoint's own code. With that value the failure mode for a blank BYOK key is a
+  container that refuses to start after an update and says why in its log, not provider
+  keys that become unreadable with no error. It starts again once BYOK_ENCRYPTION_KEY holds
+  the prior key (to rotate, put the NEW key there and the old one in
+  BYOK_SECONDARY_ENCRYPTION_KEY - a blank primary refuses regardless of the secondary).
+
+  ⚠️ AN INSTANCE CREATED BEFORE THIS VALUE CHANGED STILL CARRIES THE RELATIVE URL. Unraid
+  never re-reads a template into an existing container, and sync-templates.py deliberately
+  keeps every applied value verbatim, so neither route replaces the old value. If you
+  installed this template earlier and use BYOK, retype DATABASE_URL by hand to the absolute
+  form above; until you do, the guard behaves as described for the relative URL.
 -->
 <Container version="2">
   <Name>tldw-server</Name>
@@ -104,7 +111,7 @@
 
   <!-- ===== Everything below has a working default ===== -->
   <Config Name="AUTH_MODE" Target="AUTH_MODE" Default="single_user" Mode="" Description="single_user (one API key) or multi_user (JWT plus a Postgres users database). LEAVE THIS ALONE: this template supports single_user only, and multi_user does not merely need extra settings, it actively refuses to start here. The entrypoint rejects a DATABASE_URL supplied through the container environment when the mode is multi_user - and DATABASE_URL is always supplied here, by the field below - so switching the mode stops the container at boot with an error about the database URL. Making multi_user work needs settings this template does not offer, and changing the mode also re-triggers first-run auth initialisation, because the marker file on the mount is per-mode." Type="Variable" Display="advanced" Required="false" Mask="false">single_user</Config>
-  <Config Name="DATABASE_URL" Target="DATABASE_URL" Default="sqlite:////app/Databases/users.db" Mode="" Description="The users/auth database, on the /app/Databases mount above - leave it alone unless you are moving to Postgres, in which case the mount stops being where your data is. Written as an ABSOLUTE SQLite URL (four slashes) rather than upstream's relative sqlite:///./Databases/users.db on purpose: both name the same file, but the entrypoint's guard against regenerating BYOK_ENCRYPTION_KEY over stored provider keys resolves the relative form to a path that does not exist and so never fires; with this form it does. Masked because a Postgres URL carries the database password inside it." Type="Variable" Display="advanced" Required="false" Mask="true">sqlite:////app/Databases/users.db</Config>
+  <Config Name="DATABASE_URL" Target="DATABASE_URL" Default="sqlite:////app/Databases/users.db" Mode="" Description="The users/auth database, on the /app/Databases mount above - leave it alone. There is no supported reason to change it in this template: single_user mode ignores any non-SQLite URL here (the application logs a warning and uses its SQLite default), and the multi_user mode that would use Postgres refuses to start with this field set at all, as AUTH_MODE explains. Written as an ABSOLUTE SQLite URL (four slashes) rather than upstream's relative sqlite:///./Databases/users.db on purpose: both name the same file, but the entrypoint's guard against regenerating BYOK_ENCRYPTION_KEY over stored provider keys resolves the relative form to a path that does not exist and so never fires; with this form it does. Masked because a Postgres URL carries the database password inside it." Type="Variable" Display="advanced" Required="false" Mask="true">sqlite:////app/Databases/users.db</Config>
   <Config Name="UVICORN_WORKERS" Target="UVICORN_WORKERS" Default="2" Mode="" Description="How many Uvicorn worker processes serve the API. Upstream notes that SQLite together with multiple Uvicorn workers can increase lock contention, and recommends Postgres or splitting the background jobs into their own containers for heavier workloads - this template is the light single-user profile, where 2 is upstream's own default. If ingest and browsing start blocking each other under load, this is the first number to look at." Type="Variable" Display="advanced" Required="false" Mask="false">2</Config>
   <Config Name="TLDW_SETUP_ALLOW_REMOTE" Target="TLDW_SETUP_ALLOW_REMOTE" Default="1" Mode="" Description="Allows the first-run setup flow to be completed from another machine rather than only from the container's own loopback. It has to be 1 for a container you administer from your desktop, which is what this is. ⚠️ Upstream also defaults it to 1, but upstream binds the API to loopback only, so nothing outside the host could reach the setup flow anyway; this template publishes the port on every interface, so here the setting genuinely does open a remotely-reachable setup flow. That is the trade this container makes to be usable at all - complete the setup promptly rather than leaving a fresh container sitting on the network, and set 0 afterwards if you want it closed." Type="Variable" Display="advanced" Required="false" Mask="false">1</Config>
   <Config Name="LOG_LEVEL" Target="LOG_LEVEL" Default="info" Mode="" Description="debug, info, warning or error. Worth setting to debug once while you are first getting ingest working, because that is where the media pipeline reports what yt-dlp and ffmpeg actually did." Type="Variable" Display="advanced" Required="false" Mask="false">info</Config>

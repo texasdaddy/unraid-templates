@@ -53,8 +53,9 @@ NAMES = sorted(p.stem for p in TEMPLATES.glob("*.xml"))
 # round walked eight real-world spellings past a narrower version (_APIKEY, _PASSWD, _KEYS,
 # _CREDENTIALS, _PASSPHRASE, SECRET_KEY_BASE …), each shipping a working secret.
 CREDENTIAL_SHAPE = re.compile(
-    r"(?:_|^)(?:API_?KEYS?|KEYS?|KEY_BASE|SECRETS?|SALT|TOKEN|PASSWORD|PASSWD|PASS|"
-    r"PASSPHRASE|CREDENTIALS?|BEARER|PW|PWD)$"
+    r"(?:_|^)(?:API_?KEYS?|AUTH_?KEYS?|KEYS?|KEY_BASE|SECRETS?|SALT|TOKEN|PAT|PASSWORD|PASSWD|"
+    r"PASS|PASSPHRASE|CREDENTIALS?|BEARER|PRIVKEY|PW|PWD)$",
+    re.IGNORECASE,   # `db_password` and `Smtp__Password` are the same secret as DB_PASSWORD
 )
 
 # Names that LOOK credential-shaped and are not. Keep it SMALL: every entry is a hole.
@@ -77,15 +78,24 @@ URL_VARIABLES_THAT_CARRY_A_PASSWORD = frozenset({"DATABASE_URL"})
 
 # An image reference is pinned when its tag CANNOT be re-pointed at different content: a
 # full semver tag by convention, or a per-commit / digest reference by construction.
-PINNED_TAG = re.compile(r"^(?:\d+\.\d+\.\d+(?:[.\-+][\w.\-]*)?|sha-[0-9a-f]{7,40})$")
-CHANNEL_WORDS = ("latest", "main", "master", "dev", "nightly", "edge", "rolling", "stable")
+PINNED_TAG = re.compile(
+    r"^(?:v?\d+\.\d+\.\d+(?:[.\-+][\w.\-]*)?|sha-[0-9a-f]{7,40}|[0-9a-f]{7,40})$")
+# Matched as a whole dot/dash/plus-separated COMPONENT of the tag, never as a substring:
+# `2.336.0-ubuntu-devel` and `1.2.3-mainline` are fixed variants, `0.0.0-nightly` is not.
+CHANNEL_WORDS = ("latest", "main", "master", "dev", "nightly", "edge", "rolling", "stable",
+                 "snapshot", "canary", "unstable", "testing", "preview")
+
+
+def channel_word_in(tag):
+    return next((w for w in CHANNEL_WORDS
+                 if re.search(rf"(?:^|[.\-+]){w}(?:[.\-+]|$)", tag, re.IGNORECASE)), None)
 
 # Images whose upstream numbers releases MAJOR.MINOR, so a two-component tag names exactly
 # one release there (`postgres:16.14` is a release; `postgres:16` is the moving line). On a
 # semver project the same two-component tag is a moving minor line, which is why this is an
 # allowance per image basename and not a loosening of PINNED_TAG.
 TWO_COMPONENT_RELEASE_IMAGES = frozenset({"postgres"})
-TWO_COMPONENT_TAG = re.compile(r"^\d+\.\d+$")
+TWO_COMPONENT_TAG = re.compile(r"^\d+\.\d+(?:[.\-+][\w.\-]*)?$")   # 16.14, 16.14-alpine
 
 # The fleet's OWN images publish a moving release channel BY DESIGN — the deploy model is
 # "the container pulls :stable (or :latest, for a repo with no version tags) and an Update
@@ -159,8 +169,35 @@ def is_variable(cfg):
 
 
 def value_of(cfg):
-    """The two places a value lives: the attribute and the element text."""
-    return ((cfg.get("Default") or "").strip(), (cfg.text or "").strip())
+    """The two places a value lives: the attribute and the element text — VERBATIM.
+
+    Not stripped: Unraid's importer (`xmlToVar` in dynamix.docker.manager) hands the container
+    exactly the bytes between the tags, with no trim, so `>info </Config>` beside
+    `Default="info"` ships `LOG_LEVEL="info "` — the half-change the agreement rule exists for,
+    and one a stripping comparison waved through.
+    """
+    return ((cfg.get("Default") or ""), (cfg.text or ""))
+
+
+def is_label(cfg):
+    return (cfg.get("Type") or "").strip().lower() == "label"
+
+
+def secret_bearing(cfg):
+    """Configs whose VALUE reaches the container or the public: variables and labels."""
+    return is_variable(cfg) or is_label(cfg)
+
+
+def is_credential_name(name):
+    return name.upper() not in NOT_A_CREDENTIAL and bool(CREDENTIAL_SHAPE.search(name))
+
+
+# The v1 template blocks Unraid's importer still reads beside <Config> — `<Data><Volume>` for
+# mounts and `<Networking>` for the mode/ports. `sync-templates.py` reconciles <Config> only,
+# so a mount declared this way is invisible to every rule here AND to the sync tool; a docker
+# socket smuggled in a <Volume> block imported fine and passed the whole file. Forbidden
+# outright: this repo declares everything as <Config>.
+LEGACY_BLOCKS = ("Data", "Networking")
 
 
 def environment_pairs(root):
@@ -185,6 +222,26 @@ def test_there_are_templates_to_check():
     # The vacuity guard for every parametrised test below: a glob that finds nothing would
     # make the whole file pass by having nothing to look at.
     assert len(NAMES) >= 2, f"templates/ holds {NAMES!r}"
+
+
+def test_every_template_is_at_the_top_level_where_the_rules_and_the_sync_tool_look():
+    # NAMES is a non-recursive glob because that is what sync-templates.py lists; an XML file
+    # in a subdirectory would be fetchable by URL and checked by nothing.
+    everything = {p.relative_to(TEMPLATES).as_posix() for p in TEMPLATES.rglob("*") if p.is_file()}
+    covered = {f"{n}.xml" for n in NAMES}
+    assert everything == covered, (
+        f"templates/ holds files the rules do not cover: {sorted(everything - covered)}"
+    )
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_no_legacy_v1_block_declares_anything_beside_the_configs(name):
+    root = template(name)
+    for tag in LEGACY_BLOCKS:
+        assert root.find(tag) is None, (
+            f"{name}: carries a <{tag}> block — Unraid imports it, sync-templates.py ignores it, "
+            f"and no rule here sees it; declare it as <Config> instead"
+        )
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -258,18 +315,15 @@ def test_every_credential_shaped_variable_ships_blank_and_masked(name):
     root = template(name)
     for cfg in configs(root):
         target = var_name(cfg)
-        if not is_variable(cfg) or target in NOT_A_CREDENTIAL:
-            continue
-        if not CREDENTIAL_SHAPE.search(target):
+        if not secret_bearing(cfg) or not is_credential_name(target):
             continue
         default, text = value_of(cfg)
         assert default == "", f"{name}: {target} ships a default value"
         assert text == "", f"{name}: {target} ships a value as element text"
         assert cfg.get("Mask") == "true", f"{name}: {target} is not masked"
     for env_name, env_value in environment_pairs(root):
-        if env_name in NOT_A_CREDENTIAL or not CREDENTIAL_SHAPE.search(env_name):
-            continue
-        assert not env_value, f"{name}: <Environment> ships a value for {env_name}"
+        if is_credential_name(env_name):
+            assert not env_value, f"{name}: <Environment> ships a value for {env_name}"
 
 
 def test_the_classifiers_themselves_bite_on_synthetic_values():
@@ -278,21 +332,27 @@ def test_the_classifiers_themselves_bite_on_synthetic_values():
     # PLACEHOLDER_CREDENTIALS — would leave this whole file green while guarding nothing.
     # This is the negative direction: synthetic bad values each classifier MUST catch, and
     # good ones it must not, so gutting one fails here on the same run.
-    for bad in ("latest", "0.1", "master", "7-alpine", "16", "stable", "nightly"):
+    for bad in ("latest", "0.1", "master", "7-alpine", "16", "stable", "nightly", "v1", "g"):
         assert not PINNED_TAG.match(bad), f"PINNED_TAG accepts {bad!r}"
-    for good in ("1.2.3", "0.1.38", "2.336.0-ubuntu-noble", "sha-abc1234", "1.0.0+build.7"):
+    for good in ("1.2.3", "v1.23.16", "0.1.38", "2.336.0-ubuntu-noble", "sha-abc1234",
+                 "a1b2c3d", "1.0.0+build.7"):
         assert PINNED_TAG.match(good), f"PINNED_TAG rejects {good!r}"
-    assert any(w in "0.0.0-nightly" for w in CHANNEL_WORDS), "CHANNEL_WORDS lost 'nightly'"
-    assert {"latest", "stable", "dev"} <= set(CHANNEL_WORDS)
-    assert TWO_COMPONENT_TAG.match("16.14") and not TWO_COMPONENT_TAG.match("16")
+    for moving in ("0.0.0-nightly", "2.336.0-SNAPSHOT", "1.2.3-canary", "3.0.0-dev.1"):
+        assert channel_word_in(moving), f"channel word missed in {moving!r}"
+    for fixed in ("2.337.0-ubuntu-devel", "1.2.3-mainline", "1.2.3-rc.1", "0.1.38"):
+        assert not channel_word_in(fixed), f"channel word false-fires on {fixed!r}"
+    assert TWO_COMPONENT_TAG.match("16.14") and TWO_COMPONENT_TAG.match("16.14-alpine")
+    assert not TWO_COMPONENT_TAG.match("16")
     assert {"change-me", "changeme", "password"} <= PLACEHOLDER_CREDENTIALS
-    for spelling in ("DB_PASSWORD", "X_API_KEY", "X_APIKEY", "X_KEYS", "X_SECRET", "X_SALT",
-                     "X_TOKEN", "X_PASSWD", "X_PASS", "X_PASSPHRASE", "X_CREDENTIALS",
-                     "SECRET_KEY_BASE", "X_PW", "X_PWD", "PASSWORD"):
-        assert CREDENTIAL_SHAPE.search(spelling), f"CREDENTIAL_SHAPE misses {spelling}"
+    for spelling in ("DB_PASSWORD", "db_password", "Smtp__Password", "X_API_KEY", "X_APIKEY",
+                     "X_KEYS", "X_SECRET", "X_SALT", "X_TOKEN", "X_PASSWD", "X_PASS",
+                     "X_PASSPHRASE", "X_CREDENTIALS", "SECRET_KEY_BASE", "X_PW", "X_PWD",
+                     "PASSWORD", "TS_AUTHKEY", "GITHUB_PAT", "SSH_PRIVKEY"):
+        assert is_credential_name(spelling), f"CREDENTIAL_SHAPE misses {spelling}"
     for benign in ("LOG_LEVEL", "DB_HOST", "TOKEN_URL", "TOKEN_STORE_PATH", "LLM_MAX_TOKENS",
-                   "ENABLE_AUTH", "B2_KEY_ID", "REAUTH_MAX_CONSENT_AGE_HOURS"):
-        assert not CREDENTIAL_SHAPE.search(benign), f"CREDENTIAL_SHAPE fires on {benign}"
+                   "ENABLE_AUTH", "B2_KEY_ID", "REAUTH_MAX_CONSENT_AGE_HOURS", "SEL_PASS",
+                   "sort_key"):
+        assert not is_credential_name(benign), f"CREDENTIAL_SHAPE fires on {benign}"
     assert "DATABASE_URL" in URL_VARIABLES_THAT_CARRY_A_PASSWORD
     assert WEBUI_PORT.findall("http://[IP]:[PORT:8000]/v1/health") == ["8000"]
     assert not ENV_NAME.match("bad-name") and ENV_NAME.match("GOOD_NAME_1")
@@ -306,7 +366,7 @@ def test_the_credential_shape_rule_actually_matches_the_fleets_secret_fields():
     seen = set()
     for name in NAMES:
         for cfg in configs(template(name)):
-            if is_variable(cfg) and CREDENTIAL_SHAPE.search(var_name(cfg)):
+            if secret_bearing(cfg) and is_credential_name(var_name(cfg)):
                 seen.add(var_name(cfg))
     for spelling in ("DB_PASSWORD", "POSTGRES_PASSWORD", "TAPE_CLIENT_SECRET", "ACCESS_TOKEN",
                      "SCHWAB_PASS", "FRED_API_KEY", "TAPE_API_KEYS", "MCP_API_KEY_SALT"):
@@ -319,9 +379,9 @@ def test_no_template_ships_a_placeholder_credential_as_a_value(name):
     candidates = [
         (var_name(c), v)
         for c in configs(root)
-        if is_variable(c) and CREDENTIAL_SHAPE.search(var_name(c))
+        if secret_bearing(c) and is_credential_name(var_name(c))
         for v in value_of(c)
-    ] + [(n, v) for n, v in environment_pairs(root) if CREDENTIAL_SHAPE.search(n)]
+    ] + [(n, v) for n, v in environment_pairs(root) if is_credential_name(n)]
     for target, value in candidates:
         assert value.lower() not in PLACEHOLDER_CREDENTIALS, (
             f"{name}: {target} ships the placeholder {value!r} as a working value"
@@ -341,30 +401,36 @@ def test_url_variables_that_can_carry_a_password_are_masked(name):
 def test_the_image_reference_is_pinned_or_a_declared_fleet_channel(name):
     repository = (template(name).findtext("Repository") or "").strip()
     assert repository, f"{name}: no Repository"
-    if "@sha256:" in repository:
-        return  # a digest reference is immutable by construction
-    last = repository.rsplit("/", 1)[-1]
-    assert ":" in last, f"{name}: {repository!r} has no tag at all, so it means :latest"
-    tag = last.rsplit(":", 1)[-1]
     if repository.startswith(FLEET_IMAGE_PREFIX):
-        # The fleet's own release channel, by design — see FLEET_CHANNEL_TAGS.
+        # The fleet's own release channel, by design — see FLEET_CHANNEL_TAGS. Checked FIRST,
+        # before the digest arm: a fleet image frozen on a digest is exactly the defect.
+        assert "@sha256:" not in repository, (
+            f"{name}: {repository!r} — a fleet image pinned by digest never takes a release"
+        )
+        last = repository.rsplit("/", 1)[-1]
+        tag = last.rsplit(":", 1)[-1] if ":" in last else ""
         assert tag in FLEET_CHANNEL_TAGS, (
             f"{name}: {repository!r} — a fleet image ships one of {sorted(FLEET_CHANNEL_TAGS)}, "
             f"not {tag!r}; a pinned tag here would freeze the deployment on one release"
         )
         return
+    if "@sha256:" in repository:
+        return  # a digest reference cannot be re-pointed
+    last = repository.rsplit("/", 1)[-1]
+    assert ":" in last, f"{name}: {repository!r} has no tag at all, so it means :latest"
+    tag = last.rsplit(":", 1)[-1]
     if (name, repository) in ROLLING_TAG_EXCEPTIONS:
         return  # returned, not skipped: a skip prints no reason in this repo's CI invocation
-    image = repository.split("@", 1)[0].rsplit(":", 1)[0].rsplit("/", 1)[-1]
-    if image in TWO_COMPONENT_RELEASE_IMAGES and TWO_COMPONENT_TAG.match(tag):
-        return  # MAJOR.MINOR is one release on this upstream's scheme
-    assert PINNED_TAG.match(tag), (
+    image = repository.rsplit(":", 1)[0].rsplit("/", 1)[-1]
+    pinned = PINNED_TAG.match(tag) or (
+        image in TWO_COMPONENT_RELEASE_IMAGES and TWO_COMPONENT_TAG.match(tag))
+    assert pinned, (
         f"{name}: {repository!r} uses {tag!r}, which is not a pinned shape — a third-party "
-        f"reference is a full semver tag, a sha-<commit> tag, or an @sha256: digest, or it is "
-        f"listed in ROLLING_TAG_EXCEPTIONS with the reason"
+        f"reference is a (v-prefixed) semver tag, a sha-<commit> or bare-sha tag, or an "
+        f"@sha256: digest, or it is listed in ROLLING_TAG_EXCEPTIONS with the reason"
     )
-    for word in CHANNEL_WORDS:
-        assert word not in tag.lower(), f"{name}: {tag!r} carries the channel word {word!r}"
+    word = channel_word_in(tag)
+    assert word is None, f"{name}: {tag!r} carries the channel word {word!r}, so it moves"
 
 
 def test_the_rolling_tag_exceptions_are_all_live():
@@ -454,7 +520,24 @@ def test_the_icon_is_256px_and_can_carry_transparency(name):
 
 
 def _readme_rows():
-    return [line for line in README.read_text(encoding="utf-8").splitlines() if line.startswith("|")]
+    """The rows of the README's icon/template TABLE — the one whose header is
+    `| Container | Icon | Template |` — and nothing else. A pipe-shaped line inside a comment
+    or a fenced block is not a row; an indented table still is."""
+    lines = README.read_text(encoding="utf-8").splitlines()
+    rows, in_table = [], False
+    for raw in lines:
+        line = raw.strip()
+        if not in_table:
+            if line.startswith("|") and "Container" in line and "Template" in line:
+                in_table = True
+            continue
+        if not line.startswith("|"):
+            break
+        if set(line) <= set("|-: "):
+            continue  # the separator row
+        rows.append(line)
+    assert rows, "the README's `| Container | Icon | Template |` table was not found"
+    return rows
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -484,7 +567,8 @@ def test_a_webui_that_names_a_port_names_one_this_template_declares(name):
     webui = (root.findtext("WebUI") or "").strip()
     if not webui:
         return
-    declared = {c.get("Target").strip() for c in configs(root) if (c.get("Type") or "") == "Port"}
+    declared = {(c.get("Target") or "").strip() for c in configs(root)
+                if (c.get("Type") or "").strip().lower() == "port"}
     ports = WEBUI_PORT.findall(webui)
     assert ports, f"{name}: WebUI {webui!r} names no [PORT:n]"
     for port in ports:

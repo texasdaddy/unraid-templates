@@ -68,9 +68,16 @@ def _git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProce
                           encoding="utf-8", errors="replace", check=check, timeout=120)
 
 
-def _guard(cwd: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run([sys.executable, str(_SCRIPT), *args], cwd=cwd, env=_ENV,
+def _guard(cwd: Path, *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, str(_SCRIPT), *args], cwd=cwd, env=env or _ENV,
                           capture_output=True, encoding="utf-8", errors="replace", timeout=300)
+
+
+# A locale whose codec cannot spell an accented path, forced on the child so that the #50
+# trap reproduces on the UTF-8 CI runner and not only on a cp1252 Windows workstation: with
+# coercion off, a C locale makes `text=True` decode git's UTF-8 bytes as ASCII and die.
+_C_LOCALE = {**_ENV, "LC_ALL": "C", "LANG": "C", "LANGUAGE": "C",
+             "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0"}
 
 
 def _init(repo: Path) -> Path:
@@ -138,19 +145,25 @@ def test_outside_its_tree_the_exemption_names_no_file_at_all(tmp_path: Path):
 def test_a_non_ascii_repository_path_gets_a_verdict_not_a_traceback(tmp_path: Path):
     """#50. The hooks run the guard with NO `--repo`, from inside the repository, so the path
     git prints is the only thing `repo_root` has. With `text=True` it came back as mojibake
-    under a cp1252 locale and every later `cwd=root` died."""
+    under a cp1252 locale and every later `cwd=root` died. The child also runs under a C locale
+    here (see `_C_LOCALE`) so that a regression to `text=True` is expected to fire on a UTF-8
+    runner too — `os.fsdecode` survives a C locale through surrogateescape, `text=True` does
+    not. STATED LIMIT: the regression was measured only under cp1252 (Windows ignores LC_ALL
+    for this), so the C-locale leg is an intent the CI run has not yet been seen to prove."""
     repo = _init(tmp_path / "café-日本")
     (repo / "README.md").write_text("clean\n", encoding="utf-8")
     _commit(repo)
-    out = _guard(repo)
-    assert "Traceback" not in _clean(out), _clean(out)
-    assert out.returncode == 0, _clean(out)
-    assert "1 tracked text files scanned" in out.stdout
+    for env in (_ENV, _C_LOCALE):
+        out = _guard(repo, env=env)
+        assert "Traceback" not in _clean(out), _clean(out)
+        assert out.returncode == 0, _clean(out)
+        assert "1 tracked text files scanned" in out.stdout
     # and the plant still bites through that path: a leak there is a real finding, not a crash
     (repo / "cfg.txt").write_text(_LEAK_LINE + "\n", encoding="utf-8")
     _commit(repo, "leak")
-    out = _guard(repo, "--range", "HEAD")
-    assert out.returncode == 1 and _HOST in out.stdout, _clean(out)
+    for env in (_ENV, _C_LOCALE):
+        out = _guard(repo, "--range", "HEAD", env=env)
+        assert out.returncode == 1 and _HOST in out.stdout, _clean(out)
 
 
 def test_repo_root_decodes_gits_output_as_a_filesystem_path_not_the_locale(tmp_path: Path):
@@ -226,29 +239,40 @@ def test_a_symlink_is_scanned_as_the_path_it_points_at_by_every_scan(tmp_path: P
     assert tree.returncode == 1, _clean(tree)
     assert f"link.txt:1: private lan domain: '{_HOST}'" in tree.stdout, tree.stdout
     assert "unreadable" not in tree.stdout.lower(), "a readable link must not be reported unreadable"
-    staged = _guard(repo, "--staged")
-    assert staged.returncode == 0, "nothing is staged after the commit"
     rng = _guard(repo, "--range", sha)
     assert rng.returncode == 1 and f"link.txt:1: private lan domain: '{_HOST}'" in rng.stdout, _clean(rng)
+    # the third scan, on a second link that is STAGED and not yet committed
+    os.symlink(f".cache/{_HOST}/other.txt", repo / "link2.txt")
+    _git(repo, "add", "link2.txt")
+    staged = _guard(repo, "--staged")
+    assert staged.returncode == 1 and f"link2.txt:1: private lan domain: '{_HOST}'" in staged.stdout, _clean(staged)
 
 
 @pytest.mark.timeout(300)
 def test_a_clean_symlink_does_not_red_the_tree_scan(tmp_path: Path):
-    """The false-red half: a link to a clean, tracked sibling is an ordinary tree and must pass —
-    including a DANGLING one, which used to raise inside `read_bytes` and be reported unreadable."""
+    """The false-red half: links to clean things are an ordinary tree and must pass — a link to
+    a sibling file, a DANGLING link (which the absent-file branch already resolved through the
+    index and never reddened), and a link to a DIRECTORY, which `read_bytes` refused with
+    IsADirectoryError (PermissionError on Windows) and reported as unreadable: that was the
+    false red. All are scanned as their target strings and counted."""
     if not _can_symlink(tmp_path):
         pytest.skip("this platform or account cannot create a symlink")
     repo = _init(tmp_path / "clean-links")
     _git(repo, "config", "core.symlinks", "true")
     (repo / "real.txt").write_text("clean\n", encoding="utf-8")
+    (repo / "d").mkdir()
+    (repo / "d" / "inner.txt").write_text("clean\n", encoding="utf-8")
     os.symlink("real.txt", repo / "alias.txt")
     os.symlink("gone.txt", repo / "dangling.txt")
+    os.symlink("d", repo / "dirlink", target_is_directory=True)
     _commit(repo)
-    if _git(repo, "ls-files", "-s", "alias.txt").stdout.split()[0] != "120000":
-        pytest.skip("git did not store a symlink on this platform")
+    modes = {p: _git(repo, "ls-files", "-s", p).stdout.split()[0] for p in ("alias.txt", "dirlink")}
+    if set(modes.values()) != {"120000"}:
+        pytest.skip(f"git did not store the links as symlinks on this platform: {modes}")
     out = _guard(repo)
     assert out.returncode == 0, _clean(out)
-    assert "3 tracked text files scanned" in out.stdout, out.stdout
+    assert "unreadable" not in out.stdout.lower(), out.stdout
+    assert "5 tracked text files scanned" in out.stdout, out.stdout
 
 
 # ------------------------------------------------------------------------------------- #47

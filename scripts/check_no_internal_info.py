@@ -2227,9 +2227,11 @@ def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
             # #46). The blob git stores for a mode-120000 entry IS the target path string, and that
             # is what a push publishes; the range scan and `--staged` already read that blob.
             # `read_bytes` would FOLLOW the link and scan the target's content instead — vouching
-            # for a file it never looked at and never seeing the leak in the link itself — and on
-            # a dangling or cross-device link it raised, reddening a clean tree. Reading the link
-            # makes all three scans agree about what this path contains.
+            # for a file it never looked at and never seeing the leak in the link itself — and a
+            # link to a DIRECTORY raised (IsADirectoryError; PermissionError on Windows) and was
+            # reported unreadable, reddening a clean tree. (A DANGLING link never reddened: it
+            # raised FileNotFoundError and the absent-file branch below resolved it through the
+            # index.) Reading the link makes all three scans agree about what this path contains.
             if path.is_symlink():
                 raw = os.fsencode(os.readlink(path))
             else:
@@ -2594,7 +2596,8 @@ def repo_root(start: str | None) -> Path:
                              capture_output=True, check=True, timeout=_GIT_TIMEOUT_S).stdout
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise UsageError(f"--repo '{start}' is not a directory this can run git in "
-                         f"({type(exc).__name__})") from exc
+                         f"({type(exc).__name__}; if the path exists, git itself is missing "
+                         f"from PATH)") from exc
     except subprocess.CalledProcessError as exc:
         raise UsageError(f"--repo '{start or '.'}' is not inside a git repository "
                          f"(git rev-parse exited {exc.returncode})") from exc

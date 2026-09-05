@@ -44,13 +44,16 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     # `tag <name>` header inside the object, and the guard scans the whole object, so an annotated
     # tag called after a host IS caught. What is unread is a name with no object behind it: a
     # LIGHTWEIGHT tag, or a BRANCH. #49 carries the repros.
-    # ⭐ "NOT ALREADY PUBLISHED" MEANS NOT ON THE REMOTE BEING PUSHED TO, not on ANY remote
-    # (issue #47). `--not --remotes` excludes every remote-tracking ref, so with a second remote
-    # a commit already on `private/main` was skipped when pushed to `public` — a remote that had
-    # never seen it — and the leak landed there with the guard printing "0 commit(s)". git hands
-    # this hook the remote NAME as $1 (or its URL, when the push names one directly); when it is
-    # a name, the exclusion is narrowed to that remote's own refs. A URL keeps the wide form,
-    # which is the fail-open case this cannot fix but at least does not widen.
+    # ⭐ "NOT ALREADY PUBLISHED" MEANS NOT IN THIS CLONE'S TRACKING REFS FOR THE REMOTE BEING
+    # PUSHED TO, not for ANY remote (issue #47). `--not --remotes` excludes every remote-tracking
+    # ref, so with a second remote a commit already on `private/main` was skipped when pushed to
+    # `public` — a remote that had never seen it — and the leak landed there with the guard
+    # printing "0 commit(s)". git hands this hook $1: the remote NAME, or the URL when the push
+    # names one directly. A name narrows the exclusion to `refs/remotes/<name>/*`. A plain local
+    # path passes the same test, matches no tracking ref, and so scans the whole reachable
+    # history — the safe direction. An https/ssh URL (a colon, an at-sign) keeps the wide form:
+    # that is the one push this does not narrow. (The tracking refs are a CACHE of the remote;
+    # one rewound elsewhere can be stale-ahead — a limit the wide form shared.)
     case "$remote_name" in
         ''|*[!A-Za-z0-9._/-]*) not_pushed="--not --remotes" ;;
         *)                     not_pushed="--not --remotes=$remote_name" ;;

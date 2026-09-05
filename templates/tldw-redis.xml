@@ -1,0 +1,52 @@
+<?xml version="1.0"?>
+<!--
+  tldw-redis - the Redis instance behind tl;dw (github.com/rmusser01/tldw_server). Stock
+  redis:7-alpine from Docker Hub with the command line upstream's single-user compose file
+  uses; nothing here is specific to any host or operator.
+
+  ONE OF TWO, AND THE FIRST TO START:
+      tldw-redis -> tldw-server
+  Unraid templates have no equivalent of compose's depends_on or healthchecks, so nothing
+  starts these in order for you. tldw-server expects Redis to be reachable when it comes
+  up, which is why this one goes first.
+
+  ⚠️ THE IMAGE TAG IS NOT PINNED THE WAY ITS SIBLING'S IS, and that is a stated limit
+  rather than an oversight. `redis:7-alpine` is a ROLLING tag: Docker Hub re-points it at
+  every Redis 7.x release, so an Unraid container Update will take an upstream version
+  change here without announcing it. It is what upstream's own compose file uses and the
+  blast radius is a cache and a job queue rather than the corpus, so it is left as-is - but
+  a container update is an event rather than a decision for this one container, unlike
+  tldw-server, whose tag is fixed.
+
+  DEDICATE IT. Give tl;dw its own Redis rather than pointing it at one you already run:
+  the command line below sets a 512 MB ceiling with allkeys-lru eviction, so under memory
+  pressure this instance DISCARDS the least recently used keys - acceptable for a cache and
+  for a queue at upstream's sizing, and destructive to another application's data if it
+  were sharing the same server.
+
+  THE HOST PORT IS THE INTERFACE. On the stock bridge network tldw-server cannot resolve
+  this container by name, so it reaches it at the host's address and the port published
+  below. That is why this template publishes a port at all - a Redis used only by a
+  container on the same user-defined network would not need one.
+-->
+<Container version="2">
+  <Name>tldw-redis</Name>
+  <Repository>redis:7-alpine</Repository>
+  <Registry>https://hub.docker.com/_/redis</Registry>
+  <Network>bridge</Network>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support/>
+  <Project>https://github.com/rmusser01/tldw_server</Project>
+  <Overview>Redis for tl;dw (Too Long, Didn't Watch) - the job queue and cache the tl;dw API server runs its background work through. TWO CONTAINERS, STARTED IN ORDER: tldw-redis first, then tldw-server. There is no template equivalent of compose depends_on, so nothing enforces that for you; tldw-server expects Redis to be reachable at its REDIS_URL when it starts, and you build that URL from this machine's address and the host port below. GIVE TL;DW ITS OWN: this container runs with a 512 MB memory ceiling and an allkeys-lru eviction policy, exactly as upstream's single-user compose file does, which means that under memory pressure it throws away the least recently used keys - acceptable for a cache and for this queue at upstream's sizing, destructive for anything else that might be sharing a Redis with it. STORAGE: the /data mount holds the append-only file, so the queue survives a restart. Losing it does not lose your ingested corpus - that lives on the tl;dw API container's own mount - it loses whatever work was queued. EXPOSURE: this publishes Redis on every interface of this machine with no password, because that is how the API container reaches it on the stock bridge network; keep it on a network you trust. IMAGE TAG: redis:7-alpine is a rolling tag, so unlike its sibling this container can take an upstream version change on an Update - see the comment at the top of the template file. The Redis command line is set in Post Arguments rather than as variables, because that is how this image is configured.</Overview>
+  <Category>Database:</Category>
+  <TemplateURL>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/templates/tldw-redis.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/icons/tldw-redis.png</Icon>
+  <ExtraParams/>
+  <PostArgs>redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru</PostArgs>
+  <DateInstalled/>
+  <Description>Redis for tl;dw - job queue and cache. Start this before tldw-server. Dedicated instance: it evicts under memory pressure.</Description>
+
+  <Config Name="Redis Port" Target="6379" Default="6380" Mode="tcp" Description="Host port Redis is published on. The container always listens on 6379 internally - change the host side only. The default here is deliberately not 6379, so that installing this does not collide with a Redis you already run. Whatever you pick, it goes into tldw-server's REDIS_URL as redis://&lt;server-ip&gt;:&lt;this-port&gt;/0. ⚠️ This publishes Redis on your network with NO PASSWORD: anyone who can reach the port can read and write the queue. There is no field here to set one, because the API container has to reach it and this template does not carry that credential - so keep it on a trusted network." Type="Port" Display="always" Required="true" Mask="false">6380</Config>
+  <Config Name="Data" Target="/data" Default="" Mode="rw" Description="REQUIRED. Where the append-only file lives, which is what makes the queue survive a restart. Set an absolute path on a POOL (e.g. /mnt/&lt;pool&gt;/appdata/tldw-redis/data). Without it the queue is written into the container layer and lost on the next update - which loses queued and in-flight jobs, though not the ingested corpus itself. Unlike the API container's mount, this one does not care who owns the directory: the official Redis image sets the ownership itself before dropping privileges." Type="Path" Display="always" Required="true" Mask="false"/>
+</Container>

@@ -275,6 +275,29 @@ def test_a_clean_symlink_does_not_red_the_tree_scan(tmp_path: Path):
     assert "5 tracked text files scanned" in out.stdout, out.stdout
 
 
+@pytest.mark.timeout(300)
+@pytest.mark.skipif(os.sep != "\\", reason="Git for Windows' slash conversion is the subject")
+def test_on_windows_a_link_written_with_backslashes_is_read_the_way_git_stores_it(tmp_path: Path):
+    """A confirming round found the one platform where the three scans still disagreed: a link
+    made with backslashes (`mklink x \\mnt\\user\\y`) is blobbed by Git for Windows with forward
+    slashes, and reading the raw link text left the tree scan alone unable to see a
+    slash-anchored pattern in it. The tree scan now mirrors git's conversion."""
+    if not _can_symlink(tmp_path):
+        pytest.skip("this account cannot create a symlink")
+    repo = _init(tmp_path / "bslinks")
+    _git(repo, "config", "core.symlinks", "true")
+    (repo / "README.md").write_text("clean\n", encoding="utf-8")
+    os.symlink("\\mnt\\" + "user\\appdata\\svc\\cfg", repo / "link.txt")
+    sha = _commit(repo, "link")
+    if _git(repo, "ls-files", "-s", "link.txt").stdout.split()[0] != "120000":
+        pytest.skip("git did not store a symlink on this platform")
+    blob = _git(repo, "cat-file", "blob", ":link.txt").stdout
+    assert blob.startswith("/mnt/"), f"premise: git stores forward slashes, got {blob!r}"
+    for args in ((), ("--range", sha)):
+        out = _guard(repo, *args)
+        assert out.returncode == 1 and "link.txt:1: unraid pool path" in out.stdout, _clean(out)
+
+
 # ------------------------------------------------------------------------------------- #47
 
 
@@ -331,15 +354,43 @@ def test_pre_push_scans_what_the_TARGET_remote_lacks_not_what_any_remote_has(tmp
     routine = _git(repo, "push", "private", "main", check=False)
     assert routine.returncode == 0 and "1 commit(s)" in _clean(routine), _clean(routine)
 
+    # a remote whose NAME a character-class test would not have recognised: git accepts it,
+    # so it must be narrowed like any other, not dropped to the wide form (the confirming
+    # round pushed the leak through `a@b` that way)
+    odd = _bare(tmp_path / "odd.git")
+    _git(repo, "remote", "add", "a@b", str(odd))
+    blocked_odd = _git(repo, "push", "a@b", "main", check=False)
+    assert blocked_odd.returncode != 0 and "--not --remotes=a@b" in _clean(blocked_odd), _clean(blocked_odd)
+    assert _git(tmp_path, "ls-remote", "--heads", str(odd)).stdout.strip() == ""
 
-def test_the_hook_narrows_the_exclusion_only_for_a_remote_NAME():
-    """A push that names a URL directly has no remote name to narrow to: the wide form stays,
-    because the alternative — no exclusion at all — would re-scan a whole history."""
+    # a URL push: nothing is tracked for it, so the whole reachable history is scanned and
+    # the leak in it is reported — the same as a first push to a brand-new remote
+    by_url = _bare(tmp_path / "by-url.git")
+    blocked_url = _git(repo, "push", str(by_url), "main", check=False)
+    assert blocked_url.returncode != 0, _clean(blocked_url)
+    assert "--remotes" not in _clean(blocked_url), "a URL push excludes nothing"
+    assert f"private lan domain: '{_HOST}'" in _clean(blocked_url)
+
+
+@pytest.mark.timeout(300)
+def test_a_url_push_of_a_CLEAN_history_is_not_reddened(tmp_path: Path):
+    """The other half of the URL rule: scanning everything for a URL push must still pass a
+    history with nothing in it."""
+    repo = _repo_with_hook(tmp_path / "clean-work")
+    _git(repo, "config", "core.hooksPath", ".githooks")
+    target = _bare(tmp_path / "target.git")
+    out = _git(repo, "push", str(target), "main", check=False)
+    assert out.returncode == 0 and "1 commit(s)" in _clean(out), _clean(out)
+
+
+def test_the_hook_asks_git_whether_the_push_names_a_configured_remote():
     src = (_HOOKS / "pre-push").read_text(encoding="utf-8")
     assert 'remote_name="${1:-}"' in src
+    assert 'git config --get "remote.$remote_name.url"' in src, "a name is what git says is one"
     assert "--not --remotes=$remote_name" in src
-    assert src.count("$not_pushed") == 2, "BOTH range forms (tag and branch) use the narrowed form"
-    assert "--not --remotes\"" in src or "--not --remotes\" ;;" in src, "the URL/empty arm keeps the wide form"
+    assert 'not_pushed=""' in src, "a URL push excludes nothing"
+    assert src.count("${not_pushed:+ $not_pushed}") == 2, "BOTH range forms use the narrowed form"
+    assert "[!A-Za-z0-9" not in src, "the character-class test is gone"
 
 
 # ------------------------------------------------------------------------------------- #44

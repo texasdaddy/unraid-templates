@@ -2233,7 +2233,14 @@ def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
             # raised FileNotFoundError and the absent-file branch below resolved it through the
             # index.) Reading the link makes all three scans agree about what this path contains.
             if path.is_symlink():
-                raw = os.fsencode(os.readlink(path))
+                target = os.readlink(path)
+                if os.sep == "\\":
+                    # Git for Windows stores the link with FORWARD slashes whatever the
+                    # link was written with; `mklink x \mnt\user\y` is blobbed as
+                    # `/mnt/user/y`. Reading the raw backslashes here made the tree scan the
+                    # one of the three that missed a slash-anchored pattern in a link text.
+                    target = target.replace("\\", "/")
+                raw = os.fsencode(target)
             else:
                 raw = path.read_bytes()
         except FileNotFoundError:
@@ -2577,6 +2584,11 @@ def _scan_commits(root: Path, rev_range: str,
     return 0
 
 
+def _where(start: str | None) -> str:
+    """How to name the scanned location in a verdict: the `--repo` given, or the cwd."""
+    return f"--repo '{start}'" if start is not None else "the current directory"
+
+
 def repo_root(start: str | None) -> Path:
     """The top level of the repository to scan, or a `UsageError` naming what was wrong with it.
 
@@ -2595,11 +2607,11 @@ def repo_root(start: str | None) -> Path:
         out = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=start,
                              capture_output=True, check=True, timeout=_GIT_TIMEOUT_S).stdout
     except (FileNotFoundError, NotADirectoryError) as exc:
-        raise UsageError(f"--repo '{start}' is not a directory this can run git in "
+        raise UsageError(f"{_where(start)} is not a directory this can run git in "
                          f"({type(exc).__name__}; if the path exists, git itself is missing "
                          f"from PATH)") from exc
     except subprocess.CalledProcessError as exc:
-        raise UsageError(f"--repo '{start or '.'}' is not inside a git repository "
+        raise UsageError(f"{_where(start)} is not inside a git repository "
                          f"(git rev-parse exited {exc.returncode})") from exc
     return Path(os.fsdecode(out.strip()))
 

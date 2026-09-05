@@ -53,10 +53,10 @@ NAMES = sorted(p.stem for p in TEMPLATES.glob("*.xml"))
 # round walked eight real-world spellings past a narrower version (_APIKEY, _PASSWD, _KEYS,
 # _CREDENTIALS, _PASSPHRASE, SECRET_KEY_BASE …), each shipping a working secret.
 CREDENTIAL_SHAPE = re.compile(
-    r"(?:_|^)(?:API_?KEYS?|AUTH_?KEYS?|KEYS?|KEY_BASE|SECRETS?|SALT|TOKEN|PAT|PASSWORD|PASSWD|"
+    r"(?:[._]|^)(?:API_?KEYS?|AUTH_?KEYS?|KEYS?|KEY_BASE|SECRETS?|SALT|TOKEN|PAT|PASSWORD|PASSWD|"
     r"PASS|PASSPHRASE|CREDENTIALS?|BEARER|PRIVKEY|PW|PWD)$",
-    re.IGNORECASE,   # `db_password` and `Smtp__Password` are the same secret as DB_PASSWORD
-)
+    re.IGNORECASE,   # `db_password` and `Smtp__Password` are the same secret as DB_PASSWORD;
+)                    # the dot is for a Label such as `com.example.password`
 
 # Names that LOOK credential-shaped and are not. Keep it SMALL: every entry is a hole.
 #   SEL_PASS — reauth-bot's CSS selector for the password FIELD on a login page; a selector,
@@ -88,7 +88,7 @@ CHANNEL_WORDS = ("latest", "main", "master", "dev", "nightly", "edge", "rolling"
 
 def channel_word_in(tag):
     return next((w for w in CHANNEL_WORDS
-                 if re.search(rf"(?:^|[.\-+]){w}(?:[.\-+]|$)", tag, re.IGNORECASE)), None)
+                 if re.search(rf"(?:^|[.\-+_]){w}(?:[.\-+_]|$)", tag, re.IGNORECASE)), None)
 
 # Images whose upstream numbers releases MAJOR.MINOR, so a two-component tag names exactly
 # one release there (`postgres:16.14` is a release; `postgres:16` is the moving line). On a
@@ -337,7 +337,7 @@ def test_the_classifiers_themselves_bite_on_synthetic_values():
     for good in ("1.2.3", "v1.23.16", "0.1.38", "2.336.0-ubuntu-noble", "sha-abc1234",
                  "a1b2c3d", "1.0.0+build.7"):
         assert PINNED_TAG.match(good), f"PINNED_TAG rejects {good!r}"
-    for moving in ("0.0.0-nightly", "2.336.0-SNAPSHOT", "1.2.3-canary", "3.0.0-dev.1"):
+    for moving in ("0.0.0-nightly", "2.336.0-SNAPSHOT", "1.2.3-canary", "3.0.0-dev.1", "1.2.3_dev"):
         assert channel_word_in(moving), f"channel word missed in {moving!r}"
     for fixed in ("2.337.0-ubuntu-devel", "1.2.3-mainline", "1.2.3-rc.1", "0.1.38"):
         assert not channel_word_in(fixed), f"channel word false-fires on {fixed!r}"
@@ -347,7 +347,7 @@ def test_the_classifiers_themselves_bite_on_synthetic_values():
     for spelling in ("DB_PASSWORD", "db_password", "Smtp__Password", "X_API_KEY", "X_APIKEY",
                      "X_KEYS", "X_SECRET", "X_SALT", "X_TOKEN", "X_PASSWD", "X_PASS",
                      "X_PASSPHRASE", "X_CREDENTIALS", "SECRET_KEY_BASE", "X_PW", "X_PWD",
-                     "PASSWORD", "TS_AUTHKEY", "GITHUB_PAT", "SSH_PRIVKEY"):
+                     "PASSWORD", "TS_AUTHKEY", "GITHUB_PAT", "SSH_PRIVKEY", "com.example.password"):
         assert is_credential_name(spelling), f"CREDENTIAL_SHAPE misses {spelling}"
     for benign in ("LOG_LEVEL", "DB_HOST", "TOKEN_URL", "TOKEN_STORE_PATH", "LLM_MAX_TOKENS",
                    "ENABLE_AUTH", "B2_KEY_ID", "REAUTH_MAX_CONSENT_AGE_HOURS", "SEL_PASS",
@@ -524,9 +524,23 @@ def _readme_rows():
     `| Container | Icon | Template |` — and nothing else. A pipe-shaped line inside a comment
     or a fenced block is not a row; an indented table still is."""
     lines = README.read_text(encoding="utf-8").splitlines()
-    rows, in_table = [], False
+    rows, in_table, in_comment, in_fence = [], False, False, False
     for raw in lines:
         line = raw.strip()
+        # Text inside an HTML comment or a code fence does not RENDER as a table, so it is
+        # not one — including a header line, which is how a whole table hidden in a comment
+        # once counted. Either state also ends a table that was open.
+        if line.startswith(("```", "~~~")):
+            in_fence, in_table = not in_fence, False
+            continue
+        if in_fence:
+            continue
+        if in_comment:
+            in_comment = "-->" not in line
+            continue
+        if line.startswith("<!--"):
+            in_comment, in_table = "-->" not in line, False
+            continue
         if not in_table:
             if line.startswith("|") and "Container" in line and "Template" in line:
                 in_table = True

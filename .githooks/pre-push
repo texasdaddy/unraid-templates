@@ -25,6 +25,8 @@
 if python3 -c "" >/dev/null 2>&1; then PY=python3; else PY=python; fi
 z40="0000000000000000000000000000000000000000"
 status=0
+# git passes the remote's NAME as $1 and its URL as $2 (both the URL when the push names one).
+remote_name="${1:-}"
 
 while read -r local_ref local_sha remote_ref remote_sha; do
     # A branch DELETION pushes the null sha as the local side. Nothing is being published.
@@ -42,6 +44,32 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     # `tag <name>` header inside the object, and the guard scans the whole object, so an annotated
     # tag called after a host IS caught. What is unread is a name with no object behind it: a
     # LIGHTWEIGHT tag, or a BRANCH. #49 carries the repros.
+    # ⭐ "NOT ALREADY PUBLISHED" MEANS NOT IN THIS CLONE'S TRACKING REFS FOR THE REMOTE BEING
+    # PUSHED TO, not for ANY remote (issue #47). `--not --remotes` excludes every remote-tracking
+    # ref, so with a second remote a commit already on `private/main` was skipped when pushed to
+    # `public` — a remote that had never seen it — and the leak landed there with the guard
+    # printing "0 commit(s)". git hands this hook $1: the remote NAME, or the URL when the push
+    # names one directly. ASKED OF GIT, NOT JUDGED BY SHAPE: a character-class test let every
+    # legal name outside it (`a@b`, `up+stream`, a non-ASCII name) fall to the wide form and
+    # reopened the hole for exactly those remotes, while a path such as ../x.git passed it and
+    # was "narrowed" to a name that tracks nothing. A configured remote narrows the exclusion to
+    # `refs/remotes/<name>/*`. Anything else is a URL push: this clone tracks nothing for it, so
+    # nothing is known to be published there, and the whole reachable history is scanned — the
+    # same as a first push to a brand-new remote, and the safe direction. (The tracking refs are
+    # a CACHE of the remote; one rewound elsewhere can be stale-ahead — a limit the wide form
+    # shared.)
+    # A name git itself refuses (`git remote add` rejects `*`, `?`, `[` and whitespace) can
+    # still be hand-written into .git/config; `--remotes=a*` would then be a GLOB that crosses
+    # into other remotes' refs, and a space would split the range. Neither narrows: scan all.
+    case "$remote_name" in
+        *[*?\[]*|*[[:space:]]*) not_pushed="" ;;
+        *)
+            if [ -n "$remote_name" ] && git config --get "remote.$remote_name.url" >/dev/null 2>&1; then
+                not_pushed="--not --remotes=$remote_name"
+            else
+                not_pushed=""
+            fi ;;
+    esac
     case "$remote_ref" in
         refs/tags/*)
             # ⭐ A TAG PUSH IS SCANNED BY REF, NOT BY WHAT ITS COMMIT REACHES, and the difference
@@ -50,14 +78,14 @@ while read -r local_ref local_sha remote_ref remote_sha; do
             # commits — so the tag's own object, tagger and message reached the remote with the
             # guard printing "no internal info added across 0 commit(s)" and exiting 0. Passing the
             # LOCAL ref name in the range is what puts the tag OBJECT in front of the guard.
-            range="$local_ref --not --remotes"
+            range="$local_ref${not_pushed:+ $not_pushed}"
             ;;
         *)
             if [ "$remote_sha" = "$z40" ]; then
                 # A brand-new branch: there is no remote counterpart to diff against, so scan every
                 # commit on it that is not already on some other remote-tracking ref. Without this a
                 # first push — the most likely moment for a leak — would scan zero commits.
-                range="$local_sha --not --remotes"
+                range="$local_sha${not_pushed:+ $not_pushed}"
             else
                 range="$remote_sha..$local_sha"
             fi

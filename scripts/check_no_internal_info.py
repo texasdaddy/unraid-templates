@@ -171,6 +171,7 @@ from __future__ import annotations
 
 import bisect
 import functools
+import os
 import re
 import subprocess
 import sys
@@ -571,8 +572,15 @@ def _self_rel_path(root: Path | None = None) -> str:
     it scans ITSELF (every synthetic deny case above becomes a finding) while exempting the
     unrelated file at `scripts/…` — the exemption on the one file that does not need it, and gone
     from the one that does. Deriving it from `__file__` makes the SELF_PATH comment true wherever
-    the guard is run from; the constant stays as the fallback for an exotic loader with no
-    resolvable path, and for the project-side guard, which reads it to know what NOT to skip.
+    the guard is run from; the constant stays for a caller with no `root` at all, and for the
+    project-side guard, which reads it to know what NOT to skip.
+
+    ⛔ WHEN THIS FILE IS NOT UNDER `root`, NOTHING IS EXEMPT (issue #42). `--repo <other>` is the
+    documented way to audit another checkout, and it is exactly the case where `__file__` does not
+    resolve under the scanned tree. This used to fall back to the CONSTANT there — and so exempted
+    whatever the AUDITED repository happened to keep at `scripts/check_no_internal_info.py`, a
+    file that is not this one and may say anything. A guessed exemption is the one thing a leak
+    guard cannot afford; the answer to "which file in that tree is me" is "none of them".
 
     ⚡ CACHED: `_is_self` calls this once per tracked file, and each call makes two
     `Path.resolve()` syscalls — ~1.7 ms per file against ~0.8 us for a constant compare, so a
@@ -585,7 +593,13 @@ def _self_rel_path(root: Path | None = None) -> str:
     try:
         return Path(__file__).resolve().relative_to(root.resolve()).as_posix()
     except (ValueError, OSError):
-        return SELF_PATH
+        return _NOT_IN_THIS_TREE
+
+
+# A repo-relative path no tracked file can ever have (git refuses a NUL in a path), returned by
+# `_self_rel_path` when this file lives OUTSIDE the tree being scanned, so `_is_self` is false for
+# every file there. Not the empty string: an empty `rel` is not impossible in a hand-built caller.
+_NOT_IN_THIS_TREE = "\x00<the guard is outside the scanned tree: no file in it is exempt>"
 
 
 def _is_self(rel_path: str, root: Path | None = None) -> bool:
@@ -1362,7 +1376,7 @@ def scan_paths(shown: str, paths: list[str]) -> list[str]:
             for rel in paths for label, match in scan_path(rel)]
 
 
-def added_lines(root: Path, sha: str) -> ParsedDiff:
+def added_lines(root: Path, sha: str, parent: str | None = None) -> ParsedDiff:
     """`parse_diff` over this commit's diff against its FIRST parent, then RESOLVE the paths git
     served as binary by actually reading them.
 
@@ -1389,8 +1403,12 @@ def added_lines(root: Path, sha: str) -> ParsedDiff:
     rather than by the file.
 
     Skipped suffixes are filtered FIRST, so a 100 MB `.png` is never fetched only to be discarded.
+
+    `parent` is accepted from a caller that has already resolved it — `scan_range` needs the same
+    answer for `changed_paths` — so one commit costs one `rev-parse`, not two (issue #44).
     """
-    parent = first_parent(root, sha)
+    if parent is None:
+        parent = first_parent(root, sha)
     parsed = parse_diff(_git(root, *_DIFF_CONFIG, "diff", *_DIFF_FLAGS, parent, sha))
     return resolve_unscannable(root, parsed, (parent, sha))
 
@@ -1722,7 +1740,7 @@ def scan_range(root: Path, rev_range: str,
     commits = commits_in_range(root, rev_range)
     for sha in commits:
         parent = first_parent(root, sha)
-        hits, blind = scan_added(sha, added_lines(root, sha), compiled, root)
+        hits, blind = scan_added(sha, added_lines(root, sha, parent), compiled, root)
         findings += hits
         findings += scan_paths(f"{sha[:10]} ", changed_paths(root, parent, sha))
         findings += scan_identity(sha, commit_identity(root, sha), compiled)
@@ -1955,6 +1973,12 @@ _MUST_FAIL_MESSAGES: list[tuple[str, str]] = [
     ("unraid pool path", "docs: see //mnt/user/appdata/svc"),
     ("personal mail address", "reported by someone@gmail.invalid"),
     (r"windows profile path", r"cache now lives in C:\Users\operator\AppData\Local"),
+    # ⭐ The two labels the message surface RUNS but this corpus never EXERCISED. Both patterns
+    # are live on messages (neither is in MESSAGE_PATTERN_OVERRIDES), and until these lines
+    # existed gutting either one there was invisible to the selftest — the completeness check
+    # below only asked the content corpus. Same value shapes as `_MUST_FAIL`.
+    ("cgnat address", "agent reachable on 100.127.255.254:9999 for the demo"),
+    ("tailnet name", "see https://host-a.tailnet-example.ts.net/ for the dashboard"),
 ]
 
 
@@ -2009,6 +2033,18 @@ def selftest(compiled: list[tuple[str, re.Pattern[str]]]) -> int:
         labels = {label for _, label, _ in scan_text(msg, list(message_patterns()))}
         if want_label not in labels:
             bad.append(f"MESSAGE not caught (wanted {want_label}, got {sorted(labels)}): {msg!r}")
+    # ⭐ THE SAME COMPLETENESS FLOOR FOR THE OTHER TWO SURFACES. The content check above asks
+    # "does every pattern have a deny case"; a pattern that runs on paths or messages but has no
+    # entry in THOSE corpora is equally unproven there, and a surface's override set can drop a
+    # label deliberately — so the floor is per surface, over the labels that surface actually runs.
+    for surface, corpus, running in (
+        ("PATH", _MUST_FAIL_PATHS, path_patterns()),
+        ("MESSAGE", _MUST_FAIL_MESSAGES, message_patterns()),
+    ):
+        unproven = {label for label, _ in running} - {label for label, _ in corpus}
+        if unproven:
+            bad.append(f"pattern(s) the {surface} surface runs with no deny case there, so "
+                       f"nothing proves they still work on it: {sorted(unproven)}")
 
     if bad:
         print("SELFTEST FAILED:")
@@ -2186,7 +2222,27 @@ def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
             # `except UnicodeDecodeError` here could not ask that. `read_bytes` still raises the
             # same FileNotFoundError and OSError subclasses (a checked-out submodule is still
             # IsADirectoryError / PermissionError), which is all this `try` ever needed to cover.
-            raw = path.read_bytes()
+            #
+            # ⭐ A SYMLINK IS SCANNED AS THE PATH IT POINTS AT, NOT AS WHAT IT POINTS AT (issue
+            # #46). The blob git stores for a mode-120000 entry IS the target path string, and that
+            # is what a push publishes; the range scan and `--staged` already read that blob.
+            # `read_bytes` would FOLLOW the link and scan the target's content instead — vouching
+            # for a file it never looked at and never seeing the leak in the link itself — and a
+            # link to a DIRECTORY raised (IsADirectoryError; PermissionError on Windows) and was
+            # reported unreadable, reddening a clean tree. (A DANGLING link never reddened: it
+            # raised FileNotFoundError and the absent-file branch below resolved it through the
+            # index.) Reading the link makes all three scans agree about what this path contains.
+            if path.is_symlink():
+                target = os.readlink(path)
+                if os.sep == "\\":
+                    # Git for Windows stores the link with FORWARD slashes whatever the
+                    # link was written with; `mklink x \mnt\user\y` is blobbed as
+                    # `/mnt/user/y`. Reading the raw backslashes here made the tree scan the
+                    # one of the three that missed a slash-anchored pattern in a link text.
+                    target = target.replace("\\", "/")
+                raw = os.fsencode(target)
+            else:
+                raw = path.read_bytes()
         except FileNotFoundError:
             # ⚠️ NOT SILENT, and not `continue`. A tracked file missing from the worktree is
             # STAGED-BUT-DELETED (or mid-rebase): its content is still in the INDEX and still goes
@@ -2528,11 +2584,36 @@ def _scan_commits(root: Path, rev_range: str,
     return 0
 
 
+def _where(start: str | None) -> str:
+    """How to name the scanned location in a verdict: the `--repo` given, or the cwd."""
+    return f"--repo '{start}'" if start is not None else "the current directory"
+
+
 def repo_root(start: str | None) -> Path:
-    """The top level of the repository to scan."""
-    return Path(subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=start,
-                               capture_output=True, check=True, text=True,
-                               timeout=_GIT_TIMEOUT_S).stdout.strip())
+    """The top level of the repository to scan, or a `UsageError` naming what was wrong with it.
+
+    ⚠️ BYTES, DECODED AS A FILESYSTEM PATH — never `text=True` (issue #50). `text=True` decodes
+    with the LOCALE codec, which on a Windows workstation is cp1252, while git emits UTF-8; a
+    repository under an accented directory came back as mojibake that named nothing, and every
+    later `cwd=root` call died with a traceback. That blocked EVERY commit and push through the
+    hooks for such a checkout — a guard that cannot run is one that gets switched off.
+
+    ⚠️ A VERDICT, NOT A TRACEBACK (issue #48). `--repo` pointed at a file, at nothing, or at a
+    directory outside any repository used to escape as a raw exception, which a hook or a CI
+    step renders as "the guard is broken" rather than "your --repo is wrong". Each is now a
+    usage error, exit 2, like a bad flag.
+    """
+    try:
+        out = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=start,
+                             capture_output=True, check=True, timeout=_GIT_TIMEOUT_S).stdout
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        raise UsageError(f"{_where(start)} is not a directory this can run git in "
+                         f"({type(exc).__name__}; if the path exists, git itself is missing "
+                         f"from PATH)") from exc
+    except subprocess.CalledProcessError as exc:
+        raise UsageError(f"{_where(start)} is not inside a git repository "
+                         f"(git rev-parse exited {exc.returncode})") from exc
+    return Path(os.fsdecode(out.strip()))
 
 
 def main(argv: list[str]) -> int:
@@ -2549,7 +2630,11 @@ def main(argv: list[str]) -> int:
     if args.selftest:
         return selftest(compiled)
 
-    root = repo_root(args.repo)
+    try:
+        root = repo_root(args.repo)
+    except UsageError as exc:
+        print(f"{exc}\n\n{USAGE}", file=sys.stderr)
+        return 2
     if args.rev_range is not None:
         return _scan_commits(root, args.rev_range, compiled)
     if args.staged:

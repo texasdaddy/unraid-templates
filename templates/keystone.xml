@@ -20,6 +20,7 @@
 
   <Config Name="HTTP Port" Target="8000" Default="8000" Mode="tcp" Description="App HTTP port (FastAPI/gunicorn)" Type="Port" Display="always" Required="false" Mask="false">8000</Config>
   <Config Name="Data" Target="/data" Default="" Mode="rw" Description="App data (encrypted file vault). REQUIRED - an absolute path on a POOL, NOT the user-share FUSE overlay." Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="Backups" Target="/backups" Default="" Mode="rw" Description="Where a future DB dump job will land. Nothing writes here yet — the mount exists now so that job is a code change rather than a container edit later: without this mount in place from the start, a dump job would write INSIDE the container and be destroyed by the next update while still reporting success. Set an absolute path on a POOL DIFFERENT from the one holding the DB container's data, so one pool failure cannot take both the database and its only backup." Type="Path" Display="advanced" Required="false" Mask="false"/>
 
   <!-- Database connection — TWO logins (keystone#14). The runtime posture is load-bearing
        for row-level security: MIGRATIONS run as the OWNER (DB_*), which owns the tables; the
@@ -54,9 +55,9 @@
        (scopes market,account); until it is minted, health reports tape state but market
        calls will be refused by an enforcement-enabled Tape. -->
   <Config Name="TAPE_BASE_URL" Target="TAPE_BASE_URL" Default="" Mode="" Description="Base URL of the Tape deployment THIS instance consumes — e.g. http://&lt;tape-host&gt;:8000 or https://tape-dev.your-domain.example. NOTE: Tape validates the Host header (its TRUSTED_HOSTS variable) — the host/IP in this URL must be on THAT allowlist or Tape answers 400." Type="Variable" Display="always" Required="true" Mask="false"/>
-  <Config Name="TAPE_CLIENT_ID" Target="TAPE_CLIENT_ID" Default="" Mode="" Description="Per-service client id registered on the Tape side (the keystone-backend entry; scopes market,account). Blank until minted — Keystone boots fine, but market calls need it once Tape enforces its client registry." Type="Variable" Display="always" Required="false" Mask="false"/>
-  <Config Name="TAPE_CLIENT_SECRET" Target="TAPE_CLIENT_SECRET" Default="" Mode="" Description="Secret paired with TAPE_CLIENT_ID (minted on the Tape side)." Type="Variable" Display="always" Required="false" Mask="true"/>
-  <Config Name="TAPE_API_KEY" Target="TAPE_API_KEY" Default="" Mode="" Description="LEGACY shared key honored by pre-enforcement Tape deployments only; leave blank when the client-id pair is set." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="TAPE_CLIENT_ID" Target="TAPE_CLIENT_ID" Default="" Mode="" Description="Per-service client id registered on the Tape side (the keystone-backend entry; scopes market,account). Keystone authenticates to Tape with this pair (app/tape_client.py) — a blank pair fails at the first Tape call rather than at boot." Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="TAPE_CLIENT_SECRET" Target="TAPE_CLIENT_SECRET" Default="" Mode="" Description="Secret paired with TAPE_CLIENT_ID (minted on the Tape side)." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="TAPE_API_KEY" Target="TAPE_API_KEY" Default="" Mode="" Description="LEGACY shared key honored by pre-enforcement Tape deployments only; sent as X-API-Key alongside the client-id pair (app/tape_client.py) — leave blank once Tape enforces its client registry." Type="Variable" Display="advanced" Required="false" Mask="true"/>
 
   <!-- App secrets. Variable names match the shipped app config (app/config.py is the SSOT);
        the auth/encryption flows that USE them land with Module 0 (Core) — set strong random
@@ -65,7 +66,6 @@
        Edit page (no recreate). -->
   <Config Name="JWT_SECRET_KEY" Target="JWT_SECRET_KEY" Default="" Mode="" Description="Signing secret for JWT access + MFA step tokens — ONE key (refresh 'rotation' issues a new token, not a second signing key). MINIMUM 32 characters, ENFORCED: shorter (or blank) and every auth endpoint answers 503 fail-closed. Generate: python -c &quot;import secrets; print(secrets.token_urlsafe(48))&quot;" Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="FILE_ENCRYPTION_KEY" Target="FILE_ENCRYPTION_KEY" Default="" Mode="" Description="AES-256 (base64 Fernet) key for the file vault (personal documents at rest) — also the local KMS service key wrapping stored secrets (TOTP MFA seeds). Blank = MFA enrollment answers 503. Generate: python -c &quot;from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())&quot;" Type="Variable" Display="always" Required="true" Mask="true"/>
-  <Config Name="KEYSTONE_API_KEYS" Target="KEYSTONE_API_KEYS" Default="" Mode="" Description="Comma-separated API keys for Keystone's own HTTP surface (frontend / integrations). BLANK = OPEN — acceptable only while nothing but you can reach the container; set before exposing it. Interim mechanism until Module 0 JWT auth replaces it." Type="Variable" Display="advanced" Required="false" Mask="true"/>
   <!-- MFA recovery (keystone#29). The EVERYDAY way back in after a lost authenticator is the
        set of 10 single-use recovery codes shown once when MFA is activated — no container
        setting is involved in that path. The two Vars below are the LAST RESORT for when even
@@ -79,13 +79,6 @@
   <!-- Per-tenant KMS / key-management vars are intentionally NOT declared: _000 mandates a KMS
        interface but the impl (Vault / TPM / cloud) is an unmade prod-era decision. They merge in
        via the Edit page when the key service is chosen. -->
-
-  <!-- Email-code MFA (Gmail SMTP). PROVISIONAL names; optional (only for the email MFA method). -->
-  <Config Name="SMTP_HOST" Target="SMTP_HOST" Default="" Mode="" Description="PROVISIONAL. SMTP host for email-code MFA (e.g. smtp.gmail.com)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
-  <Config Name="SMTP_PORT" Target="SMTP_PORT" Default="587" Mode="" Description="PROVISIONAL. SMTP port" Type="Variable" Display="advanced" Required="false" Mask="false">587</Config>
-  <Config Name="SMTP_USER" Target="SMTP_USER" Default="" Mode="" Description="PROVISIONAL. SMTP username" Type="Variable" Display="advanced" Required="false" Mask="false"/>
-  <Config Name="SMTP_PASSWORD" Target="SMTP_PASSWORD" Default="" Mode="" Description="PROVISIONAL. SMTP password / app password" Type="Variable" Display="advanced" Required="false" Mask="true"/>
-  <Config Name="SMTP_FROM" Target="SMTP_FROM" Default="" Mode="" Description="PROVISIONAL. From address for MFA emails" Type="Variable" Display="advanced" Required="false" Mask="false"/>
 
   <!-- Runtime tuning -->
   <Config Name="LOG_LEVEL" Target="LOG_LEVEL" Default="info" Mode="" Description="App log level (debug/info/warning/error)" Type="Variable" Display="advanced" Required="false" Mask="false">info</Config>

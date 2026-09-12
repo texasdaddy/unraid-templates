@@ -558,7 +558,7 @@ def test_the_backup_that_the_run_told_you_to_review_is_not_then_PRUNED(sync, tmp
             "<Container/>", encoding="utf-8")
 
     _, _, unreadable = sync.redact_existing_backups(str(backups))
-    dropped = sync.prune_backups(str(backups), protected={f for f, _ in unreadable})
+    dropped, _ = sync.prune_backups(str(backups), protected={f for f, _ in unreadable})
 
     assert broken.name not in dropped, "pruned the very file the run told the operator to review"
     assert broken.exists(), "the unparseable backup was deleted after being reported"
@@ -582,8 +582,9 @@ def test_prune_never_touches_a_file_this_script_did_not_write(sync, tmp_path):
     for name in hand_named:
         (backups / name).write_text("<Container/>", encoding="utf-8")
 
-    dropped = sync.prune_backups(str(backups))
+    dropped, failed = sync.prune_backups(str(backups))
 
+    assert failed == []
     for name in hand_named:
         assert name not in dropped, f"deleted {name}, which this script never wrote"
         assert (backups / name).exists(), f"{name} was removed"
@@ -616,7 +617,7 @@ def test_neither_housekeeping_step_explodes_on_a_first_ever_run(sync, tmp_path):
     here is an uncaught FileNotFoundError that aborts the entire sync on a brand-new install."""
     absent = str(tmp_path / "never-created")
     assert sync.redact_existing_backups(absent) == (0, 0, [])
-    assert sync.prune_backups(absent) == []
+    assert sync.prune_backups(absent) == ([], [])
 
 
 def test_an_unwritable_backup_does_not_abort_the_whole_sync(sync, tmp_path, monkeypatch):
@@ -679,8 +680,9 @@ def test_prune_keeps_the_newest_N_and_never_borrows_from_another_instance(sync, 
                                                                             encoding="utf-8")
     (backups / "my-quiet.xml.20260101-000000.bak").write_text("<Container/>", encoding="utf-8")
 
-    dropped = sync.prune_backups(str(backups))
+    dropped, failed = sync.prune_backups(str(backups))
 
+    assert failed == []
     assert len(dropped) == 3, f"expected the 3 oldest noisy backups to go, got {dropped}"
     assert all(d.startswith("my-noisy") for d in dropped), dropped
     kept = {p.name for p in _backups(backups)}
@@ -706,11 +708,12 @@ def test_dry_run_neither_rewrites_nor_deletes_a_backup(sync, tmp_path):
     sync.DRY_RUN = True
     try:
         files, values, _ = sync.redact_existing_backups(str(backups))
-        dropped = sync.prune_backups(str(backups))
+        dropped, failed = sync.prune_backups(str(backups))
     finally:
         sync.DRY_RUN = False
 
     assert (files, values) == (1, 1), "dry-run must still REPORT what it would redact"
     assert len(dropped) == 2, "dry-run must still report what it would prune"
+    assert failed == []
     assert {p.name: p.read_bytes() for p in _backups(backups)} == before, (
         "DRY_RUN wrote to or deleted from the backup directory")

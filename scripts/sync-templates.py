@@ -140,36 +140,51 @@ def validate(root):
     return None
 
 
-def map_instance(path, fname, repo_names, naming_fallback):
-    """Return the repo template name a my-*.xml instance derives from, or None."""
+def map_instance(path, fname, repo_names):
+    """Return (repo template name or None, read/parse error or None).
+
+    ⚠️ Only (ET.ParseError, OSError) count as an error. The old `except Exception: tu = ""`
+    swallowed a real read/parse failure on one of OUR OWN instances the same way it swallowed a
+    merely-empty <TemplateURL>, so a corrupt my-*.xml that also missed the filename fallback was
+    printed under "foreign / not from these templates" — wrong: it is ours, and broken. The
+    caller reports an error distinctly from a genuine naming miss.
+    """
+    error = None
+    tu = ""
     try:
         tu = (ET.parse(path).getroot().findtext("TemplateURL") or "").strip()
-    except Exception:
-        tu = ""
+    except (ET.ParseError, OSError) as e:
+        error = str(e)
     base = os.path.basename(tu)
     if base.endswith(".xml") and base[:-4] in repo_names:
-        return base[:-4]                                   # primary: TemplateURL
-    if naming_fallback:
-        stem = fname[3:-4]                                 # strip 'my-' and '.xml'
-        cands = [n for n in repo_names if stem == n or stem.startswith(n + "-")]
-        if cands:
-            return max(cands, key=len)                     # longest dash-prefix wins
-    return None
+        return base[:-4], None                              # primary: TemplateURL
+    stem = fname[3:-4]                                       # strip 'my-' and '.xml'
+    cands = [n for n in repo_names if stem == n or stem.startswith(n + "-")]
+    if cands:
+        return max(cands, key=len), None                    # longest dash-prefix wins
+    return None, error
 
 
-def discover_instances(directory, repo_names, naming_fallback):
-    """Map every my-*.xml in the dir to its template. Returns (by_template, unmapped)."""
-    by_template, unmapped = {}, []
+def discover_instances(directory, repo_names):
+    """Map every my-*.xml in the dir to its template. Returns (by_template, unmapped, broken).
+
+    `broken` is a my-*.xml this script could not even read/parse to find out — kept separate
+    from `unmapped` (a file that read fine and genuinely matched no template), which is the
+    only bucket "foreign / not from these templates" is true of.
+    """
+    by_template, unmapped, broken = {}, [], []
     for fname in sorted(os.listdir(directory)):
         if not (fname.startswith("my-") and fname.endswith(".xml")):
             continue
         path = os.path.join(directory, fname)
-        t = map_instance(path, fname, repo_names, naming_fallback)
+        t, error = map_instance(path, fname, repo_names)
         if t:
             by_template.setdefault(t, set()).add(path)
+        elif error:
+            broken.append((fname, error))
         else:
             unmapped.append(fname)
-    return by_template, unmapped
+    return by_template, unmapped, broken
 
 
 def merge(operator_root, template_root):
@@ -353,7 +368,7 @@ def backup(path, backup_dir):
     """
     try:
         tree = ET.parse(path)
-    except ET.ParseError as e:
+    except (ET.ParseError, OSError) as e:
         raise BackupUnsafe(f"{os.path.basename(path)}: {e}") from e
     n = redact_secrets(tree.getroot())
     # ⛔ A WRITE FAILURE HERE IS ALSO "could not back it up safely". `redact_existing_backups` was
@@ -471,7 +486,13 @@ def _discard(path):
 
 
 def prune_backups(backup_dir, protected=()):
-    """Keep the newest KEEP_BACKUPS per instance file; drop the rest. Returns what was dropped.
+    """Keep the newest KEEP_BACKUPS per instance file; drop the rest.
+
+    Returns (dropped, failed) — `dropped` is what was actually removed; `failed` is
+    [(filename, reason), ...] for a file this function chose to prune but an OSError (a
+    read-only mount, a concurrent delete) stopped it from removing. A failed remove is neither
+    dropped (it is still on disk) nor silently ignored — the caller reports and counts it,
+    the same policy as every other write/remove site in this script (unraid-templates#61).
 
     Grouped per instance rather than over the directory as a whole, so a container synced often
     cannot evict the only backup another container has. The stamp is `%Y%m%d-%H%M%S`, so a plain
@@ -494,28 +515,35 @@ def prune_backups(backup_dir, protected=()):
         if not m:
             continue
         groups.setdefault(m.group("inst"), []).append(fname)
-    dropped = []
+    dropped, failed = [], []
     for _, files in sorted(groups.items()):
         for fname in sorted(files)[:-KEEP_BACKUPS]:
-            dropped.append(fname)
             if not DRY_RUN:
-                os.remove(os.path.join(backup_dir, fname))
-    return dropped
+                try:
+                    os.remove(os.path.join(backup_dir, fname))
+                except OSError as e:
+                    failed.append((fname, str(e)))
+                    continue
+            dropped.append(fname)
+    return dropped, failed
 
 
 # ----------------------------------------------------------------------------- per-instance
 def update_instance(inst_path, tpl_root, backup_dir):
+    """Reconcile one my-*.xml instance against its template. Returns True on success (including
+    "nothing to do"), False on any SKIP/failure — the caller counts False as a failure
+    (unraid-templates#61/#62)."""
     fname = os.path.basename(inst_path)
     try:
         op_root = ET.parse(inst_path).getroot()
-    except ET.ParseError as e:
+    except (ET.ParseError, OSError) as e:
         print(f"    ! {fname:<22} SKIP — XML parse error: {e}")
-        return
+        return False
     merged, st = merge(op_root, tpl_root)
     err = validate(merged)
     if err:
         print(f"    ! {fname:<22} SKIP — merged result invalid ({err}); left untouched")
-        return
+        return False
     # Compare the SEMANTIC result, not the variable set. Gating on added/deleted/kept meant a
     # template edit that changed only a field's Description, Default, Display or Required was
     # computed correctly by merge() and then thrown away — and a Description is where every
@@ -534,7 +562,7 @@ def update_instance(inst_path, tpl_root, backup_dir):
     unchanged = canonical(merged) == canonical(op_root)
     if unchanged and not (st["kept_flag"] or st["dupes"]):
         print(f"    = {fname:<22} up to date  ({st['retained']} values, nothing to change)")
-        return
+        return True
     # "metadata refreshed ... no variables added or removed" must be true of the run that
     # prints it. dupes belongs in here because merge() DROPS all but the first duplicate,
     # which IS a variable removed. `unchanged` needs no term of its own: when unchanged is
@@ -560,8 +588,16 @@ def update_instance(inst_path, tpl_root, backup_dir):
             b, masked = backup(inst_path, backup_dir)
         except BackupUnsafe as e:
             print(f"    ! {fname:<22} SKIP — could not back it up safely ({e}); left untouched")
-            return
-        atomic_write(inst_path, merged)
+            return False
+        try:
+            atomic_write(inst_path, merged)
+        except OSError as e:
+            # A backup was already taken above, so the operator's applied values are not at
+            # risk — only this run's write failed. Same policy as every other write site: no
+            # orphaned .tmp, report by name, count as a failure, move on.
+            _discard(inst_path + ".tmp")
+            print(f"    ! {fname:<22} SKIP — could not write it ({e}); left untouched")
+            return False
         note = f", {masked} masked value(s) REDACTED" if masked else ""
         print(f"    * {fname:<22} UPDATED   (backup: {os.path.basename(b)}{note})")
     print(f"        values kept   : {st['retained']}")
@@ -576,36 +612,47 @@ def update_instance(inst_path, tpl_root, backup_dir):
               f"TEMPLATE, it is probably missing these): {', '.join(st['kept_flag'])}")
     if st["dupes"]:
         print(f"        ! duplicate keys (first kept): {st['dupes']}")
+    return True
 
 
 def process_template(name, instances_by_tpl, backup_dir):
+    """Process one repo template: CREATE the stub if absent, UPDATE every live instance.
+    Returns the number of failures (unraid-templates#61/#62) — 0 means clean."""
     print(f"[{name}]")
     try:
         tpl_root = ET.fromstring(fetch_template(name))
     except Exception as e:
         print(f"    ! could not fetch/parse repo template: {e}")
-        return
+        return 1
     err = validate(tpl_root)
     if err:
         print(f"    ! repo template invalid ({err}); skipping")
-        return
+        return 1
 
+    failures = 0
     base_path = os.path.join(TEMPLATES_USER, f"my-{name}.xml")
 
     if not os.path.exists(base_path):           # CREATE the base stub if absent
         if DRY_RUN:
             print(f"    + my-{name}.xml         would CREATE  (does not exist yet)")
         else:
-            atomic_write(base_path, copy.deepcopy(tpl_root))
-            print(f"    + my-{name}.xml         CREATED  (ready for Add Container)")
+            try:
+                atomic_write(base_path, copy.deepcopy(tpl_root))
+                print(f"    + my-{name}.xml         CREATED  (ready for Add Container)")
+            except OSError as e:
+                _discard(base_path + ".tmp")
+                print(f"    ! my-{name}.xml         FAILED to create ({e})")
+                failures += 1
 
     targets = set(instances_by_tpl.get(name, set()))   # UPDATE every live instance
     if os.path.exists(base_path):
         targets.add(base_path)
     for inst_path in sorted(targets):
-        update_instance(inst_path, tpl_root, backup_dir)
+        if not update_instance(inst_path, tpl_root, backup_dir):
+            failures += 1
     if not targets:
         print("    (no live instances yet)")
+    return failures
 
 
 # ----------------------------------------------------------------------------- main
@@ -630,8 +677,9 @@ def main():
     print(f"sync-templates  repo={REPO}@{BRANCH}  dir={TEMPLATES_USER}")
     print(f"mode: {banner}\ntemplates: {', '.join(all_repo)}\n")
 
-    instances_by_tpl, unmapped = discover_instances(TEMPLATES_USER, all_repo, naming_fallback=True)
+    instances_by_tpl, unmapped, broken = discover_instances(TEMPLATES_USER, all_repo)
     backup_dir = os.path.join(TEMPLATES_USER, BACKUP_SUBDIR)
+    failures = 0                                # unraid-templates#62: a run must be able to say so
 
     # BEFORE anything else touches the backup dir. Every `.bak` written before this release is a
     # cleartext copy of whatever secrets that instance held, and this is the run that clears
@@ -642,6 +690,7 @@ def main():
               f"{files} pre-existing backup(s) in {BACKUP_SUBDIR}/ (unraid-templates#27: "
               f"`Mask` is a UI setting, so these were stored in PLAINTEXT)")
     if unreadable:
+        failures += len(unreadable)
         print(f"! {len(unreadable)} backup(s) could not be read, so could NOT be redacted - "
               f"they may still hold secrets in plaintext. These are left in place for you to "
               f"review and delete by hand:")
@@ -650,14 +699,27 @@ def main():
     if files or unreadable:
         print()
 
+    if broken:
+        failures += len(broken)
+        print(f"! {len(broken)} of your OWN instance(s) could not be read, so could not be "
+              f"matched to a template and were left untouched — fix or remove by hand:")
+        for fname, why in broken:
+            print(f"    {fname} ({why})")
+        print()
+
     for name in all_repo:
-        process_template(name, instances_by_tpl, backup_dir)
+        failures += process_template(name, instances_by_tpl, backup_dir)
         print()
 
     # ⭐ PRUNE LAST, once this run's own backups exist. Pruning first left KEEP_BACKUPS + 1 on
     # disk afterwards, so the run ended one over the number it reported keeping. It also spent
     # flash writes redacting files it was about to delete.
-    dropped = prune_backups(backup_dir, protected={f for f, _ in unreadable})
+    dropped, prune_failed = prune_backups(backup_dir, protected={f for f, _ in unreadable})
+    if prune_failed:
+        failures += len(prune_failed)
+        print(f"! {len(prune_failed)} backup(s) could not be pruned:")
+        for fname, why in prune_failed:
+            print(f"    {fname} ({why})")
     if dropped:
         # ⚠️ THE DRY-RUN FIGURE IS A LOWER BOUND, and says so. The prune runs after the templates,
         # so a live run has also written this run's own backups by now and a rehearsal has not —
@@ -673,6 +735,14 @@ def main():
 
     if unmapped:
         print("left untouched (foreign / not from these templates): " + ", ".join(sorted(unmapped)))
+
+    # unraid-templates#62: every SKIP/failure branch above used to reach this same "done." with
+    # an implicit exit 0 — a run that skipped every template looked identical to a clean one to
+    # anything that reads the exit status (a wrapper, a schedule, a person skimming the tail).
+    if failures:
+        print(f"done. {failures} failure(s) — see above"
+              + ("  (dry-run — nothing changed)" if DRY_RUN else "  (LIVE — changes written)"))
+        sys.exit(1)
     print("done." + ("  (dry-run — nothing changed)" if DRY_RUN else "  (LIVE — changes written)"))
 
 

@@ -10,7 +10,8 @@
       "MICROSOFT_CLIENT_ID": "config.py:188; auth.py:163,630,634,644,652",
       "MICROSOFT_CLIENT_SECRET": "config.py:189; auth.py:634,652",
       "DB_PATH": "config.py:99; db.py:22,270,350,371,382,400 (sqlite3.connect); scheduler.py:363,1957",
-      "FLASK_ENV": "config.py:95-96 sets DEBUG flag; main.py:57 branches logging behavior on it"
+      "FLASK_ENV": "config.py:95-96 sets DEBUG flag; main.py:57 branches logging behavior on it",
+      "SHARED_ROOT": "alerting_config.py:_config_path() (CEF-N3) -> kw_common.alerting_env.config_file_for(); locates the fleet-shared configs/alerting.env this app reads its SMTP infra creds from. OPTIONAL and unset-safe: alerting_config.smtp_settings() returns None when blank, and mailer._send() degrades to its existing 'SMTP not configured' skip"
     }
   },
   "keystone": {

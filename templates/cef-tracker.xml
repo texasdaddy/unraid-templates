@@ -3,9 +3,19 @@
   cef-tracker — closed-end fund discount-to-NAV tracker (Flask/SQLite; its own repo:
   github.com/texasdaddy/cef-tracker). Self-contained image built by that repo's CI → GHCR.
   Deploys the Unraid way: UI import → set FLASK_SECRET_KEY (+ optional OAuth) → Apply.
-  /data (the SQLite DB) is the ONLY volume, on the appdata pool path. Single prod container,
-  single gunicorn worker (APScheduler). All other runtime config (FRED key, SMTP, Anthropic,
-  ntfy) is managed in-app under Admin → System Settings, not here.
+  /data (the SQLite DB) is the ONLY required volume, on the appdata pool path. Single prod
+  container, single gunicorn worker (APScheduler). FRED key, Anthropic key and ntfy remain
+  managed in-app under Admin → System Settings.
+
+  ⭐ CEF-N3: SMTP infra creds (host/port/user/password/from) now come from kw-common's
+  fleet-shared configs/alerting.env, not the in-app settings page — set the "Shared
+  alerting root" below to enable outbound email. It is OPTIONAL and this container does
+  NOT refuse to boot without it: email has always been an optional feature here (this app
+  degrades a broken/missing setting to a visible 503 or a skipped feature, never a
+  crash-loop — see cef#9/#5/#4), unlike a sibling such as the-desk where alerting is core.
+  Leave it unset to run with outbound email disabled, same as leaving smtp_host blank used
+  to mean before this change. Setup + the annotated template for that shared file:
+  github.com/texasdaddy/kw-common/blob/main/docs/alerting-setup.md
 -->
 <Container version="2">
   <Name>cef-tracker</Name>
@@ -16,7 +26,7 @@
   <Privileged>false</Privileged>
   <Support/>
   <Project>https://github.com/texasdaddy/cef-tracker</Project>
-  <Overview>CEF Tracker — closed-end fund discount-to-NAV surveillance (BUY/WATCH/HOLD/SELL/AVOID signals) over ~367 CEFs, with a CEFConnect/FRED/sponsor data pipeline (APScheduler). Flask/SQLite, single gunicorn worker. The only persistent volume is /data (the SQLite DB) on the appdata pool. Set FLASK_SECRET_KEY (required; without it the container starts but stays UNHEALTHY, serving only a 503 that names the missing variable). Google/Microsoft OAuth are optional. All other runtime config (FRED key, SMTP, Anthropic, ntfy) is managed in-app under Admin → System Settings.</Overview>
+  <Overview>CEF Tracker — closed-end fund discount-to-NAV surveillance (BUY/WATCH/HOLD/SELL/AVOID signals) over ~367 CEFs, with a CEFConnect/FRED/sponsor data pipeline (APScheduler). Flask/SQLite, single gunicorn worker. The only required persistent volume is /data (the SQLite DB) on the appdata pool. Set FLASK_SECRET_KEY (required; without it the container starts but stays UNHEALTHY, serving only a 503 that names the missing variable). Google/Microsoft OAuth are optional. FRED key, Anthropic key and ntfy remain managed in-app under Admin → System Settings. SMTP infra creds (host/port/user/password/from) now come from kw-common's fleet-shared configs/alerting.env instead — set the Shared alerting root below to enable outbound email; it is OPTIONAL, and this container runs fine with it unset (email is simply disabled, exactly as an unset smtp_host meant before). See github.com/texasdaddy/kw-common/blob/main/docs/alerting-setup.md.</Overview>
   <Category>Network:Other</Category>
   <WebUI>http://[IP]:[PORT:5000]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/templates/cef-tracker.xml</TemplateURL>
@@ -35,4 +45,16 @@
   <Config Name="MICROSOFT_CLIENT_SECRET" Target="MICROSOFT_CLIENT_SECRET" Default="" Mode="" Description="Microsoft OAuth client secret (optional)." Type="Variable" Display="advanced" Required="false" Mask="true"/>
   <Config Name="DB_PATH" Target="DB_PATH" Default="/data/cef_tracker.db" Mode="" Description="SQLite database file, INSIDE the container. Leave as the default unless you know why you are changing it — it must sit under the /data mount above or the database will not survive a restart. Blank is treated as the default." Type="Variable" Display="advanced" Required="false" Mask="false">/data/cef_tracker.db</Config>
   <Config Name="FLASK_ENV" Target="FLASK_ENV" Default="production" Mode="" Description="production (default) or development. Only set development for debugging — it enables debug mode. Blank is treated as production." Type="Variable" Display="advanced" Required="false" Mask="false">production</Config>
+
+  <!--
+    ALERTING (CEF-N3) — SMTP infra creds only, and OPTIONAL, unlike the-desk's alerting.
+    This app's own per-admin notify mode/threshold and its ntfy settings stay in-app under
+    Admin -> System Settings; only the SMTP host/port/user/password/from move here, to the
+    ONE file every Keystone container reads. Leave both settings below blank to run with
+    outbound email disabled. Setup + the annotated template for that file:
+    github.com/texasdaddy/kw-common/blob/main/docs/alerting-setup.md
+  -->
+  <Config Name="Shared alerting root" Target="/kw_shared" Default="" Mode="ro" Description="OPTIONAL. The host directory holding configs/alerting.env - the ONE file every Keystone container reads its SMTP settings from. Mounted READ-ONLY: this container never writes to it. Leave blank to run with outbound email disabled (job-error alert emails and invitation emails will not send; the app itself is unaffected). Full instructions: github.com/texasdaddy/kw-common/blob/main/docs/alerting-setup.md" Type="Path" Display="always" Required="false" Mask="false"/>
+
+  <Config Name="SHARED_ROOT" Target="SHARED_ROOT" Default="/kw_shared" Mode="" Description="The CONTAINER path the shared alerting root above is mounted at. Leave it alone if you set the Shared alerting root mapping above - it must match that mapping's container-side target. Leave BOTH blank to disable outbound email." Type="Variable" Display="advanced" Required="false" Mask="false">/kw_shared</Config>
 </Container>

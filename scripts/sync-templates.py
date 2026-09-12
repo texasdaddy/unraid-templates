@@ -154,7 +154,11 @@ def map_instance(path, fname, repo_names):
     try:
         tu = (ET.parse(path).getroot().findtext("TemplateURL") or "").strip()
     except (ET.ParseError, OSError) as e:
-        error = str(e)
+        # basename, not str(e) alone: an OSError's message embeds the full path it was raised
+        # against, and every other error string in this script (backup()'s BackupUnsafe) is
+        # basename-scoped — this keeps the convention consistent wherever a path could leak in.
+        detail = getattr(e, "strerror", None) or str(e)
+        error = f"{os.path.basename(path)}: {detail}"
     base = os.path.basename(tu)
     if base.endswith(".xml") and base[:-4] in repo_names:
         return base[:-4], None                              # primary: TemplateURL
@@ -173,7 +177,15 @@ def discover_instances(directory, repo_names):
     only bucket "foreign / not from these templates" is true of.
     """
     by_template, unmapped, broken = {}, [], []
-    for fname in sorted(os.listdir(directory)):
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError as e:
+        # Same class as #61/#60's other sites: a directory that exists but cannot be LISTED
+        # (permission revoked mid-run, a flaky mount) must not crash main() before a single
+        # template is processed.
+        broken.append((os.path.basename(directory.rstrip("/\\")), f"could not list the directory: {e}"))
+        return by_template, unmapped, broken
+    for fname in names:
         if not (fname.startswith("my-") and fname.endswith(".xml")):
             continue
         path = os.path.join(directory, fname)
@@ -419,11 +431,20 @@ _BAK_RX = re.compile(r"^(?P<inst>.+)\.(?P<stamp>\d{8}-\d{6}(?:-\d+)?)\.bak$")
 
 
 def _backup_files(backup_dir):
-    """Every `.bak` in the backup dir, oldest first. Absent dir is a legitimate answer (a first
-    run happens before anything creates it)."""
+    """Every `.bak` in the backup dir, oldest first, and any error LISTING the directory.
+
+    Returns (files, error). Absent dir is a legitimate answer, not an error (a first run happens
+    before anything creates it) — `error` is only set when the dir EXISTS but `os.listdir` itself
+    raised (permission revoked, a flaky network mount): that used to propagate straight out of
+    `main()` before either caller (`redact_existing_backups`, `prune_backups`) processed a single
+    file, the same crash-mid-loop shape unraid-templates#61 fixed at every other call site.
+    """
     if not os.path.isdir(backup_dir):
-        return []
-    return sorted(f for f in os.listdir(backup_dir) if f.endswith(".bak"))
+        return [], None
+    try:
+        return sorted(f for f in os.listdir(backup_dir) if f.endswith(".bak")), None
+    except OSError as e:
+        return [], str(e)
 
 
 def redact_existing_backups(backup_dir):
@@ -445,7 +466,12 @@ def redact_existing_backups(backup_dir):
     differs from the marker.
     """
     redacted_files, redacted_values, unreadable = 0, 0, []
-    for fname in _backup_files(backup_dir):
+    files, list_error = _backup_files(backup_dir)
+    if list_error:
+        unreadable.append((os.path.basename(backup_dir.rstrip("/\\")),
+                            f"could not list the backup dir: {list_error}"))
+        return redacted_files, redacted_values, unreadable
+    for fname in files:
         full = os.path.join(backup_dir, fname)
         try:
             tree = ET.parse(full)
@@ -508,14 +534,19 @@ def prune_backups(backup_dir, protected=()):
         name while doing so.
     """
     groups = {}
-    for fname in _backup_files(backup_dir):
+    files, list_error = _backup_files(backup_dir)
+    dropped, failed = [], []
+    if list_error:
+        failed.append((os.path.basename(backup_dir.rstrip("/\\")),
+                        f"could not list the backup dir: {list_error}"))
+        return dropped, failed
+    for fname in files:
         if fname in protected:
             continue
         m = _BAK_RX.match(fname)
         if not m:
             continue
         groups.setdefault(m.group("inst"), []).append(fname)
-    dropped, failed = [], []
     for _, files in sorted(groups.items()):
         for fname in sorted(files)[:-KEEP_BACKUPS]:
             if not DRY_RUN:
@@ -632,20 +663,37 @@ def process_template(name, instances_by_tpl, backup_dir):
     failures = 0
     base_path = os.path.join(TEMPLATES_USER, f"my-{name}.xml")
 
-    if not os.path.exists(base_path):           # CREATE the base stub if absent
+    # unraid-templates#60: os.path.exists() answers False on ANY OSError (EACCES, EIO, a
+    # transient mount hiccup), not only on genuine absence. Deciding CREATE-vs-UPDATE on that
+    # answer meant a stat failure on a POPULATED instance looked identical to "not created
+    # yet" - the CREATE branch would then replace the operator's applied values with the bare
+    # repo template, with no backup and no merge. os.stat + explicit FileNotFoundError is the
+    # only case that means "absent"; any other OSError refuses to touch the file at all.
+    try:
+        os.stat(base_path)
+        base_exists = True
+    except FileNotFoundError:
+        base_exists = False
+    except OSError as e:
+        print(f"    ! my-{name}.xml         could not be checked ({e}); left untouched")
+        failures += 1
+        base_exists = None
+
+    if base_exists is False:                     # CREATE the base stub if absent
         if DRY_RUN:
             print(f"    + my-{name}.xml         would CREATE  (does not exist yet)")
         else:
             try:
                 atomic_write(base_path, copy.deepcopy(tpl_root))
                 print(f"    + my-{name}.xml         CREATED  (ready for Add Container)")
+                base_exists = True
             except OSError as e:
                 _discard(base_path + ".tmp")
                 print(f"    ! my-{name}.xml         FAILED to create ({e})")
                 failures += 1
 
     targets = set(instances_by_tpl.get(name, set()))   # UPDATE every live instance
-    if os.path.exists(base_path):
+    if base_exists:
         targets.add(base_path)
     for inst_path in sorted(targets):
         if not update_instance(inst_path, tpl_root, backup_dir):

@@ -88,6 +88,7 @@ def test_the_CREATE_write_that_cannot_be_written_is_reported_and_counted(
     sync, tmp_path, monkeypatch, capsys,
 ):
     """process_template's CREATE path (no my-*.xml yet) had the same unwrapped atomic_write."""
+    sync.TEMPLATES_USER = str(tmp_path)
     monkeypatch.setattr(sync, "fetch_template", lambda name: TEMPLATE_BYTES)
 
     def no_space(path, root):
@@ -100,6 +101,50 @@ def test_the_CREATE_write_that_cannot_be_written_is_reported_and_counted(
     assert "FAILED to create" in capsys.readouterr().out
     assert not (tmp_path / "my-widget.xml").exists(), "no partial file was left in its place"
     assert not list(tmp_path.glob("*.tmp")), "an orphaned .tmp was left behind"
+
+
+# ------------------------------------------------------------------------------------- #60
+
+
+def test_a_stat_failure_on_the_base_file_is_refused_not_treated_as_absent(
+    sync, tmp_path, monkeypatch, capsys,
+):
+    """os.path.exists() answers False on ANY OSError, not only absence. Deciding CREATE-vs-
+    UPDATE on that would let a stat failure on a POPULATED instance (EACCES/EIO/a mount hiccup)
+    look identical to "not created yet" and replace the operator's applied values with the bare
+    template - no backup, no merge (unraid-templates#60)."""
+    sync.TEMPLATES_USER = str(tmp_path)
+    base = tmp_path / "my-widget.xml"
+    base.write_text(instance_xml(desc="OLD TEXT"), encoding="utf-8")
+    monkeypatch.setattr(sync, "fetch_template", lambda name: TEMPLATE_BYTES)
+
+    real_stat = sync.os.stat
+
+    def flaky(path, *a, **kw):
+        if str(path) == str(base):
+            raise PermissionError(13, "Permission denied")
+        return real_stat(path, *a, **kw)
+
+    monkeypatch.setattr(sync.os, "stat", flaky)
+    failures = sync.process_template("widget", {}, str(tmp_path / "b"))
+
+    assert failures == 1, "a masked stat failure must be counted, not silently treated as absent"
+    assert "OLD TEXT" in base.read_text(encoding="utf-8"), (
+        "the populated instance was overwritten by the bare template")
+    assert "could not be checked" in capsys.readouterr().out
+    assert not list(tmp_path.glob("*.tmp")), "an orphaned .tmp was left behind"
+
+
+def test_a_genuinely_absent_base_file_still_creates_normally(sync, tmp_path, monkeypatch):
+    """The positive direction - the new os.stat-based check must not turn an ordinary
+    first-ever-sync into a false refusal."""
+    sync.TEMPLATES_USER = str(tmp_path)
+    monkeypatch.setattr(sync, "fetch_template", lambda name: TEMPLATE_BYTES)
+
+    failures = sync.process_template("widget", {}, str(tmp_path / "b"))
+
+    assert failures == 0
+    assert (tmp_path / "my-widget.xml").exists()
 
 
 def test_an_instance_that_cannot_be_READ_is_skipped_not_crashed(sync, tmp_path, monkeypatch, capsys):
@@ -179,6 +224,123 @@ def test_a_clean_run_still_exits_zero(sync, tmp_path, monkeypatch):
     sync.main()  # must return normally - no SystemExit
 
     assert (tmp_path / "my-widget.xml").exists()
+
+
+def test_main_exits_nonzero_on_an_unreadable_pre_existing_backup_alone(
+    sync, tmp_path, monkeypatch,
+):
+    """Every contributor to `failures` in main() must actually move the exit code — not just
+    the process_template one exercised above. This one is an unparseable pre-existing .bak,
+    with everything else in the run clean."""
+    sync.TEMPLATES_USER = str(tmp_path)
+    monkeypatch.setattr(sync, "list_repo_templates", lambda: ["widget"])
+    monkeypatch.setattr(sync, "fetch_template", lambda name: TEMPLATE_BYTES)
+    backups = tmp_path / ".template-sync-backups"
+    backups.mkdir()
+    (backups / "my-widget.xml.20260101-000000.bak").write_text(
+        "<Container><Name>x</Name>", encoding="utf-8")  # truncated: unparseable
+
+    with pytest.raises(SystemExit) as exc:
+        sync.main()
+
+    assert exc.value.code == 1, "an unreadable pre-existing backup alone must fail the run"
+
+
+def test_main_exits_nonzero_on_a_broken_instance_alone(sync, tmp_path, monkeypatch):
+    """Same, for the `broken` bucket — one of our own corrupt instances, everything else clean."""
+    sync.TEMPLATES_USER = str(tmp_path)
+    monkeypatch.setattr(sync, "list_repo_templates", lambda: ["widget"])
+    monkeypatch.setattr(sync, "fetch_template", lambda name: TEMPLATE_BYTES)
+    # unmapped: mustn't touch this branch, so give the corrupt file a name the fallback would
+    # otherwise match, to prove it's classified as BROKEN, not silently swept into "foreign".
+    (tmp_path / "my-widget.xml").write_text("<Container><Name>x</Name>", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc:
+        sync.main()
+
+    assert exc.value.code == 1, "a broken instance of ours alone must fail the run"
+
+
+def test_main_exits_nonzero_on_a_prune_failure_alone(sync, tmp_path, monkeypatch):
+    """Same, for `prune_failed` — every template/instance clean, only the prune step fails."""
+    sync.TEMPLATES_USER = str(tmp_path)
+    monkeypatch.setattr(sync, "list_repo_templates", lambda: ["widget"])
+    monkeypatch.setattr(sync, "fetch_template", lambda name: TEMPLATE_BYTES)
+    backups = tmp_path / ".template-sync-backups"
+    backups.mkdir()
+    victim = "my-noisy.xml.20260101-000000.bak"
+    for i in range(sync.KEEP_BACKUPS + 3):
+        (backups / f"my-noisy.xml.202601{i + 2:02d}-000000.bak").write_text(
+            "<Container/>", encoding="utf-8")
+    (backups / victim).write_text("<Container/>", encoding="utf-8")
+
+    real_remove = sync.os.remove
+
+    def flaky(path):
+        if victim in path:
+            raise OSError(13, "Permission denied")
+        return real_remove(path)
+
+    monkeypatch.setattr(sync.os, "remove", flaky)
+
+    with pytest.raises(SystemExit) as exc:
+        sync.main()
+
+    assert exc.value.code == 1, "a prune failure alone must fail the run"
+    assert (backups / victim).exists()
+
+
+# --------------------------------------------------- the two siblings _backup_files fed unwrapped
+
+
+def test_redact_existing_backups_reports_an_unlistable_dir_instead_of_crashing(
+    sync, tmp_path, monkeypatch,
+):
+    """`_backup_files`' own `os.listdir` was unwrapped, feeding BOTH redact_existing_backups and
+    prune_backups — the same crash-mid-loop shape #61 fixed at every other call site."""
+    backups = tmp_path / "b"
+    backups.mkdir()
+
+    def flaky(path):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(sync.os, "listdir", flaky)
+    files, values, unreadable = sync.redact_existing_backups(str(backups))
+
+    assert (files, values) == (0, 0)
+    assert unreadable, "a directory that cannot be listed must be reported, not silently empty"
+
+
+def test_prune_backups_reports_an_unlistable_dir_instead_of_crashing(sync, tmp_path, monkeypatch):
+    backups = tmp_path / "b"
+    backups.mkdir()
+
+    def flaky(path):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(sync.os, "listdir", flaky)
+    dropped, failed = sync.prune_backups(str(backups))
+
+    assert dropped == []
+    assert failed, "a directory that cannot be listed must be reported, not silently empty"
+
+
+def test_discover_instances_reports_an_unlistable_dir_instead_of_crashing(sync, tmp_path):
+    """discover_instances' own `os.listdir` had the same exposure as the two above."""
+    import stat as stat_mod
+
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    # A directory with no read/execute permission raises PermissionError on listdir; on some
+    # CI runners root/administrator bypasses this, so fall back to a monkeypatch if it does.
+    try:
+        locked.chmod(0o000)
+        by_template, unmapped, broken = sync.discover_instances(str(locked), ["widget"])
+    finally:
+        locked.chmod(stat_mod.S_IRWXU)
+    if not broken:
+        pytest.skip("this environment does not enforce directory permissions (likely root)")
+    assert by_template == {} and unmapped == []
 
 
 def test_map_instance_reports_a_read_error_separately_from_a_genuine_foreign_file(

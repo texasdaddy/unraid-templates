@@ -247,18 +247,26 @@ def test_main_exits_nonzero_on_an_unreadable_pre_existing_backup_alone(
 
 
 def test_main_exits_nonzero_on_a_broken_instance_alone(sync, tmp_path, monkeypatch):
-    """Same, for the `broken` bucket — one of our own corrupt instances, everything else clean."""
+    """Same, for the `broken` bucket — one of our own corrupt instances, everything else clean.
+
+    ⚠️ A confirming round found this test was vacuous: naming the corrupt file `my-widget.xml`
+    made it collide with the "widget" template's own base_path, so `process_template` ALSO
+    counted a failure on it via `update_instance`'s independent ET.parse — deleting the
+    `failures += len(broken)` line in main() still left this test green. The filename here
+    (`my-orphan.xml`) deliberately matches no repo template by TemplateURL OR naming fallback,
+    so `broken` is the ONLY contributor a run over it can produce.
+    """
     sync.TEMPLATES_USER = str(tmp_path)
     monkeypatch.setattr(sync, "list_repo_templates", lambda: ["widget"])
     monkeypatch.setattr(sync, "fetch_template", lambda name: TEMPLATE_BYTES)
-    # unmapped: mustn't touch this branch, so give the corrupt file a name the fallback would
-    # otherwise match, to prove it's classified as BROKEN, not silently swept into "foreign".
-    (tmp_path / "my-widget.xml").write_text("<Container><Name>x</Name>", encoding="utf-8")
+    (tmp_path / "my-orphan.xml").write_text("<Container><Name>x</Name>", encoding="utf-8")
 
     with pytest.raises(SystemExit) as exc:
         sync.main()
 
     assert exc.value.code == 1, "a broken instance of ours alone must fail the run"
+    assert (tmp_path / "my-widget.xml").exists(), (
+        "the unrelated template's own CREATE must still have succeeded")
 
 
 def test_main_exits_nonzero_on_a_prune_failure_alone(sync, tmp_path, monkeypatch):

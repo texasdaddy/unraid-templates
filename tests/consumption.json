@@ -80,7 +80,6 @@
       "B2_KEY_ID": "app/warehouse/backup.py:1046-1173",
       "B2_APPLICATION_KEY": "app/warehouse/backup.py:1046-1173",
       "SCHEDULER_ENABLED": "app/main.py:379,414",
-      "SCHEDULER_TIMEZONE": "app/scheduler.py:812-2416",
       "FRED_API_KEY": "app/warehouse/macro.py:52",
       "TIINGO_API_TOKEN": "app/sources/tiingo.py:76",
       "TAPE_API_KEYS": "app/core/auth.py; app/main.py:218-627"

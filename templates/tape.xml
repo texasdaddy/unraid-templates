@@ -14,9 +14,15 @@
   DB-connection vars (needed to reach the database that would hold everything else), the
   master encryption key and upstream credentials (config_store.py's write path refuses to
   persist a credential-classed row unless it is encrypted, and app_config has no at-rest
-  encryption today — tape#332), the scheduler's two non-schedule settings (SCHEDULER_ENABLED/
-  _TIMEZONE, deliberately excluded from job_schedules by that migration's own design), and the
-  three fleet-alerting vars every Keystone container declares.
+  encryption today — tape#332), the scheduler's kill switch (SCHEDULER_ENABLED, which has no
+  row in job_schedules or app_config today — see T-VARAUDIT-1's RETURN for why this is flagged
+  rather than fixed in this package), and the three fleet-alerting vars every Keystone
+  container declares. SCHEDULER_TIMEZONE was removed (T-VARAUDIT-1): every job's own timezone
+  is already a stored `job_schedules.timezone` column, and this Variable was only ever a live
+  env-override of those rows (`app/warehouse/schedule_store.py`'s `GLOBAL_TIMEZONE_SETTING`
+  mechanism) — the exact per-setting escape hatch this package exists to remove. An operator
+  who needs it still adds a hand-written Variable of the same name; the read path honours it
+  identically.
   ⚠️ AN OPERATOR WHO NEEDS TO OVERRIDE A SETTING NOT LISTED HERE ADDS A CUSTOM VARIABLE OF THE
   SAME UPPERCASED NAME BY HAND FROM THE UNRAID EDIT PAGE — the app's env→DB→default read path
   honours it exactly as before; it is simply no longer a first-class field on this page.
@@ -105,7 +111,6 @@
 
   <!-- ===== Scheduler ===== -->
   <Config Name="SCHEDULER_ENABLED" Target="SCHEDULER_ENABLED" Default="" Mode="" Description="Master switch for ALL recurring work — the daily cycle, every feed, the backups, and every watchdog. False leaves the API serving reads while nothing maintains the warehouse; useful for a second read-only instance, dangerous as a default. ⭐ LEAVE THIS BLANK unless you mean to override it. Blank means ON, which is what Tape ships. Unlike every other Variable in this section this one has NO row in job_schedules — it is the master switch rather than a schedule, so blank falls through to the shipped default rather than to a stored row. Set it to false only to run an instance that serves reads and maintains nothing. GET /v1/admin/scheduler reports whether it is in force." Type="Variable" Display="advanced" Required="false" Mask="false"/>
-  <Config Name="SCHEDULER_TIMEZONE" Target="SCHEDULER_TIMEZONE" Default="" Mode="" Description="The timezone every MARKET job runs in. Eastern by definition, not by preference: NAV publication times, the close, and the settlement windows are all defined by the exchange session, so changing this misaligns the jobs with the market they follow. The nightly backup is deliberately NOT on this clock — its own timezone is now database-managed (BACKUP_TIMEZONE, via the admin API), separate from this one on purpose. Must be a full IANA zone name; a blank falls back to the default rather than taking the scheduler down. ⭐ LEAVE THIS BLANK unless you mean to override it. Tape keeps its schedules in the database (table job_schedules), seeded with the value it ships; blank here means the stored row governs, which is what lets a schedule be changed without editing this container at all. A value here still WINS whenever you set one, so this stays the escape hatch. GET /v1/admin/scheduler reports the schedule actually in force, and lists under shadowed_by_variables any stored row a Variable here is overriding." Type="Variable" Display="advanced" Required="false" Mask="false"/>
 
   <!-- ===== Feeds — upstream credentials (no DB-backed home; config_store.py refuses an unencrypted credential row, tape#332) ===== -->
   <Config Name="FRED_API_KEY" Target="FRED_API_KEY" Default="" Mode="" Description="FRED (St. Louis Fed) API key — free from fred.stlouisfed.org (32 alphanumeric). Enables the macro feed (yield curve, rates, spreads, inflation, dollar index). Unset = the FRED job no-ops; the rest of Tape is unaffected. Whether the feed runs at all, its schedule, and every other feed tuning knob are now database-managed (job_schedules/app_config) — set FRED_ENABLED etc. via the admin API if you need to change them from the shipped defaults." Type="Variable" Display="always" Required="false" Mask="true"/>

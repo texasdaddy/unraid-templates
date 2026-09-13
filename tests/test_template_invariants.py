@@ -64,7 +64,12 @@ CREDENTIAL_SHAPE = re.compile(
 #   SORT_KEY, PARTITION_KEY, SECOND_PASS — no template carries these yet; they are the
 #              ordinary non-secret spellings a wider version of this rule met, kept so the
 #              first template that needs one adds a field rather than deleting the rule.
-NOT_A_CREDENTIAL = frozenset({"SORT_KEY", "PARTITION_KEY", "SECOND_PASS", "SEL_PASS"})
+#   JWT_PUBLIC_KEY, AUTHORIZED_KEYS — the PUBLIC half of a keypair / an SSH authorized_keys
+#              list: both are meant to be shared, not blanked-and-masked, and both end in
+#              `KEY`/`KEYS`, which CREDENTIAL_SHAPE matches on shape alone (unraid-templates#63).
+NOT_A_CREDENTIAL = frozenset(
+    {"SORT_KEY", "PARTITION_KEY", "SECOND_PASS", "SEL_PASS", "JWT_PUBLIC_KEY", "AUTHORIZED_KEYS"}
+)
 
 # Values upstreams ship as placeholders. Checked against CREDENTIAL-SHAPED fields only —
 # "default" and "secret" are ordinary values for an enum setting elsewhere.
@@ -75,6 +80,13 @@ PLACEHOLDER_CREDENTIALS = frozenset(
 # Not credential-shaped, but carries a password INSIDE the value: a Postgres URL has the
 # password in it. Masked wherever it appears, in any template.
 URL_VARIABLES_THAT_CARRY_A_PASSWORD = frozenset({"DATABASE_URL"})
+
+# A URL's userinfo component (`scheme://user:pass@host`) carries a WORKING credential the same
+# way a dedicated credential field does — `redis://:hunter2@host.example:6380/0` is a live
+# secret whether or not the variable's NAME is on the list above. Checked against every Config
+# value and every <Environment> value, not just URL_VARIABLES_THAT_CARRY_A_PASSWORD, because the
+# leak is in the VALUE's shape, not the field's name.
+URL_USERINFO_PASSWORD = re.compile(r"://[^/@\s]*:[^/@\s]+@")
 
 # An image reference is pinned when its tag CANNOT be re-pointed at different content: a
 # full semver tag by convention, or a per-commit / digest reference by construction.
@@ -300,12 +312,21 @@ def test_the_default_attribute_and_the_element_text_agree(name):
 def test_no_two_configs_share_a_name_or_a_variable_target(name):
     # A second Config with the same Name shadows the first for any reader that looks up by
     # label; a second with the same Target hands the container two values for one variable,
-    # and which one wins is an ordering accident.
+    # and which one wins is an ordering accident. The same collision exists for a Path (two
+    # Configs mounting the same container path) and for a Port (two Configs publishing the
+    # same container port in the same Mode) — a tcp+udp pair on ONE port number is legitimate,
+    # which is why Port is keyed on (Mode, Target) and not Target alone.
     root = template(name)
-    names = [(c.get("Name") or "").strip() for c in configs(root)]
-    targets = [var_name(c) for c in configs(root) if is_variable(c)]
+    cfgs = configs(root)
+    names = [(c.get("Name") or "").strip() for c in cfgs]
+    targets = [var_name(c) for c in cfgs if is_variable(c)]
+    paths = [var_name(c) for c in cfgs if (c.get("Type") or "").strip().lower() == "path"]
+    ports = [((c.get("Mode") or "").strip(), var_name(c))
+             for c in cfgs if (c.get("Type") or "").strip().lower() == "port"]
     assert len(names) == len(set(names)), f"{name}: duplicate Config Name in {names}"
     assert len(targets) == len(set(targets)), f"{name}: duplicate variable Target in {targets}"
+    assert len(paths) == len(set(paths)), f"{name}: duplicate Path Target (mount point) in {paths}"
+    assert len(ports) == len(set(ports)), f"{name}: duplicate (Mode, Target) Port in {ports}"
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -351,9 +372,13 @@ def test_the_classifiers_themselves_bite_on_synthetic_values():
         assert is_credential_name(spelling), f"CREDENTIAL_SHAPE misses {spelling}"
     for benign in ("LOG_LEVEL", "DB_HOST", "TOKEN_URL", "TOKEN_STORE_PATH", "LLM_MAX_TOKENS",
                    "ENABLE_AUTH", "B2_KEY_ID", "REAUTH_MAX_CONSENT_AGE_HOURS", "SEL_PASS",
-                   "sort_key"):
+                   "sort_key", "JWT_PUBLIC_KEY", "AUTHORIZED_KEYS"):
         assert not is_credential_name(benign), f"CREDENTIAL_SHAPE fires on {benign}"
     assert "DATABASE_URL" in URL_VARIABLES_THAT_CARRY_A_PASSWORD
+    for bad_url in ("redis://:hunter2@host.example:6380/0", "postgresql://u:hunter2@host.example/db"):
+        assert URL_USERINFO_PASSWORD.search(bad_url), f"URL_USERINFO_PASSWORD misses {bad_url!r}"
+    for fine_url in ("redis://host.example:6380/0", "https://user@host.example/path"):
+        assert not URL_USERINFO_PASSWORD.search(fine_url), f"URL_USERINFO_PASSWORD false-fires on {fine_url!r}"
     assert WEBUI_PORT.findall("http://[IP]:[PORT:8000]/v1/health") == ["8000"]
     assert not ENV_NAME.match("bad-name") and ENV_NAME.match("GOOD_NAME_1")
 
@@ -371,6 +396,25 @@ def test_the_credential_shape_rule_actually_matches_the_fleets_secret_fields():
     for spelling in ("DB_PASSWORD", "POSTGRES_PASSWORD", "TAPE_CLIENT_SECRET", "ACCESS_TOKEN",
                      "SCHWAB_PASS", "FRED_API_KEY", "TAPE_API_KEYS", "MCP_API_KEY_SALT"):
         assert spelling in seen, f"the credential-shape rule no longer matches {spelling}"
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_environment_mirror_agrees_with_config_for_every_shared_name(name):
+    # A template exported from a configured container can carry BOTH a <Config> (what the Edit
+    # page shows and lets the operator change) and an <Environment><Variable> mirror (what
+    # Unraid actually launches with) for the same name. `test_tldw_templates.py` checked this
+    # for three tl;dw-specific variables only; a mirror disagreeing on any OTHER shared name —
+    # `LOG_LEVEL=debug` in <Environment> beside a Config default of "info" — passed unnoticed.
+    # This checks it for every name that appears in both, repo-wide.
+    root = template(name)
+    config_values = {var_name(c): value_of(c)[0]
+                      for c in configs(root) if is_variable(c) and var_name(c)}
+    for env_name, env_value in environment_pairs(root):
+        if env_name in config_values:
+            assert env_value == config_values[env_name], (
+                f"{name}: <Environment> {env_name}={env_value!r} disagrees with Config "
+                f"Default={config_values[env_name]!r}"
+            )
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -395,6 +439,26 @@ def test_url_variables_that_can_carry_a_password_are_masked(name):
             assert cfg.get("Mask") == "true", (
                 f"{name}: {var_name(cfg)} can carry a password inside the URL and is not masked"
             )
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_no_value_ships_a_working_password_inside_a_url(name):
+    # `test_url_variables_that_can_carry_a_password_are_masked` only checks the NAME-driven
+    # allowlist (DATABASE_URL) and only checks Mask — a value shipping a real userinfo password
+    # under any OTHER name (REDIS_URL, a custom *_DSN) passed that rule untouched. This checks
+    # the VALUE'S SHAPE, repo-wide, regardless of the field's name or Mask flag.
+    root = template(name)
+    for cfg in configs(root):
+        if not is_variable(cfg):
+            continue
+        for value in value_of(cfg):
+            assert not URL_USERINFO_PASSWORD.search(value), (
+                f"{name}: {var_name(cfg)!r} ships a URL with a userinfo password: {value!r}"
+            )
+    for env_name, env_value in environment_pairs(root):
+        assert not URL_USERINFO_PASSWORD.search(env_value), (
+            f"{name}: <Environment> {env_name!r} ships a URL with a userinfo password: {env_value!r}"
+        )
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -469,7 +533,12 @@ def test_the_privilege_posture_is_minimal(name):
         assert kind != "device", f"{name}: passes a host device through ({cfg.get('Target')})"
         if kind != "path":
             continue
-        both = f"{cfg.get('Target') or ''} {cfg.get('Default') or ''}".lower()
+        # Target/Default only: Default is always "" by the blank-host-path rule enforced two
+        # lines below, so a substring check against those two alone can never fire — the whole
+        # class of case the rule exists for is unreachable. Description is where an author
+        # documents WHAT a path is for even while the value itself stays blank, so it is the
+        # one place this can actually catch a docker-socket mount before it ships.
+        both = f"{cfg.get('Target') or ''} {cfg.get('Default') or ''} {cfg.get('Description') or ''}".lower()
         assert "docker.sock" not in both, f"{name}: {label!r} mounts the docker socket"
         # The HOST side decides what the container can reach, and a host path is
         # operator-specific by definition: it ships BLANK and is filled in on import. (The
@@ -566,9 +635,12 @@ def test_the_readme_table_has_a_row_naming_the_template_and_its_icon(name):
 
 def test_every_icon_file_is_named_by_a_template_and_listed_in_the_readme():
     # The inverse: an icon nothing references is an orphan the README rule also forbids.
+    # A dotfile (`.gitkeep`, the usual way to make git track an otherwise-empty directory) is
+    # not a candidate icon at all — it has no `icons/<name>.png` shape for any template to
+    # name, so it is not "a stray file", it is repo plumbing this rule was never meant to see.
     named = {icon_basename(template(n)) for n in NAMES}
     rows = "\n".join(_readme_rows())
-    for icon in sorted(p.name for p in ICONS.iterdir() if p.is_file()):
+    for icon in sorted(p.name for p in ICONS.iterdir() if p.is_file() and not p.name.startswith(".")):
         assert icon in named, f"icons/{icon} is referenced by no template"
         assert f"icons/{icon}" in rows, f"icons/{icon} has no README row"
 
@@ -587,3 +659,83 @@ def test_a_webui_that_names_a_port_names_one_this_template_declares(name):
     assert ports, f"{name}: WebUI {webui!r} names no [PORT:n]"
     for port in ports:
         assert port in declared, f"{name}: WebUI names port {port}, which no Config declares"
+
+
+# ---------------------------------------------------------------------------------------------
+# Mutation proofs for unraid-templates#63 (items 1, 2, 4, 6, 7) — each builds the exact shape
+# the fixed rule now must catch (or must NOT catch) and exercises the same mechanism the
+# parametrized tests above use against the real templates, without touching templates/ itself.
+# ---------------------------------------------------------------------------------------------
+
+def test_mutation_duplicate_path_and_port_targets_are_now_caught():
+    """#63 item 1: two Configs sharing a Path Target, or sharing a Port (Mode, Target), used to
+    pass — only Name and Variable Target were checked for collisions."""
+    xml = """<Container><Name>x</Name>
+      <Config Name="A" Target="/data" Default="" Mode="rw" Description="d" Type="Path"
+              Display="always" Required="true" Mask="false"></Config>
+      <Config Name="B" Target="/data" Default="" Mode="ro" Description="d" Type="Path"
+              Display="always" Required="true" Mask="false"></Config>
+      <Config Name="C" Target="8080" Default="8080" Mode="tcp" Description="d" Type="Port"
+              Display="always" Required="true" Mask="false">8080</Config>
+      <Config Name="D" Target="8080" Default="8080" Mode="tcp" Description="d" Type="Port"
+              Display="always" Required="true" Mask="false">8080</Config>
+    </Container>"""
+    cfgs = configs(ET.fromstring(xml))
+    paths = [var_name(c) for c in cfgs if (c.get("Type") or "").strip().lower() == "path"]
+    ports = [((c.get("Mode") or "").strip(), var_name(c))
+             for c in cfgs if (c.get("Type") or "").strip().lower() == "port"]
+    assert len(paths) != len(set(paths)), "duplicate Path Target should now collide"
+    assert len(ports) != len(set(ports)), "duplicate (Mode, Target) Port should now collide"
+    # A tcp+udp pair on the SAME port number is legitimate and must NOT collide.
+    tcp_udp = [("tcp", "8080"), ("udp", "8080")]
+    assert len(tcp_udp) == len(set(tcp_udp)), "a tcp+udp pair on one port must stay legal"
+
+
+def test_mutation_environment_config_mismatch_is_now_caught():
+    """#63 item 4: an <Environment> mirror disagreeing with its Config for a name outside the
+    three tl;dw-specific ones used to pass unnoticed, repo-wide."""
+    xml = """<Container><Name>x</Name>
+      <Config Name="LOG_LEVEL" Target="LOG_LEVEL" Default="info" Mode="" Description="d"
+              Type="Variable" Display="always" Required="false" Mask="false">info</Config>
+      <Environment>
+        <Variable><Name>LOG_LEVEL</Name><Value>debug</Value></Variable>
+      </Environment>
+    </Container>"""
+    root = ET.fromstring(xml)
+    config_values = {var_name(c): value_of(c)[0]
+                      for c in configs(root) if is_variable(c) and var_name(c)}
+    mismatches = [(n, v) for n, v in environment_pairs(root)
+                  if n in config_values and config_values[n] != v]
+    assert mismatches == [("LOG_LEVEL", "debug")], "the repo-wide mirror check must catch this"
+
+
+def test_mutation_docker_sock_named_only_in_description_is_now_caught():
+    """#63 item 6: a Path whose Target/Default say nothing but whose Description documents a
+    docker.sock mount used to pass, because only Target/Default were substring-checked."""
+    xml = """<Container><Name>x</Name>
+      <Config Name="Host Run" Target="/host_run" Default="" Mode="rw"
+              Description="mount docker.sock here" Type="Path"
+              Display="always" Required="true" Mask="false"></Config>
+    </Container>"""
+    cfg = configs(ET.fromstring(xml))[0]
+    both = f"{cfg.get('Target') or ''} {cfg.get('Default') or ''} {cfg.get('Description') or ''}".lower()
+    assert "docker.sock" in both, "Description must now be part of the docker.sock check"
+
+
+def test_mutation_jwt_public_key_and_authorized_keys_are_not_flagged_as_credentials():
+    """#63 item 7: the public half of a keypair and an SSH authorized_keys list are not
+    secrets — CREDENTIAL_SHAPE matches on `KEY`/`KEYS` regardless, so both need the exception."""
+    assert not is_credential_name("JWT_PUBLIC_KEY")
+    assert not is_credential_name("AUTHORIZED_KEYS")
+    # The shape rule itself must still be wide enough to catch the real thing beside it.
+    assert is_credential_name("JWT_PRIVATE_KEY")
+
+
+def test_mutation_dotfiles_are_not_treated_as_stray_icon_files(tmp_path):
+    """#63 item 7: a `.gitkeep` (or any dotfile) used to red the stray-icon-file rule, though it
+    has no `icons/<name>.png` shape any template could ever name."""
+    (tmp_path / ".gitkeep").write_text("", encoding="utf-8")
+    (tmp_path / "real.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    considered = sorted(p.name for p in tmp_path.iterdir()
+                         if p.is_file() and not p.name.startswith("."))
+    assert considered == ["real.png"], "a dotfile must be excluded from the stray-file scan"

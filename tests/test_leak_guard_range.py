@@ -1077,11 +1077,19 @@ def test_the_untouchable_lan_local_pattern_is_exactly_as_decided() -> None:
     re-applied experimentally and the ENTIRE suite stayed green, selftest included: `_MUST_PASS`
     happens to carry only the three `.local` FILENAME forms the bad repair also passes. Pinning
     the decision is the only thing that makes undoing it loud, so this asserts the regex source.
+
+    ⭐ WHAT IS FROZEN vs WHAT CHANGED (issue #32): the trailing-dot decision above is UNTOUCHED —
+    the pattern still does not catch `host-a.lan.`/`host-a.local.`, and that gap is still
+    deliberate. What DID change is the right bound's exclusion set: `(?![\\w.-])` became
+    `(?![\\w.-]|\\*)`, so a right bound is also satisfied a literal `*` no longer counts as
+    "nothing follows" the way it wrongly did before — closing the `*config.local*` glob false
+    positive without re-opening the trailing-dot question at all.
     """
-    assert dict(guard.PATTERNS)["private lan domain"] == r"(?<![\w-])[\w-]+\.(?:lan|local)(?![\w.-])", (
+    assert dict(guard.PATTERNS)["private lan domain"] == r"(?<![\w-])[\w-]+\.(?:lan|local)(?![\w.-]|\*)", (
         "the `private lan domain` pattern changed. If this is the trailing-dot 'repair', it was "
         "tried before and reverted for false-firing on config.local.${ENV} and .gitignore globs "
-        "— see KNOWN LIMITS. Do not re-apply it.")
+        "— see KNOWN LIMITS. Do not re-apply it. (The one authorized change is the added `|\\*` "
+        "exclusion for issue #32 — a bare re-freeze on the OLD string is itself stale.)")
 
 
 @pytest.mark.parametrize("sample", [
@@ -1091,6 +1099,12 @@ def test_the_untouchable_lan_local_pattern_is_exactly_as_decided() -> None:
     "load_config('config.local.${ENV}')",
     "compose.local.$(uname).yaml",
     "the override file is settings.local.",
+    # FIXED by issue #32 (the `|\*` exclusion): a `.gitignore`/doc glob ending immediately after
+    # the label used to trip `private lan domain` because a trailing `*` is not in `[\w.-]` and
+    # so satisfied the old right bound the same way a real hostname's boundary would. Moved here
+    # from the now-deleted `test_a_trailing_glob_IS_a_known_false_positive_and_is_recorded_as_one`
+    # per that test's own instructions.
+    "gitignore glob: *config.local*",
 ])
 def test_the_false_positives_that_forced_the_trailing_dot_revert_stay_clean(sample: str) -> None:
     hits = guard.scan_text(sample, COMPILED)
@@ -1099,25 +1113,17 @@ def test_the_false_positives_that_forced_the_trailing_dot_revert_stay_clean(samp
         f"trailing-dot repair was reverted for")
 
 
-def test_a_trailing_glob_IS_a_known_false_positive_and_is_recorded_as_one() -> None:
-    """⚠️ AN HONEST PIN OF A REAL, PRE-EXISTING FALSE POSITIVE — not a claim that it is fine.
-
-    A `.gitignore` glob of the form `*<name>.local*` trips `private lan domain` TODAY: the glob's
-    trailing `*` is not in `[\\w.-]`, so the right bound is satisfied and the pattern reads it as
-    a hostname. A repo carrying that line would redden CI while leaking nothing.
-
-    It is pinned rather than fixed because the fix is a change to this exact pattern, which is
-    frozen by decision (see `test_the_untouchable_lan_local_pattern_is_exactly_as_decided`) — and
-    because a gap that is asserted is a gap somebody can find, whereas one mentioned in a comment
-    is not. Filed as unraid-templates#32. If that issue is resolved, this test flips to the
-    must-pass list above; until then it documents the true behaviour.
+def test_a_genuine_lan_leak_with_no_trailing_glob_still_reds() -> None:
+    """⭐ ADVERSARIAL NEAR-MISS for issue #32's fix: proves the `|\\*` exclusion did not also
+    swallow the ordinary case it must keep catching — a real LAN hostname leak, mid-sentence,
+    with nothing unusual after it. Same shape as `guard._MUST_FAIL`'s own
+    `AGENT_URL=http://<host>.lan:9999/mcp` entry; fragmented so THIS file, which is itself
+    scanned, does not trip the guard on its own test literal.
     """
-    glob = "gitignore glob: *config." + "local*"     # fragmented: this file is scanned
-    hits = guard.scan_text(glob, COMPILED)
+    sample = "AGENT_URL=http://host-a" + ".lan:9999/mcp"
+    hits = guard.scan_text(sample, COMPILED)
     assert [h[1] for h in hits] == ["private lan domain"], (
-        "the trailing-glob false positive changed behaviour. If it was FIXED, move this sample "
-        "into test_the_false_positives_that_forced_the_trailing_dot_revert_stay_clean and close "
-        "unraid-templates#32.")
+        f"a genuine LAN leak with no trailing '*' must still red; got {[h[1] for h in hits]}")
 
 
 @pytest.mark.timeout(300)

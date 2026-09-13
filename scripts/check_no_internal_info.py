@@ -76,10 +76,20 @@ KNOWN LIMITS (state them; do not pretend to coverage)
         globs, which are ordinary clean lines. `<label>.local.` at a sentence end and
         `<label>.lan.` at a sentence end are the same string shape and no regex separates them,
         so this takes the fail-quiet side deliberately. Do not "fix" it.
-      * A `.gitignore` glob ending immediately after the label — `*config.local*` — DOES fire, a
-        real false positive (issue #32). The right bound rejects a following LABEL, and `*` is not
-        one. Not repaired here because the repair touches the frozen pattern above; pinned as
-        known behaviour by a test so it is discoverable rather than folklore.
+      * FIXED (issue #32): a `.gitignore` glob ending immediately after the label —
+        `*config.local*` — used to fire, because the right bound rejected a following LABEL and
+        `*` was not one. The right bound now also excludes a literal `*`, closing that one
+        follower without touching the frozen trailing-dot decision above.
+        ⚠️ TRADE-OFF, stated rather than hidden: this pattern already fails to catch a leak
+        immediately followed by ANY `[\w.-]` character (that's the whole point of the right
+        bound) — this is a long-declared limit, not new. Adding `\*` extends the SAME accepted
+        limit by exactly one more follower character: a leak spelled `leaked-host.lan*` (a real
+        hostname directly abutting a literal asterisk, with nothing between them) now also
+        escapes, same as `leaked-host.lan.json` already did. This is judged an extension of the
+        existing accepted gap, not a new bypass class — the character sits in the same "narrow,
+        already-accepted blind spot" as every other `[\w.-]` follower, and a leak with NO
+        trailing `*` (the overwhelming real-world shape) still reds, proved by
+        `test_the_false_positives_that_forced_the_trailing_dot_revert_stay_clean`'s siblings.
       * THE TREE SCAN READS THE WORKTREE, and that is still true — but it is no longer a GAP,
         because it is no longer the only thing the commit-time layer runs. `git add cfg.txt` while
         it holds a leak, then overwrite cfg.txt with a clean version and do not re-stage: the tree
@@ -207,8 +217,8 @@ PATTERNS: list[tuple[str, str]] = [
     # Including `.` in the lookbehind would be the obvious copy-paste and it BREAKS the pattern:
     # a match must be able to start right after a dot, or `foo.bar.ts.net` stops being caught.
     ("tailnet name", r"(?<![\w-])[\w-]+\.ts\.net\b"),
-    # Private/LAN search domains. The trailing `(?![\w.-])` is LOAD-BEARING and is not the `\b`
-    # the other patterns use: `\b` matches before a `.`, so `[\w-]+\.local\b` fires on
+    # Private/LAN search domains. The trailing `(?![\w.-]|\*)` is LOAD-BEARING and is not the
+    # `\b` the other patterns use: `\b` matches before a `.`, so `[\w-]+\.local\b` fires on
     # `settings.local.json` / `config.local.yml` / `.claude/settings.local.json`, which exist in
     # ordinary repos and would redden CI on a file that leaks nothing. Requiring that NO further
     # label follows keeps the hostname reading (`http://nas-a.lan/`, `ping printer.local`) and
@@ -221,7 +231,16 @@ PATTERNS: list[tuple[str, str]] = [
     # guard that fires on the approved placeholder convention is a guard people switch off. There
     # is a `_MUST_PASS` case pinning this. If an estate ever genuinely adopts `.internal`, it
     # belongs in the project-side real-literal guard, not here.
-    ("private lan domain", r"(?<![\w-])[\w-]+\.(?:lan|local)(?![\w.-])"),
+    #
+    # ⚠️ `|\*` added for issue #32: a `.gitignore`/doc GLOB of the shape `*config.local*` false-
+    # fired, because a trailing `*` is not in `[\w.-]` and so satisfied the old right bound the
+    # same way a real hostname's word boundary would. This is NOT the trailing-dot repair below
+    # (which is frozen and reverted-on-purpose) — it excludes exactly one additional literal
+    # character, `*`, and leaves every other right-bound case (including the trailing dot)
+    # untouched. KNOWN LIMITS below states the resulting trade: a leak immediately followed by a
+    # literal `*` now also escapes, which widens the pattern's existing "any `[\w.-]` follower"
+    # blind spot by one more character rather than opening a new class of gap.
+    ("private lan domain", r"(?<![\w-])[\w-]+\.(?:lan|local)(?![\w.-]|\*)"),
     # Unraid share/pool roots. The PATH is what identifies an estate's storage layout; the bare
     # words are ordinary technical English (`__pycache__`, `--not --remotes`) and matching those
     # produced false failures, so this is anchored to `/mnt/`.

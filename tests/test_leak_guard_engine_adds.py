@@ -1050,12 +1050,20 @@ def test_the_staged_scan_passes_a_clean_index(tmp_path: Path) -> None:
 
 
 def test_looks_binary_asks_the_BYTES(tmp_path: Path) -> None:
-    """The pure half. A NUL anywhere, or bytes that are not UTF-8, mean binary; ASCII does not."""
+    """The pure half. MORE THAN ONE NUL anywhere, or bytes that are not UTF-8, mean binary; ASCII
+    does not, and neither does exactly one NUL (keystone#98 -- see the function's own docstring
+    for the measurement that set this threshold)."""
     assert guard._looks_binary(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
-    assert guard._looks_binary(b"plain text with a nul \x00 inside")
     assert guard._looks_binary(b"\xff\xd8\xff\xe0latin-1 \xe9 bytes")
     assert not guard._looks_binary(b"an ordinary ASCII runbook\n")
     assert not guard._looks_binary("accented but UTF-8: café\n".encode("utf-8"))
+    # ⭐⭐ keystone#98's own repro shape: exactly ONE NUL, otherwise plain ASCII. It decodes fine
+    # (a NUL is itself a legal UTF-8 codepoint) and is no longer enough to corroborate a binary
+    # claim on its own -- it is scanned like ordinary text, NUL byte included.
+    assert not guard._looks_binary(b"plain text with a nul \x00 inside")
+    # Two or more is still corroborated, and that is the whole point of the new threshold: it is
+    # narrower than "any NUL", not "no NUL check at all".
+    assert guard._looks_binary(b"plain text with \x00 two \x00 nuls inside")
 
 
 def test_an_ASCII_leak_in_a_pdf_NAMED_file_reds_the_TREE_scan(tmp_path: Path) -> None:

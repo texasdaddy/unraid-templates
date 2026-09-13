@@ -399,19 +399,49 @@ def test_a_binary_SUFFIX_no_longer_hides_TEXT_from_the_range_scan():
             f"a leak in a TEXT line was dropped because the file is named {suffix}")
 
 
-def test_a_binary_asset_is_still_not_REPORTED_as_unreadable_by_either_scan():
-    """The half that did not change, stated separately now that the two are separate questions.
+def test_scan_added_no_longer_filters_by_SUFFIX_on_its_own():
+    """⭐⭐ keystone#98: the suffix-based trust moved to `resolve_unscannable`
+    (`_needs_full_reread`), which corroborates a binary-suffixed path against its own BYTES —
+    more than one NUL — before it ever reaches `parsed.unscannable` here. `scan_added` now trusts
+    whatever it is handed; re-applying a name-based filter at this second site would silently undo
+    `resolve_unscannable`'s content-based decision one call site later.
 
-    An ordinary image git serves as a binary diff must not appear in the "not scanned, so NOT
-    CLEARED" list — reporting one on every run is the false-red that gets a guard switched off,
-    and it is what `_skipped` still exists for.
+    The end-to-end guarantee that a REAL asset stays silent through the actual range scan lives in
+    `test_a_genuine_binary_asset_is_still_silent_through_the_RANGE_scan`, below — this function's
+    own `parsed.unscannable` is never reached by one in the shipped path.
     """
     for suffix in guard.SKIP_SUFFIXES:
         diff = (f"diff --git a/assets/asset{suffix} b/assets/asset{suffix}\n"
                 "new file mode 100644\n"
                 f"Binary files /dev/null and b/assets/asset{suffix} differ\n")
         _, blind = guard.scan_added("abc", guard.parse_diff(diff), COMPILED)
-        assert blind == [], suffix
+        assert blind == [f"abc assets/asset{suffix}"], (
+            f"scan_added filtered {suffix} on its own name — that decision belongs to "
+            f"resolve_unscannable now")
+
+
+@pytest.mark.timeout(300)
+def test_a_genuine_binary_asset_is_still_silent_through_the_RANGE_scan(tmp_path: Path) -> None:
+    """The real end-to-end guarantee `test_scan_added_no_longer_filters_by_SUFFIX_on_its_own`
+    can no longer make on its own: a real asset, added in a real commit, corroborates as binary
+    in `resolve_unscannable` and never reaches a finding or an unreadable report."""
+    repo = tmp_path / "genuine-asset-range"
+    _init(repo)
+    (repo / "README.md").write_text("clean\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    base = _git(repo, "rev-parse", "HEAD").strip()
+
+    png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + bytes(range(256)) * 4
+    (repo / "icons").mkdir()
+    (repo / "icons" / "logo.png").write_bytes(png)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "add an icon")
+    head = _git(repo, "rev-parse", "HEAD").strip()
+
+    result = guard.scan_range(repo, f"{base}..{head}", COMPILED)
+    assert result.findings == [], f"a real asset produced a finding: {result.findings}"
+    assert result.unscannable == [], f"a real asset was reported unreadable: {result.unscannable}"
 
 
 def test_the_guards_own_source_is_skipped_in_range_mode_BY_EXACT_PATH_ONLY():

@@ -658,17 +658,28 @@ def _looks_binary(data: bytes) -> bool:
 
     TWO tests. The NUL one comes first because it is what git itself uses to call a blob binary,
     and because it is the cheap answer for every real image:
-      * a NUL byte anywhere — no legitimate UTF-8 source contains one;
+      * MORE THAN ONE NUL byte anywhere — no legitimate UTF-8 source contains even one, but a
+        SINGLE stray NUL is not enough to trust the name over the content (keystone#98). A
+        plain-text file wearing a binary suffix with exactly one leading NUL byte — the issue's
+        own repro, `deploy-notes.pdf` = `b"\x00\nsecret host ... lives here\n..."` — satisfied
+        "a NUL anywhere" as readily as a real asset and vanished from both scans with no report
+        anywhere. Measured over every SKIP_SUFFIXES-shaped asset actually tracked in THIS repo
+        (11 `.png` icons under `icons/`): each carries 32-227 NUL bytes, so requiring MORE THAN
+        ONE closes the one-NUL repro with no measured false-red on a real asset here.
       * it does not decode as UTF-8 at all — a real PNG/JPEG/PDF stream, a latin-1 file.
 
     ⚠️ SCOPED, deliberately: this is consulted ONLY for a path whose suffix already claims to be
-    binary. A NUL-bearing blob at such a path is skipped SILENTLY, where a NUL-bearing blob at any
-    other path is REFUSED and reported (the #242 BOM-less-UTF-16 posture, unchanged). So a UTF-16
-    payload hidden in a file named `.pdf` is still not read — exactly as before this change,
-    no better and no worse. Widening that means re-litigating which suffixes are assets, which is
-    issue #38's design call and not this one's.
+    binary. A file with exactly one NUL byte now falls through BOTH tests here (NUL count too
+    low, and the byte decodes fine as UTF-8 since a NUL is itself a legal codepoint) and is
+    SCANNED like ordinary text, NUL character included — there is no line-blanking machinery in
+    this file, so the byte is simply inert content the regex patterns skip over. A file with two
+    or more NULs anywhere, or that fails to decode outright, is still skipped SILENTLY exactly as
+    before — the #242 BOM-less-UTF-16 posture is unchanged (a UTF-16 payload carries a NUL after
+    every ASCII byte, so it clears the new threshold as easily as the old one). Widening past
+    this residual means re-litigating which suffixes are assets, which is issue #38's design call
+    and not this one's.
     """
-    if b"\x00" in data:
+    if data.count(b"\x00") > 1:
         return True
     try:
         data.decode("utf-8")
@@ -1092,6 +1103,28 @@ def _git(root: Path, *args: str) -> str:
     return out.stdout.decode("utf-8", errors="replace")
 
 
+def _blob_bytes(root: Path, rev_path: str) -> bytes | None:
+    """The full bytes of `git cat-file blob <rev_path>`, or None if git will not serve it.
+
+    ⚠️ THE WHOLE BLOB, NOT A WINDOW — deliberately, to match `_looks_binary`'s own reach (keystone
+    #98). This repo's tree scan reads and decodes the ENTIRE file rather than git's 8000-byte
+    binary-detection window, so a corroboration read that stopped at some other boundary could
+    reach a DIFFERENT verdict than the tree scan on the same bytes — the exact two-scans-disagree
+    failure this file's own `_skipped` docstring exists to prevent. Only reached for a path whose
+    SUFFIX already claims binary, which is the rare case, so the cost is bounded by that rarity
+    rather than by a byte limit.
+
+    None means git would not serve the path (the blob is absent, or the path is unmerged with no
+    stage-0 entry) — a caller that cannot corroborate fails closed, exactly like an unreadable
+    file anywhere else in this scanner.
+    """
+    try:
+        return subprocess.run(["git", "cat-file", "blob", rev_path], cwd=root,
+                              capture_output=True, check=True, timeout=_GIT_TIMEOUT_S).stdout
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+
+
 def resolves(root: Path, rev: str) -> bool:
     """Does `rev` name a commit that exists in THIS clone?
 
@@ -1433,7 +1466,30 @@ def resolve_unscannable(root: Path, parsed: ParsedDiff, revs: tuple[str, ...]) -
     # consequence is worse than a mismatched exemption: a path wrongly judged "skipped" drops out
     # of `pending`, and an empty `pending` returns early DISCARDING the whole unscannable list, so
     # a blob the scan never read is reported as clean on the push path.
-    pending = [p for p in parsed.unscannable if not _skipped(p, root)]
+    #
+    # ⭐ A BINARY-SUFFIXED PATH NO LONGER DECIDES ON ITS OWN (keystone#98). `_skipped` used to be
+    # the whole answer: git already said this path is binary, and the suffix said that was
+    # unsurprising enough to trust without a second look. But "git says binary" only means a NUL
+    # fell somewhere in the blob, and #98's own repro (`deploy-notes.pdf` = one leading NUL then
+    # plain ASCII) satisfied that as readily as a real asset. So a binary-suffixed path is
+    # corroborated the SAME way `_looks_binary` corroborates one for the tree scan — its own
+    # bytes, checked for MORE THAN ONE NUL — before being trusted on the name alone.
+    #
+    # `revs[0] == "--cached"` is the `--staged` caller, whose NEW side is the INDEX rather than a
+    # named commit, so the blob is addressed as a stage-0 path (`:0:<path>`) there instead of
+    # `<sha>:<path>`.
+    def _new_blob_ref(p: str) -> str:
+        return f":0:{p}" if revs and revs[0] == "--cached" else f"{revs[-1]}:{p}"
+
+    def _needs_full_reread(p: str) -> bool:
+        if _is_self(p, root):
+            return False
+        if not _binary_suffix(p):
+            return True
+        window = _blob_bytes(root, _new_blob_ref(p))
+        return window is None or window.count(b"\x00") <= 1
+
+    pending = [p for p in parsed.unscannable if _needs_full_reread(p)]
     if not pending:
         return ParsedDiff(parsed.added, unattributable)
 
@@ -1470,9 +1526,25 @@ def resolve_unscannable(root: Path, parsed: ParsedDiff, revs: tuple[str, ...]) -
         # flagged binary, re-diffed with `--text`, that came back NUL-bearing (a BOM-less UTF-16
         # blob) contributed no added lines, raised nothing, and quietly dropped out of
         # `still_unreadable` — reported CLEAN. Whatever the re-diff could not read stays unread.
-        if sub.unscannable:
+        #
+        # ⭐ `sub.added` IS NO LONGER DISCARDED JUST BECAUSE `sub.unscannable` IS NON-EMPTY
+        # (keystone#98). The old `continue` here dropped it outright the moment ANY line came back
+        # unscannable — correct for the UTF-16 case above, where every line carries a NUL and
+        # `sub.added` is empty anyway, but wrong for a binary-suffixed file with an early NUL and
+        # clean text after it (reached here now that `_needs_full_reread` no longer trusts such a
+        # name unconditionally): the clean lines are a real leak this commit added.
+        #
+        # ⭐⭐ AND A BINARY-SUFFIXED PATH'S OWN NUL-BEARING LINES ARE A SOFT DISCLOSURE, NOT A
+        # REFUSAL — mirroring `_looks_binary`'s asymmetry for the tree scan, where a name that
+        # CLAIMS binary earns "scan the rest, NUL byte included" rather than "cannot vouch for any
+        # of it" once its bytes fail to fully corroborate the claim. Without this, a CLEAN
+        # binary-suffixed file whose only oddity is one incidental NUL would go from silently
+        # clean to "NOT CLEARED" the moment `_needs_full_reread` sends it through this loop — a
+        # false red with no available remedy (the suffix is already in SKIP_SUFFIXES). A
+        # NON-suffix path keeps the strict rule — this scanner's long-standing "cannot vouch for a
+        # NUL-bearing line" posture, unchanged for anything that isn't wearing a binary-asset name.
+        if sub.unscannable and not _binary_suffix(path):
             still_unreadable += sub.unscannable
-            continue
         added += sub.added
     return ParsedDiff(added, still_unreadable)
 
@@ -1500,11 +1572,18 @@ def scan_added(sha: str, parsed: ParsedDiff, compiled: list[tuple[str, re.Patter
             continue
         for _, label, match in scan_text(content, compiled, path):
             findings.append(f"{sha[:10]} {_shown(path)}:{lineno}: {label}: {match!r}")
-    # `_shown` strips the marker sigil for display. `_skipped` is still asked of the RAW value: a
-    # marker is not a path, so it matches no skip suffix and no self-exemption, which is the
-    # answer wanted — an unattributable diff is never skipped.
+    # `_shown` strips the marker sigil for display.
+    #
+    # ⛔ NO `_skipped` FILTER ON THE RETURNED UNSCANNABLE LIST ANY MORE (keystone#98). It used to
+    # re-apply `_binary_suffix` here as a backstop against `resolve_unscannable` ever passing a
+    # suffix-hinted path through — but `resolve_unscannable`'s `_needs_full_reread` making that
+    # exact decision from the BYTES, not the name, is the whole #98 fix: a suffix-hinted path only
+    # reaches `parsed.unscannable` here once its own content has ALREADY failed to corroborate the
+    # binary claim. Re-filtering on the name alone at this second site would silently undo that
+    # decision one call site later — the same shape of bug #98 closes upstream, reopened here.
+    # `_is_self` still applies: the guard's own source is a fact about a known path, not a guess.
     return findings, [f"{sha[:10]} {_shown(p)}" for p in parsed.unscannable
-                      if not _skipped(p, root)]
+                      if not _is_self(p, root)]
 
 
 # ------------------------------------------------------- the COMMIT'S OWN identity

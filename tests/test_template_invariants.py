@@ -394,7 +394,7 @@ def test_the_credential_shape_rule_actually_matches_the_fleets_secret_fields():
             if secret_bearing(cfg) and is_credential_name(var_name(cfg)):
                 seen.add(var_name(cfg))
     for spelling in ("DB_PASSWORD", "POSTGRES_PASSWORD", "TAPE_CLIENT_SECRET", "ACCESS_TOKEN",
-                     "SCHWAB_PASS", "FRED_API_KEY", "TAPE_API_KEYS", "MCP_API_KEY_SALT"):
+                     "SCHWAB_PASS", "TOKEN_ENCRYPTION_KEY", "TAPE_API_KEY", "MCP_API_KEY_SALT"):
         assert spelling in seen, f"the credential-shape rule no longer matches {spelling}"
 
 

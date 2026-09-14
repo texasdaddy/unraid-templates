@@ -71,7 +71,6 @@
       "DB_USER": "same sqlalchemy_url property",
       "DB_PASSWORD": "same sqlalchemy_url property",
       "DB_NAME": "same sqlalchemy_url property",
-      "DATABASE_URL": "app/config.py sqlalchemy_url property; wins over the discrete DB_* vars when set",
       "DEPLOY_ENV": "app/alerting.py:configure_alerting -> kw_common.alerting_env.load_alert_settings; picks the ntfy topic and gates boot (T12 retired the old NTFY_URL Variable this replaces)"
     }
   },

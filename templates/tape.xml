@@ -80,11 +80,10 @@
 
   <!-- ===== Warehouse database ===== -->
   <Config Name="DB_HOST" Target="DB_HOST" Default="" Mode="" Description="Warehouse DB host - the address of the tape-db container serving THIS environment" Type="Variable" Display="always" Required="true" Mask="false"/>
-  <Config Name="DB_PORT" Target="DB_PORT" Default="5432" Mode="" Description="Warehouse DB port" Type="Variable" Display="always" Required="false" Mask="false">5432</Config>
-  <Config Name="DB_USER" Target="DB_USER" Default="tape" Mode="" Description="Warehouse DB user (matches the tape-db container's POSTGRES_USER)" Type="Variable" Display="always" Required="false" Mask="false">tape</Config>
+  <Config Name="DB_PORT" Target="DB_PORT" Default="5432" Mode="" Description="Warehouse DB port" Type="Variable" Display="always" Required="true" Mask="false">5432</Config>
+  <Config Name="DB_USER" Target="DB_USER" Default="tape" Mode="" Description="Warehouse DB user (matches the tape-db container's POSTGRES_USER)" Type="Variable" Display="always" Required="true" Mask="false">tape</Config>
   <Config Name="DB_PASSWORD" Target="DB_PASSWORD" Default="" Mode="" Description="Warehouse DB password (matches the tape-db container's POSTGRES_PASSWORD)" Type="Variable" Display="always" Required="true" Mask="true"/>
-  <Config Name="DB_NAME" Target="DB_NAME" Default="tape" Mode="" Description="Warehouse DB name (matches the tape-db container's POSTGRES_DB)" Type="Variable" Display="always" Required="false" Mask="false">tape</Config>
-  <Config Name="DATABASE_URL" Target="DATABASE_URL" Default="" Mode="" Description="OPTIONAL override — full SQLAlchemy URL (postgresql+psycopg://user:pass@host:port/db). Leave BLANK to use the discrete DB_* vars above; if set, it wins." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="DB_NAME" Target="DB_NAME" Default="tape" Mode="" Description="Warehouse DB name (matches the tape-db container's POSTGRES_DB)" Type="Variable" Display="always" Required="true" Mask="false">tape</Config>
 
   <!-- ===== Alerting (fleet standard) ===== -->
   <!--

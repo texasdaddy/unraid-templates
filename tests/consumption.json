@@ -65,9 +65,7 @@
   "tape": {
     "no_local_consumer": false,
     "vars": {
-      "SCHWAB_APP_KEY": "app/sources/schwab.py:115-116; app/main.py:195-208 OAuth app registration",
-      "SCHWAB_APP_SECRET": "app/sources/schwab.py:115-116; app/main.py:195-208",
-      "TOKEN_ENCRYPTION_KEY": "app/core/tokens.py:134 Fernet key for token-at-rest encryption",
+      "TOKEN_ENCRYPTION_KEY": "app/core/tokens.py:134 Fernet key for token-at-rest encryption; also decrypts every encrypted app_config credential row (config_store.py)",
       "DB_HOST": "app/config.py sqlalchemy_url property; docker-entrypoint.sh:9-35 boot gate",
       "DB_PORT": "same sqlalchemy_url property",
       "DB_USER": "same sqlalchemy_url property",
@@ -76,13 +74,7 @@
       "DATABASE_URL": "app/config.py sqlalchemy_url property; wins over the discrete DB_* vars when set",
       "DEPLOY_ENV": "app/alerting.py:configure_alerting -> kw_common.alerting_env.load_alert_settings_from_env; picks the ntfy topic and gates boot (T12 retired the old NTFY_URL Variable this replaces)",
       "SHARED_ROOT": "same alerting_env path; locates the fleet-shared configs/alerting.env",
-      "CONFIG_PATH": "same alerting_env path; validate_boot_from_env's marker directory",
-      "B2_KEY_ID": "app/warehouse/backup.py:1046-1173",
-      "B2_APPLICATION_KEY": "app/warehouse/backup.py:1046-1173",
-      "SCHEDULER_ENABLED": "app/main.py:379,414",
-      "FRED_API_KEY": "app/warehouse/macro.py:52",
-      "TIINGO_API_TOKEN": "app/sources/tiingo.py:76",
-      "TAPE_API_KEYS": "app/core/auth.py; app/main.py:218-627"
+      "CONFIG_PATH": "same alerting_env path; validate_boot_from_env's marker directory"
     }
   },
   "the-desk": {

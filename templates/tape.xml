@@ -9,27 +9,36 @@
   one of three places: `app_config` (scalars, migrations 0052+0053), `job_schedules`
   (cron/enabled settings, migration 0049), or — only if the container cannot boot without it —
   this template. What remains below: the DB-connection vars, TOKEN_ENCRYPTION_KEY (decrypts
-  every encrypted `app_config` row, so it cannot itself live in the store it unlocks), and the
-  three fleet-alerting vars. Everything else that used to be a Variable here — the Schwab/FRED/
-  Tiingo/legacy-API-key credentials, SCHEDULER_ENABLED, and the B2 offsite leg (removed
-  entirely) — is now set via the admin API once the container is up, or was never authorized.
-  An operator who needs to override a setting not listed here can still hand-add a Variable of
-  the same uppercased name from the Unraid Edit page; the env→DB→default read path honours it.
+  every encrypted `app_config` row, so it cannot itself live in the store it unlocks), and
+  DEPLOY_ENV. Everything else that used to be a Variable here — the Schwab/FRED/Tiingo/legacy-
+  API-key credentials, SCHEDULER_ENABLED, and the B2 offsite leg (removed entirely) — is now set
+  via the admin API once the container is up, or was never authorized. SHARED_ROOT and
+  CONFIG_PATH are ALSO gone as Variables (T-CRED-PURGE-1): the app now hardcodes the container
+  path each one names, the same way BACKUP_DIR was never a Variable — see the Alerting section
+  below. An operator who needs to override a setting not listed here can still hand-add a
+  Variable of the same uppercased name from the Unraid Edit page; the env→DB→default read path
+  honours it for anything that IS still read from the environment.
 
   DELIBERATE EXCLUSIONS, so their absence reads as a decision rather than an oversight:
     - BACKUP_DIR — represented as the /backups PATH MOUNT below, never as a Variable, because
       the two must never be able to disagree about where dumps land.
+    - SHARED_ROOT / CONFIG_PATH — same reasoning as BACKUP_DIR, applied here for the first time
+      in T-CRED-PURGE-1. SHARED_ROOT was the container-side path the "Shared alerting config"
+      mount lands at; that path is now hardcoded in app/alerting.py instead of round-tripped
+      through an environment variable an operator could mistype, so there is nothing left to
+      set — the MOUNT below is still required and still the only thing that matters. CONFIG_PATH
+      was always a subdirectory of the Data mount (never its own volume); it is hardcoded the
+      same way now, with no Variable and no separate mount either.
     - The retired per-container NTFY_URL. ALERTING IS CONFIGURED ONCE FOR THE WHOLE FLEET, NOT
-      HERE: SHARED_ROOT / CONFIG_PATH / DEPLOY_ENV ARE surfaced (see the Alerting section
-      below) and together point this container at the shared configs/alerting.env file every
-      Keystone container reads. The ntfy topic — NTFY_URL_TAPE if set, else the shared
-      NTFY_URL_DEV / NTFY_URL_PROD — and the email/SMTP settings both live in that file now, so
-      the old per-container NTFY_URL Variable is not offered; it would only race it. Tape's OWN
-      ALERT_LOG_DIR / ALERT_ERROR_LOG / TAPE_OPS_LOG are a different thing — this container's
-      own retrievable-log-path knobs, unrelated to which alert channel fires — and stay excluded
-      here exactly as before: their defaults (a subdirectory of the Data mount) suit almost every
-      deployment, and an operator who needs to override one can still add it as a Variable by
-      hand from the Unraid Edit page.
+      HERE: the "Shared alerting config" mount below and DEPLOY_ENV together point this
+      container at the shared configs/alerting.env file every Keystone container reads. The
+      ntfy topic — NTFY_URL_TAPE if set, else the shared NTFY_URL_DEV / NTFY_URL_PROD — and the
+      email/SMTP settings both live in that file now, so the old per-container NTFY_URL
+      Variable is not offered; it would only race it. Tape's OWN ALERT_LOG_DIR / ALERT_ERROR_LOG
+      / TAPE_OPS_LOG are a different thing — this container's own retrievable-log-path knobs,
+      unrelated to which alert channel fires — and stay excluded here exactly as before: their
+      defaults (a subdirectory of the Data mount) suit almost every deployment, and an operator
+      who needs to override one can still add it as a Variable by hand from the Unraid Edit page.
     - TAPE_BUILD_VERSION / _SHA / _TIME — stamped into the image by the release workflow. They
       describe the artifact; setting them by hand would only make /v1/health report a lie.
 
@@ -64,7 +73,7 @@
   <Config Name="HTTP Port" Target="8000" Default="8000" Mode="tcp" Description="App HTTP port" Type="Port" Display="always" Required="false" Mask="false">8000</Config>
   <Config Name="Data" Target="/data" Default="" Mode="rw" Description="Encrypted token store. REQUIRED - set an absolute path on a POOL (e.g. /mnt/&lt;pool&gt;/appdata/tape/data, or .../tape-dev/data for a dev container). Do NOT leave it blank and do not point it at the RAM-backed root filesystem. The retrievable ops/error logs also default to a subdirectory of this mount." Type="Path" Display="always" Required="true" Mask="false"/>
   <Config Name="Backups" Target="/backups" Default="" Mode="rw" Description="Where the scheduled pg_dump lands. REQUIRED for a real backup: WITHOUT this mount the dump is written INSIDE the container and destroyed by the next update — the job still reports success, which is why it went unnoticed for months. Set an absolute path on a POOL DIFFERENT from the one holding the DB container&apos;s data (e.g. /mnt/&lt;other-pool&gt;/appdata/tape/backups), so one pool failure cannot take both the warehouse and its only backup. The app WARNS (ntfy) at boot and at every dump if this path is not a persistent mount. ⚠️ THIS MOUNT IS THE BACKUP_DIR SETTING — there is deliberately no BACKUP_DIR Variable, because the two must never disagree: a Variable pointing anywhere other than this mount point would send dumps into the container filesystem, which is the exact silent failure above." Type="Path" Display="always" Required="true" Mask="false"/>
-  <Config Name="Shared alerting config" Target="/kw_shared" Default="" Mode="ro" Description="READ-ONLY mount of the shared fleet config directory — set the host path to the directory holding configs/alerting.env (EMAIL_TO, EMAIL_FROM, SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, and the ntfy topics NTFY_URL_TAPE / NTFY_URL_DEV / NTFY_URL_PROD). THIS MOUNT IS BOTH ALERT CHANNELS, ntfy AND email: both are deliberately read from that file at send time and NEVER from a per-container environment variable, because an environment variable is visible to anyone who can run a container inspect and both an SMTP password and an ntfy topic are real credentials. SHARED_ROOT below must point at wherever this mount lands INSIDE the container. Without this mount both channels are unreachable and every alert this service raises goes NOWHERE (it says so loudly in the boot log). One file serves the whole fleet, so rotating the password, moving the inbox or repointing a topic is one edit rather than one per container." Type="Path" Display="always" Required="false" Mask="false"/>
+  <Config Name="Shared alerting config" Target="/kw_shared" Default="" Mode="ro" Description="READ-ONLY mount of the shared fleet config directory — set the host path to the directory holding configs/alerting.env (EMAIL_TO, EMAIL_FROM, SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, and the ntfy topics NTFY_URL_TAPE / NTFY_URL_DEV / NTFY_URL_PROD). THIS MOUNT IS BOTH ALERT CHANNELS, ntfy AND email: both are deliberately read from that file at send time and NEVER from a per-container environment variable, because an environment variable is visible to anyone who can run a container inspect and both an SMTP password and an ntfy topic are real credentials. The container path is FIXED at /kw_shared (T-CRED-PURGE-1 — the app hardcodes it, there is no SHARED_ROOT Variable to keep in sync any more). Without this mount both channels are unreachable and every alert this service raises goes NOWHERE (it says so loudly in the boot log). One file serves the whole fleet, so rotating the password, moving the inbox or repointing a topic is one edit rather than one per container." Type="Path" Display="always" Required="true" Mask="false"/>
 
   <!-- ===== Encryption ===== -->
   <Config Name="TOKEN_ENCRYPTION_KEY" Target="TOKEN_ENCRYPTION_KEY" Default="" Mode="" Description="Fernet key for token-at-rest encryption AND for every encrypted app_config credential row (Schwab app key/secret, FRED/Tiingo API keys, the legacy shared API key — set those via the admin API once this container is up). REQUIRED - the key that decrypts the store cannot itself live inside it." Type="Variable" Display="always" Required="true" Mask="true"/>
@@ -85,8 +94,10 @@
     named by the "Shared alerting config" mount above, so rotating a password or repointing a
     topic is one edit fleet-wide instead of one per container. Setup and the annotated template
     for that file: github.com/texasdaddy/kw-common/blob/main/docs/alerting-setup.md
+
+    DEPLOY_ENV is the only Variable left in this section (T-CRED-PURGE-1) — it genuinely
+    differs per deployment (prod vs dev), unlike SHARED_ROOT/CONFIG_PATH, which named a fixed
+    container path and are now hardcoded in app/alerting.py instead.
   -->
   <Config Name="DEPLOY_ENV" Target="DEPLOY_ENV" Default="" Mode="" Description="REQUIRED - type prod or dev. It selects which shared ntfy topic this container falls back to when NTFY_URL_TAPE is not set (NTFY_URL_PROD or NTFY_URL_DEV) and which keys the shared file must carry. DELIBERATELY BLANK: a default here would silently put a dev deployment on the prod topic, and the symptom of that is an incident that paged the wrong place. Case does not matter." Type="Variable" Display="always" Required="true" Mask="false"/>
-  <Config Name="SHARED_ROOT" Target="SHARED_ROOT" Default="/kw_shared" Mode="" Description="The CONTAINER path the Shared alerting config mount above is mounted at. Leave it alone - it must match that mount's container-side target, and the operator chooses only the HOST side. Change both together or neither." Type="Variable" Display="advanced" Required="true" Mask="false">/kw_shared</Config>
-  <Config Name="CONFIG_PATH" Target="CONFIG_PATH" Default="/data/config" Mode="" Description="A directory this container owns and writes, holding one small marker file that records which alerting config it last validated — which is what makes the one-time validation alert fire on a config change rather than on every restart. Defaults to a subdirectory of the Data mount above so there is no second volume to get wrong." Type="Variable" Display="advanced" Required="true" Mask="false">/data/config</Config>
 </Container>

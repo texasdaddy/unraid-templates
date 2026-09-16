@@ -45,6 +45,8 @@
       "SCHWAB_PASS": "reauth.py:93,873 filled into the password field",
       "LOGIN_URL": "reauth.py:79; :1400,:1490 page.goto(LOGIN_URL)",
       "TOKEN_URL": "reauth.py:80,635 urllib.request.Request(TOKEN_URL, ...)",
+      "TAPE_CLIENT_ID": "reauth.py:84,642 CLIENT_ID -> X-Client-Id header on the TOKEN_URL read",
+      "TAPE_CLIENT_SECRET": "reauth.py:85,644 CLIENT_SECRET -> X-Client-Secret header on the TOKEN_URL read",
       "CALLBACK_URL_MATCH": "reauth.py:82 CALLBACK_MATCH, used downstream for redirect matching",
       "TOKEN_ISSUED_FIELD": "reauth.py:85 ISSUED_FIELD; consulted at :670-682 against TOKEN_URL JSON",
       "ALERT_NTFY_URL": "alerting.py:341 builds the ntfy POST target",

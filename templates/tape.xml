@@ -59,7 +59,7 @@
   <Privileged>false</Privileged>
   <Support/>
   <Project>https://github.com/texasdaddy/tape</Project>
-  <Overview>Tape — Schwab-backed market + account data tier for CEF Tracker + Keystone. ONE neutral template for dev and prod: at creation set Name (tape / tape-dev), image tag (:stable for prod, :dev for dev), network + a static IP if you use one, and the discrete DB_* vars pointing at the tape-db container. The app assembles the DB connection string from DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME (§2 B.10) — no baked DATABASE_URL. Everything else, including the Schwab/FRED/Tiingo credentials, is database-managed via the admin API, seeded with shipped defaults — see the header comment.</Overview>
+  <Overview>Tape — Schwab-backed market + account data tier for CEF Tracker + Keystone. ONE neutral template for dev and prod: at creation set Name (tape / tape-dev), image tag (:stable for prod, :dev for dev), network + a static IP if you use one, and the discrete DB_* vars pointing at the tape-db container. The app assembles the DB connection string from DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME (§2 B.10), or set DATABASE_URL to override with a full connection string. Everything else, including the Schwab/FRED/Tiingo credentials, is database-managed via the admin API, seeded with shipped defaults — see the header comment.</Overview>
   <Category>Network:Other</Category>
   <WebUI>http://[IP]:[PORT:8000]/v1/health</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/templates/tape.xml</TemplateURL>
@@ -84,6 +84,7 @@
   <Config Name="DB_USER" Target="DB_USER" Default="tape" Mode="" Description="Warehouse DB user (matches the tape-db container's POSTGRES_USER)" Type="Variable" Display="always" Required="true" Mask="false">tape</Config>
   <Config Name="DB_PASSWORD" Target="DB_PASSWORD" Default="" Mode="" Description="Warehouse DB password (matches the tape-db container's POSTGRES_PASSWORD)" Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="DB_NAME" Target="DB_NAME" Default="tape" Mode="" Description="Warehouse DB name (matches the tape-db container's POSTGRES_DB)" Type="Variable" Display="always" Required="true" Mask="false">tape</Config>
+  <Config Name="DATABASE_URL" Target="DATABASE_URL" Default="" Mode="" Description="OPTIONAL override — full SQLAlchemy URL (postgresql+psycopg://user:pass@host:port/db). Leave BLANK to use the discrete DB_* vars above; if set, it wins." Type="Variable" Display="advanced" Required="false" Mask="true"/>
 
   <!-- ===== Alerting (fleet standard) ===== -->
   <!--

@@ -429,9 +429,11 @@ PATH_EXEMPT: tuple[tuple[str, str], ...] = ()
 # `test_the_allow_literals_are_recognised_as_permitted_spans`, and not through a scan verdict that
 # would pass either way.
 ALLOW_LITERALS: tuple[str, ...] = (
-    # The GitHub/GHCR owner path is functional — neutralizing it breaks image pulls and the
-    # icon URLs the Unraid templates point at. It is the account name, not infrastructure, and
-    # it is in this repository's own clone URL.
+    # The GitHub/GHCR owner path is functional: it appears in image references, clone URLs and
+    # icon links, and neutralizing it breaks them. It is the account name, not infrastructure.
+    # (Worded repo-neutral deliberately — this file is shared verbatim across the fleet, and a
+    # sibling repo without Unraid templates would inherit a rationale that names something it
+    # doesn't ship. keystone#74.)
     "github.com/texasdaddy",
     "githubusercontent.com/texasdaddy",
     "ghcr.io/texasdaddy",
@@ -1120,6 +1122,25 @@ def _git(root: Path, *args: str) -> str:
     out = subprocess.run(["git", *args], cwd=root, capture_output=True, check=True,
                          timeout=_GIT_TIMEOUT_S)
     return out.stdout.decode("utf-8", errors="replace")
+
+
+def _has_working_tree_encoding(root: Path, rel: str) -> bool:
+    """Does `.gitattributes` give this path a `working-tree-encoding` (keystone#73)?
+
+    That attribute makes the CHECKED-OUT file a different encoding from the committed BLOB —
+    `working-tree-encoding=UTF-16LE` stores an ordinary UTF-8 blob and checks it out as UTF-16LE.
+    The tree scan reads the worktree, so it sees the UTF-16LE bytes: every byte decodes as valid
+    UTF-8 (each is under 0x80), but a NUL sits after every ASCII character, tripping the #242 NUL
+    refusal for a tree whose committed content is clean. `git check-attr` is the one place that
+    knows the two can differ here.
+
+    `git check-attr <attr> -- <path>` always exits 0 and prints `<path>: <attr>: <value>`, where
+    `<value>` is the literal string `unspecified` when no rule sets it — so there is no failure
+    mode to catch beyond `_git`'s own timeout, and no line can come back missing to mis-parse.
+    """
+    out = _git(root, "check-attr", "working-tree-encoding", "--", rel).strip()
+    _, _, value = out.rpartition(": ")
+    return value not in ("", "unspecified", "unset")
 
 
 def _blob_bytes(root: Path, rev_path: str) -> bytes | None:
@@ -2426,14 +2447,34 @@ def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
         # defensive `text is None` branch could only print a NUL message about something that is
         # not a NUL problem.)
         if "\x00" in text:
-            # `absent_from_worktree` threaded in here too: this is the one branch that could
-            # report a staged blob without saying the file is not on disk, which sent the operator
-            # looking for a file that is not there.
-            where = " (absent from the worktree)" if absent_from_worktree else ""
-            undecodable.append(
-                f"{rel}{where} (contains a NUL byte, so it is not UTF-8 text - BOM-less "
-                f"UTF-16/UTF-32 decodes as valid UTF-8 and would scan as nothing)")
-            continue
+            # ⚠️ A NUL HERE IS NOT ALWAYS A MIS-ENCODING (keystone#73). `working-tree-encoding`
+            # makes the CHECKOUT a different encoding from the committed BLOB, so the worktree
+            # read above can be legitimately NUL-bearing for a tree that publishes clean UTF-8 —
+            # see `_has_working_tree_encoding`. Only worth asking for a file actually read FROM
+            # the worktree: `absent_from_worktree` means `text` already came from the blob via
+            # `staged_blob`, which is the same source this fallback would re-read.
+            recovered: str | None = None
+            if not absent_from_worktree and _has_working_tree_encoding(root, rel):
+                blob = staged_blob(root, rel)
+                if blob is not None:
+                    try:
+                        blob_text = blob.decode("utf-8")
+                    except UnicodeDecodeError:
+                        blob_text = None
+                    if blob_text is not None and "\x00" not in blob_text:
+                        # The BLOB is what the commit actually contains, and it decodes clean —
+                        # the NUL above was the working-tree filter's doing, not a leak.
+                        recovered = blob_text
+            if recovered is None:
+                # `absent_from_worktree` threaded in here too: this is the one branch that could
+                # report a staged blob without saying the file is not on disk, which sent the
+                # operator looking for a file that is not there.
+                where = " (absent from the worktree)" if absent_from_worktree else ""
+                undecodable.append(
+                    f"{rel}{where} (contains a NUL byte, so it is not UTF-8 text - BOM-less "
+                    f"UTF-16/UTF-32 decodes as valid UTF-8 and would scan as nothing)")
+                continue
+            text = recovered
         scanned += 1
         findings += [f"{rel}:{n}: {label}: {match!r}"
                      for n, label, match in scan_text(text, compiled, rel)]

@@ -1305,3 +1305,140 @@ def test_changed_paths_excludes_deletions_and_keeps_modifications(tmp_path: Path
     got = guard.changed_paths(repo, base, head)
     assert got == ["keep.txt"], (
         f"a deletion must not be reported and a modification must be: {got}")
+
+
+# ===========================================================================================
+# keystone#73 — `working-tree-encoding` false-reds a clean tree, and the message names the
+# wrong cause. `working-tree-encoding=UTF-16LE` stores an ordinary UTF-8 blob and checks it out
+# as UTF-16LE; the tree scan reads the checkout, hits the #242 NUL refusal, and blames a mis-
+# encoding that was never there. This repo's own `.gitattributes` sets no such attribute today
+# (keystone confirmed the same), so this is a regression test for a shape neither tree currently
+# triggers by accident.
+# ===========================================================================================
+
+
+def test_has_working_tree_encoding_reads_the_attribute(tmp_path: Path) -> None:
+    """The pure-ish half: the attribute predicate itself, against a real `git check-attr`."""
+    repo = tmp_path / "attr_probe"
+    _seeded(repo)
+    _write(repo, ".gitattributes", "cfg.txt working-tree-encoding=UTF-16LE\n")
+    _write(repo, "cfg.txt", "clean\n")
+    _write(repo, "plain.txt", "clean\n")
+    _git(repo, "add", "-A")
+
+    assert guard._has_working_tree_encoding(repo, "cfg.txt")
+    assert not guard._has_working_tree_encoding(repo, "plain.txt"), (
+        "a path with no matching .gitattributes rule must read as unspecified")
+
+
+def test_a_working_tree_encoded_file_does_not_FALSE_RED_the_tree_scan(tmp_path: Path) -> None:
+    """⭐ keystone#73, the measured repro. The committed BLOB is clean UTF-8; only the checked-out
+    bytes carry the NUL, and only because the attribute says they should."""
+    repo = tmp_path / "wte_clean"
+    _seeded(repo)
+    _write(repo, ".gitattributes", "cfg.txt working-tree-encoding=UTF-16LE\n")
+    (repo / "cfg.txt").write_bytes("clean value\n".encode("utf-16-le"))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "add a working-tree-encoded file")
+
+    # Vacuity guard: the worktree bytes really are NUL-laced, and the blob really is plain UTF-8 —
+    # otherwise this test would pass for a reason that has nothing to do with the fix.
+    assert b"\x00" in (repo / "cfg.txt").read_bytes()
+    assert guard.staged_blob(repo, "cfg.txt") == b"clean value\n"
+
+    res = _cli(repo)
+    out = _out(res)
+    assert res.returncode == 0, f"a clean working-tree-encoded commit reddened the scan:\n{out}"
+    assert "UNREADABLE" not in out, out
+
+
+def test_a_leak_inside_a_working_tree_encoded_BLOB_is_still_caught(tmp_path: Path) -> None:
+    """⛔ THE FALLBACK MUST NOT BE A BLANKET CLEAR. If the committed blob itself carries a leak,
+    falling back to it must still scan it, not wave the file through because the attribute is set.
+    """
+    repo = tmp_path / "wte_leak"
+    _seeded(repo)
+    _write(repo, ".gitattributes", "cfg.txt working-tree-encoding=UTF-16LE\n")
+    (repo / "cfg.txt").write_bytes(f"{_LEAK_LINE}\n".encode("utf-16-le"))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "add a working-tree-encoded leak")
+
+    assert guard.staged_blob(repo, "cfg.txt") == f"{_LEAK_LINE}\n".encode("utf-8"), "vacuity guard"
+
+    res = _cli(repo)
+    assert res.returncode == 1, (
+        f"a real leak in a working-tree-encoded blob was cleared by the fallback:\n{_out(res)}")
+    assert "cfg.txt" in _out(res), _out(res)
+
+
+def test_working_tree_encoding_does_not_mask_a_genuinely_NUL_bearing_blob(tmp_path: Path) -> None:
+    """The attribute only excuses the WORKTREE read. If the BLOB itself still carries a NUL, the
+    #242 refusal must still fire — this is what stops the fallback becoming a blanket clear.
+
+    Reached the ordinary way: the file is committed RAW UTF-16 before `.gitattributes` ever
+    mentions it (so no clean filter runs), then the attribute is added afterward without a
+    `git add --renormalize` — an easy thing to forget, and exactly when the blob and the
+    attribute disagree about what the file actually is.
+    """
+    repo = tmp_path / "wte_blob_still_nul"
+    _seeded(repo)
+    (repo / "cfg.txt").write_bytes("clean value\n".encode("utf-16-le"))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "commit a raw UTF-16 file, no attribute yet")
+
+    # `add .gitattributes` ONLY, deliberately NOT `-A`: staging `cfg.txt` again is exactly
+    # `git add --renormalize` in effect (git re-filters a tracked file's worktree bytes against
+    # the CURRENT attributes whenever it re-adds it), which would silently fix the very
+    # desync this test needs. Leaving `cfg.txt` un-staged is what "forgot to renormalize" means.
+    _write(repo, ".gitattributes", "cfg.txt working-tree-encoding=UTF-16LE\n")
+    _git(repo, "add", ".gitattributes")
+    _git(repo, "commit", "-q", "-m", "add the attribute without renormalizing cfg.txt")
+
+    assert guard._has_working_tree_encoding(repo, "cfg.txt"), "vacuity guard: attribute must apply"
+    assert b"\x00" in guard.staged_blob(repo, "cfg.txt"), (
+        "vacuity guard: the blob must still be the un-renormalized raw UTF-16")
+
+    res = _cli(repo)
+    assert res.returncode == 1, (
+        f"a genuinely NUL-bearing blob was cleared just because the attribute is set:\n{_out(res)}")
+    assert "cfg.txt" in _out(res) and "NUL byte" in _out(res), _out(res)
+
+
+def test_working_tree_encoding_fallback_refuses_when_staged_blob_is_UNAVAILABLE(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        ) -> None:
+    """The attribute is set, but `staged_blob` cannot serve the path (an unmerged file, in
+    practice) — `recovered` must stay `None` and the ordinary #242 refusal must still fire,
+    exactly as if the attribute had never been consulted. Called IN-PROCESS, not via `_cli`'s
+    subprocess: a monkeypatch on `guard.staged_blob` cannot reach a child interpreter."""
+    repo = tmp_path / "wte_blob_unavailable"
+    _seeded(repo)
+    _write(repo, ".gitattributes", "cfg.txt working-tree-encoding=UTF-16LE\n")
+    (repo / "cfg.txt").write_bytes("clean value\n".encode("utf-16-le"))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "add a working-tree-encoded file")
+
+    monkeypatch.setattr(guard, "staged_blob", lambda root, rel: None)
+    rc = guard._scan_tree(repo, guard.compile_patterns())
+    out = capsys.readouterr().out
+    assert rc == 1, f"an unreadable staged blob was treated as a successful fallback:\n{out}"
+    assert "cfg.txt" in out and "NUL byte" in out, out
+
+
+def test_working_tree_encoding_fallback_refuses_when_the_blob_does_not_DECODE(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        ) -> None:
+    """The attribute is set and `staged_blob` returns bytes, but they are not valid UTF-8 —
+    the fallback must not raise and must not clear; it falls through to the same refusal."""
+    repo = tmp_path / "wte_blob_not_utf8"
+    _seeded(repo)
+    _write(repo, ".gitattributes", "cfg.txt working-tree-encoding=UTF-16LE\n")
+    (repo / "cfg.txt").write_bytes("clean value\n".encode("utf-16-le"))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "add a working-tree-encoded file")
+
+    monkeypatch.setattr(guard, "staged_blob", lambda root, rel: b"\xff\xfe not valid utf-8")
+    rc = guard._scan_tree(repo, guard.compile_patterns())
+    out = capsys.readouterr().out
+    assert rc == 1, f"a blob that fails to decode was treated as a successful fallback:\n{out}"
+    assert "cfg.txt" in out and "NUL byte" in out, out

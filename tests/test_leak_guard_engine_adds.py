@@ -1402,3 +1402,43 @@ def test_working_tree_encoding_does_not_mask_a_genuinely_NUL_bearing_blob(tmp_pa
     assert res.returncode == 1, (
         f"a genuinely NUL-bearing blob was cleared just because the attribute is set:\n{_out(res)}")
     assert "cfg.txt" in _out(res) and "NUL byte" in _out(res), _out(res)
+
+
+def test_working_tree_encoding_fallback_refuses_when_staged_blob_is_UNAVAILABLE(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        ) -> None:
+    """The attribute is set, but `staged_blob` cannot serve the path (an unmerged file, in
+    practice) — `recovered` must stay `None` and the ordinary #242 refusal must still fire,
+    exactly as if the attribute had never been consulted. Called IN-PROCESS, not via `_cli`'s
+    subprocess: a monkeypatch on `guard.staged_blob` cannot reach a child interpreter."""
+    repo = tmp_path / "wte_blob_unavailable"
+    _seeded(repo)
+    _write(repo, ".gitattributes", "cfg.txt working-tree-encoding=UTF-16LE\n")
+    (repo / "cfg.txt").write_bytes("clean value\n".encode("utf-16-le"))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "add a working-tree-encoded file")
+
+    monkeypatch.setattr(guard, "staged_blob", lambda root, rel: None)
+    rc = guard._scan_tree(repo, guard.compile_patterns())
+    out = capsys.readouterr().out
+    assert rc == 1, f"an unreadable staged blob was treated as a successful fallback:\n{out}"
+    assert "cfg.txt" in out and "NUL byte" in out, out
+
+
+def test_working_tree_encoding_fallback_refuses_when_the_blob_does_not_DECODE(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        ) -> None:
+    """The attribute is set and `staged_blob` returns bytes, but they are not valid UTF-8 —
+    the fallback must not raise and must not clear; it falls through to the same refusal."""
+    repo = tmp_path / "wte_blob_not_utf8"
+    _seeded(repo)
+    _write(repo, ".gitattributes", "cfg.txt working-tree-encoding=UTF-16LE\n")
+    (repo / "cfg.txt").write_bytes("clean value\n".encode("utf-16-le"))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "add a working-tree-encoded file")
+
+    monkeypatch.setattr(guard, "staged_blob", lambda root, rel: b"\xff\xfe not valid utf-8")
+    rc = guard._scan_tree(repo, guard.compile_patterns())
+    out = capsys.readouterr().out
+    assert rc == 1, f"a blob that fails to decode was treated as a successful fallback:\n{out}"
+    assert "cfg.txt" in out and "NUL byte" in out, out

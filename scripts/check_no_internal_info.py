@@ -171,10 +171,10 @@ USAGE
         git config core.hooksPath .githooks
 
 IF IT FIRES ON SOMETHING LEGITIMATE
-    Add the exact literal to ALLOW_LITERALS below, in the same commit, with a comment saying
-    why. That edit is visible in review -- which is the point. Do not loosen a pattern, and
-    never add a blanket per-file skip: this file's whole value is that it cannot be satisfied
-    by looking away.
+    Add the exact literal to the matching ALLOW_LITERALS_CONTENT / _PATH / _MESSAGE tuple below
+    (whichever surface fired), in the same commit, with a comment saying why. That edit is
+    visible in review -- which is the point. Do not loosen a pattern, and never add a blanket
+    per-file skip: this file's whole value is that it cannot be satisfied by looking away.
 """
 
 from __future__ import annotations
@@ -273,7 +273,7 @@ PATTERNS: list[tuple[str, str]] = [
      r"|proton(?:mail)?|aol)\."),
     # Any UUID. Cloudflare Access policy ids look like this, and so do tenant/app ids — all of
     # which identify the estate. A legitimate one (a fixture, a migration revision) is meant to
-    # be added to ALLOW_LITERALS deliberately rather than waved through by a looser pattern.
+    # be added to ALLOW_LITERALS_CONTENT deliberately rather than waved through by a looser pattern.
     # ⚠️ Bounded on the HEX CLASS, not with `\b` and not with `(?<![\w-])`. `_` is a word
     # character, so `\b` does NOT hold after it and `app_id_11111111-2222-...` walked straight
     # through — `<KEY>_<uuid>` is an ordinary config idiom and was the likeliest way for one of
@@ -366,17 +366,52 @@ PATTERNS: list[tuple[str, str]] = [
 # leak can hide. The `.lan` half of `private lan domain` is KEPT on both surfaces, because
 # `<host>.lan` has no filename convention behind it and is the exact shape the path scan exists
 # for (`docs/<host>.lan/`, `<host>.lan.conf`).
-_LAN_ONLY = r"(?<![\w-])[\w-]+\.lan(?![\w-])"
+#
+# ⭐ RIGHT BOUND IS `(?!\w)`, NOT `(?![\w-])` (issue #45). A path/message segment can legitimately
+# run `<host>.lan-<qualifier>` — `docs/host-a.lan-runbook/`, `deployed from host-a.lan-canary` —
+# and the old bound rejected a following HYPHEN the same way it rejects a following letter, so the
+# whole directory went unmatched. There is no ordinary English or path token that puts a literal
+# hyphen directly after a dot-`lan` label other than this shape: `.lan` requires a preceding DOT,
+# and a dotted segment ending exactly in the three letters `lan` is already the host abbreviation,
+# not a word fragment (`plan`, `land`, `clan` all have a following LETTER, still rejected). Allowing
+# the hyphen closes the gap without opening one — verified against `_MUST_PASS_PATHS` /
+# `_MUST_PASS_MESSAGES`, neither of which contains a `.lan-` shape today.
+_LAN_ONLY = r"(?<![\w-])[\w-]+\.lan(?!\w)"
 
-# ⭐ THE RIGHT BOUND IS `(?![\w-])`, DELIBERATELY WIDER THAN THE CONTENT PATTERN'S `(?![\w.-])`.
+# ⭐ THE RIGHT BOUND IS `(?!\w)`, DELIBERATELY WIDER THAN THE CONTENT PATTERN'S `(?![\w.-])`.
 # Content must reject a following dot so `settings.local.json` passes; with `.local` gone there is
 # nothing left for a following dot to protect, so allowing one CLOSES two cases the content
 # pattern is documented to miss: the filename `<host>.lan.conf`, and the sentence-final
-# `deployed from <host>.lan.` in a commit message.
+# `deployed from <host>.lan.` in a commit message. A following HYPHEN is closed the same way now.
+#
+# ⭐ ROOT-ANCHORED POOL PATH (issue #45). `unraid pool path` used to be `None` on the path surface
+# — dropped ENTIRELY, because a NESTED mention (`docs/mnt/user/notes.md`) is a doc/fixture tree,
+# not a filesystem layout. But a repo-relative path that IS `mnt/user/appdata/svc/notes.md` — the
+# pool segment as the very FIRST path component — has no such innocent reading: nothing precedes
+# it to make it a "mention." `^` anchors to exactly that one position, so the nested case (still a
+# doc reference) stays excluded and only the root-level case is caught.
+_ROOT_POOL_PATH = r"^mnt/(?:apps|user|cache|remotes|disks|disk\d+)\b"
+
+# ⭐ PATH-ONLY RFC1918 BOUND (issue #45). File content rejects a match immediately followed by
+# `.<digit>` so a longer dotted numeric run (a version, a checksum) is not mistaken for the first
+# four octets of an address — `10.0.0.1.2` should not report just `10.0.0.1`. A PATH can carry a
+# real address AND a trailing extension in the same segment, though — `192.168.77.77.5.txt` is
+# addr + a one-component backup/rotation suffix + a real extension — and the content bound's
+# `(?!\.\d)` rejects that on the FIRST extra digit, before it ever sees the `.txt` that would have
+# proven it wasn't a longer numeric run. Loosening to `(?!\.\d+\.\d)` allows exactly ONE extra
+# dotted numeric component (closing the named case) while still rejecting TWO OR MORE (the same
+# class of longer-chain gap content already accepts, e.g. `192.168.1.1.2.3.4`, now just moved by
+# one component rather than removed — the general path-grammar problem is explicitly not this
+# fix's job, only the one named under-match is).
+_RFC1918_PATH = (r"(?<![\w.])(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+                 r"|192\.168\.\d{1,3}\.\d{1,3}"
+                 r"|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(?![\w]|\.\d+\.\d)")
+
 PATH_PATTERN_OVERRIDES: dict[str, str | None] = {
     "private lan domain": _LAN_ONLY,
-    "unraid pool path": None,
+    "unraid pool path": _ROOT_POOL_PATH,
     "uuid (access policy / tenant id)": None,
+    "private IPv4 (RFC1918)": _RFC1918_PATH,
 }
 # ⛔ AND THE POOL PATH IS LEFT-BOUNDED ON THIS SURFACE. The content pattern needs only a LEADING
 # SLASH, which any nested repo-relative path supplies — so a commit message that merely NAMED one
@@ -422,13 +457,28 @@ MESSAGE_PATTERN_OVERRIDES: dict[str, str | None] = {
 PATH_EXEMPT: tuple[tuple[str, str], ...] = ()
 
 # Literals that LOOK like a hit but are allowed. Keep each one justified.
-# ⚠️ As of today all three are INERT: none of them matches any current pattern, so removing the
-# neutralisation would change no verdict. They are kept as a deliberate carve-out for the
-# functional owner path in case a future pattern would catch it — stated here so nobody reads
-# this list as evidence that the carve-out is exercised. It is pinned DIRECTLY, by
+#
+# ⭐⭐ PER-SURFACE (issue #45). A single global `ALLOW_LITERALS` meant spending one to excuse a
+# legitimate PATH also blinded the CONTENT scan to that same string everywhere a line of code could
+# write it — an escape hatch for a filename that also amnestied a real secret embedded in a
+# neighbouring config value. Each surface now gets its OWN tuple; a literal excused on one is still
+# caught on the others unless it is deliberately listed in more than one.
+#
+# ⚠️ As of today all three CONTENT entries are INERT: none of them matches any current pattern, so
+# removing the neutralisation would change no verdict. They are kept as a deliberate carve-out for
+# the functional owner path in case a future pattern would catch it — stated here so nobody reads
+# this list as evidence that the carve-out is exercised. Pinned DIRECTLY, by
 # `test_the_allow_literals_are_recognised_as_permitted_spans`, and not through a scan verdict that
 # would pass either way.
-ALLOW_LITERALS: tuple[str, ...] = (
+#
+# ⭐ MIGRATION (issue #45): the three pre-existing entries move to CONTENT ONLY, not dual-applied.
+# All three name things that appear "in image references, clone URLs and icon links" per their own
+# original comment — file CONTENT, never a repo-relative PATH or a commit MESSAGE — and being
+# INERT today (they match no live pattern on any surface), narrowing them to one surface changes no
+# verdict anywhere; confirmed by the full suite + `--selftest` staying green with them PATH/MESSAGE-
+# absent. `ALLOW_LITERALS_PATH` / `ALLOW_LITERALS_MESSAGE` start empty — nothing has needed either
+# escape hatch yet.
+ALLOW_LITERALS_CONTENT: tuple[str, ...] = (
     # The GitHub/GHCR owner path is functional: it appears in image references, clone URLs and
     # icon links, and neutralizing it breaks them. It is the account name, not infrastructure.
     # (Worded repo-neutral deliberately — this file is shared verbatim across the fleet, and a
@@ -438,6 +488,8 @@ ALLOW_LITERALS: tuple[str, ...] = (
     "githubusercontent.com/texasdaddy",
     "ghcr.io/texasdaddy",
 )
+ALLOW_LITERALS_PATH: tuple[str, ...] = ()
+ALLOW_LITERALS_MESSAGE: tuple[str, ...] = ()
 
 # The documented ways to write an address or a host. A span here SUPPRESSES A HIT IT CONTAINS
 # (see `scan_text`); it never deletes text and it never skips the line. Skipping the line meant
@@ -812,10 +864,18 @@ def tracked_files(root: Path) -> list[Path]:
     return [root / p for p in seen]
 
 
-def _permitted_spans(line: str) -> list[tuple[int, int]]:
-    """(start, end) of every span on this line that is allowed to look like a hit."""
+def _permitted_spans(line: str,
+                      literals: tuple[str, ...] = ALLOW_LITERALS_CONTENT) -> list[tuple[int, int]]:
+    """(start, end) of every span on this line that is allowed to look like a hit.
+
+    `literals` defaults to `ALLOW_LITERALS_CONTENT` so the many existing bare calls (tests,
+    `scan_text`'s own default) keep scanning the surface they always meant — `scan_path`/
+    `scan_message`/`scan_tags` pass their own tuple explicitly. `_ALLOW_SPAN_RX` (the regex-based
+    amnesty spans — RFC5737, `example.com`) is NOT surface-scoped; issue #45 is about the flat
+    LITERAL list only.
+    """
     spans = [m.span() for m in _ALLOW_SPAN_RX.finditer(line)]
-    for lit in ALLOW_LITERALS:
+    for lit in literals:
         start = line.find(lit)
         while start != -1:
             spans.append((start, start + len(lit)))
@@ -890,8 +950,13 @@ def _lines(text: str) -> list[str]:
 
 
 def scan_text(text: str, compiled: list[tuple[str, re.Pattern[str]]],
-              rel_path: str = "") -> list[tuple[int, str, str]]:
+              rel_path: str = "",
+              literals: tuple[str, ...] = ALLOW_LITERALS_CONTENT) -> list[tuple[int, str, str]]:
     """(line number, label, matched text) for every hit in `text`.
+
+    `literals` defaults to the CONTENT allowlist, since that is what every bare call (tests, the
+    tree/range scan of file content) means. `scan_path`/`scan_message`/`scan_tags` pass their own
+    surface's tuple — see `ALLOW_LITERALS_CONTENT` for why the three no longer share one list.
 
     ⭐ MATCH FIRST, THEN SUPPRESS ONLY WHAT IS FULLY CONTAINED IN A PERMITTED SPAN. This is
     deliberately NOT the "delete the allowed spans, then match the remainder" form this guard used
@@ -920,7 +985,7 @@ def scan_text(text: str, compiled: list[tuple[str, re.Pattern[str]]],
     """
     hits: list[tuple[int, str, str]] = []
     for lineno, line in enumerate(_lines(text), start=1):
-        permitted = _permitted_spans(line)
+        permitted = _permitted_spans(line, literals)
         starts, best = _containment_index(permitted) if permitted else ([], [])
         for label, rx in compiled:
             if rel_path and _exempt(label, rel_path):
@@ -984,19 +1049,23 @@ def scan_path(rel_path: str) -> list[tuple[str, str]]:
 
     KNOWN LIMITS OF THIS SURFACE, stated rather than implied (see `_MUST_PASS_PATHS` /
     `_MUST_FAIL_PATHS`, which `selftest` runs):
-      * `<host>.lan-runbook/` is NOT matched — the `.lan` bound rejects a following hyphen, and
-        loosening it would fire on ordinary hyphenated names.
       * A four-component VERSION directory in the `10.` range (`docs/10.0.0.1/`) IS matched, and
         that is a known over-match: `10.0.0.1` as a version and as an address are the same string.
         `192.168.*` and `172.16-31.*` have no such collision. Rename the directory, or add the
-        literal to `ALLOW_LITERALS`.
-      * `uuid` and `unraid pool path` do not apply here at all — see PATH_PATTERN_OVERRIDES.
+        literal to `ALLOW_LITERALS_PATH`.
+      * A REPO-RELATIVE ADDRESS PATH carrying TWO OR MORE extra dotted numeric components after a
+        real address (`192.168.1.1.2.3.4.txt`) is still NOT matched — issue #45 closed the ONE-
+        component case (`192.168.77.77.5.txt`, addr + a rotation suffix + a real extension) via
+        `_RFC1918_PATH`, deliberately without solving path-grammar disambiguation in general.
+      * `uuid` does not apply here at all — see PATH_PATTERN_OVERRIDES. `unraid pool path` applies
+        ONLY when the pool segment is the path's FIRST component (`_ROOT_POOL_PATH`, issue #45) —
+        a NESTED mention (`docs/mnt/user/notes.md`) stays excluded as a doc/fixture reference.
 
     Line numbers are dropped: a path is one line by construction, and reporting `:1` on every
     finding would read as a line inside the file, which is exactly what this is not.
     """
-    return [(label, match)
-            for _, label, match in scan_text(rel_path, list(path_patterns()), rel_path)]
+    return [(label, match) for _, label, match
+            in scan_text(rel_path, list(path_patterns()), rel_path, ALLOW_LITERALS_PATH)]
 
 
 # --------------------------------------------------------------- scanning the COMMITS
@@ -1729,7 +1798,8 @@ def scan_message(sha: str, message: str) -> list[str]:
     """Findings in a commit's own message. Uses the MESSAGE pattern set — see `scan_path` for why
     a surface that is not file content does not get the content bounds."""
     return [f"{sha[:10]} <commit message>:{lineno}: {label}: {match!r}"
-            for lineno, label, match in scan_text(message, list(message_patterns()))]
+            for lineno, label, match
+            in scan_text(message, list(message_patterns()), literals=ALLOW_LITERALS_MESSAGE)]
 
 
 def _rev_tokens(rev_range: str) -> list[str]:
@@ -1829,7 +1899,8 @@ def scan_tags(tags: list[tuple[str, str, str]]) -> list[str]:
     """Findings in tag objects. Uses the MESSAGE pattern set."""
     return [f"{sha[:10]} <{kind}>:{lineno}: {label}: {match!r}"
             for kind, sha, body in tags
-            for lineno, label, match in scan_text(body, list(message_patterns()))]
+            for lineno, label, match
+            in scan_text(body, list(message_patterns()), literals=ALLOW_LITERALS_MESSAGE)]
 
 
 class RangeResult(NamedTuple):
@@ -2038,16 +2109,37 @@ _MUST_PASS_PATHS: list[str] = [
     "src/net.ts",
     "locales/en-US/messages.json",
     "vendor/example.com/pkg/x.go",
+    # ⭐ ISSUE #45 NEAR-MISSES — proving each fix did not widen past its named case.
+    # `lan` followed by a WORD CHARACTER is still not a host — only the trailing HYPHEN closed.
+    "docs/host-a.lang-notes.md",
+    # A pool word as a MID-PATH SEGMENT (not the path's first component) is still a doc/fixture
+    # mention, not a filesystem layout — `_ROOT_POOL_PATH` is anchored to `^mnt/`, not `\bmnt/`.
+    "docs/project/mnt/user/notes.md",
+    # TWO extra dotted numeric components after an address is still not caught — `_RFC1918_PATH`
+    # closed the ONE-component case only; the longer-chain gap moves by one, it is not removed.
+    "backups/192.168.1.1.2.3.4.txt",
 ]
 
 _MUST_FAIL_PATHS: list[tuple[str, str]] = [
     ("private IPv4 (RFC1918)", "192.168.77.77.conf"),
     ("private IPv4 (RFC1918)", "docs/192.168.77.77/index.md"),
+    # issue #45: addr + a one-component backup/rotation suffix + a real extension.
+    ("private IPv4 (RFC1918)", "192.168.77.77.5.txt"),
+    # ...and the suffix component is not limited to a single digit.
+    ("private IPv4 (RFC1918)", "192.168.77.77.123.txt"),
+    # issue #45 item 2: the documented over-match that MUST stay caught — a version-shaped
+    # directory in the `10.` range collides string-for-string with an address, and closing the
+    # `.5.txt` under-match above must not touch this. Not covered by any corpus before this fix.
+    ("private IPv4 (RFC1918)", "docs/10.0.0.1/index.html"),
+    ("private IPv4 (RFC1918)", "dist/10.2.14.3/app.js"),
     ("cgnat address", "100.127.255.254.conf"),
     # ⭐ `.lan` KEEPS ITS BOUND LOOSE ON THIS SURFACE, so a following EXTENSION does not hide it.
     # `.local` cannot have the same treatment: `zshrc.local` above is the same string shape.
     ("private lan domain", "docs/host-a.lan/readme.md"),
     ("private lan domain", "host-a.lan.conf"),
+    # issue #45: the `.lan` bound used to reject a following HYPHEN, so this whole directory
+    # went unmatched — `docs/host-a.lan-runbook/` in the issue's own words.
+    ("private lan domain", "docs/host-a.lan-runbook/notes.md"),
     # ⚠️ AN ACCEPTED OVER-MATCH, pinned so it is a decision rather than a surprise. In file CONTENT
     # `host-a.lan.example.com` is correctly NOT a `.lan` host (a further label follows); the path
     # surface's looser bound reports it. Same trade as the four-part version directory: the bound
@@ -2056,6 +2148,10 @@ _MUST_FAIL_PATHS: list[tuple[str, str]] = [
     ("tailnet name", "docs/host-a.tailnet-example.ts.net.md"),
     ("personal mail address", "inbox/someone@gmail.invalid.txt"),
     ("windows profile path", "docs/C:/Users/operator/notes.md"),
+    # issue #45: the pool segment as the path's FIRST component has no innocent "doc mention"
+    # reading the way a nested one does — `_ROOT_POOL_PATH` catches exactly this position.
+    ("unraid pool path", "mnt/user/appdata/svc/notes.md"),
+    ("unraid pool path", "mnt/disk1/notes.md"),
 ]
 
 # Ordinary commit messages. Every one of these blocked a PUSH — and a message cannot be edited
@@ -2145,11 +2241,12 @@ def selftest(compiled: list[tuple[str, re.Pattern[str]]]) -> int:
         if want_label not in labels:
             bad.append(f"PATH not caught (wanted {want_label}, got {sorted(labels)}): {rel!r}")
     for msg in _MUST_PASS_MESSAGES:
-        hits = scan_text(msg, list(message_patterns()))
+        hits = scan_text(msg, list(message_patterns()), literals=ALLOW_LITERALS_MESSAGE)
         if hits:
             bad.append(f"false positive on the MESSAGE {msg!r}: {hits}")
     for want_label, msg in _MUST_FAIL_MESSAGES:
-        labels = {label for _, label, _ in scan_text(msg, list(message_patterns()))}
+        labels = {label for _, label, _
+                  in scan_text(msg, list(message_patterns()), literals=ALLOW_LITERALS_MESSAGE)}
         if want_label not in labels:
             bad.append(f"MESSAGE not caught (wanted {want_label}, got {sorted(labels)}): {msg!r}")
     # ⭐ THE SAME COMPLETENESS FLOOR FOR THE OTHER TWO SURFACES. The content check above asks
@@ -2492,8 +2589,9 @@ def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
             print("  " + _ascii(f))
         print("\nReplace with a placeholder (<your-unraid-host>, your-domain.example, "
               "/mnt/POOL/..., RFC5737 addresses) or take the value from an env Variable.")
-        print("If a hit is genuinely legitimate, add the literal to ALLOW_LITERALS in "
-              f"{SELF_PATH} with a comment saying why.")
+        print("If a hit is genuinely legitimate, add the literal to the matching "
+              f"ALLOW_LITERALS_CONTENT/_PATH/_MESSAGE tuple in {SELF_PATH} with a comment "
+              "saying why.")
     if findings or undecodable:
         return 1
     if tracked and scanned == 0:

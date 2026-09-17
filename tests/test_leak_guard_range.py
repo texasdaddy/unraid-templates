@@ -801,9 +801,9 @@ def test_every_pattern_is_exercised():
 def test_the_allow_literals_are_recognised_as_permitted_spans():
     """`_permitted_spans` is pinned DIRECTLY, because a scan verdict would pass either way.
 
-    Every entry in `ALLOW_LITERALS` is currently inert — none matches any live pattern — so
-    asserting `scan_text` returns clean proves nothing about the carve-out: it would return clean
-    with the whole allowlist deleted. Assert the mechanism itself.
+    Every entry in `ALLOW_LITERALS_CONTENT` is currently inert — none matches any live pattern —
+    so asserting `scan_text` returns clean proves nothing about the carve-out: it would return
+    clean with the whole allowlist deleted. Assert the mechanism itself.
 
     ⚠️ THIS REPLACED `test_the_allow_literals_are_removed_from_a_line`, and the difference is the
     entire point of the fix. The old test asserted that `_neutralize` DELETED the literal from the
@@ -812,13 +812,13 @@ def test_the_allow_literals_are_recognised_as_permitted_spans():
     extent, never a rewritten line. A test that still demanded deletion would be pressure to
     reintroduce the defect.
     """
-    assert guard.ALLOW_LITERALS, "the carve-out list is empty; this test is then vacuous"
-    for lit in guard.ALLOW_LITERALS:
+    assert guard.ALLOW_LITERALS_CONTENT, "the carve-out list is empty; this test is then vacuous"
+    for lit in guard.ALLOW_LITERALS_CONTENT:
         line = f"see https://{lit}/unraid-templates for the icon"
-        spans = guard._permitted_spans(line)
+        spans = guard._permitted_spans(line, guard.ALLOW_LITERALS_CONTENT)
         start = line.index(lit)
         assert (start, start + len(lit)) in spans, (
-            f"{lit!r} is in ALLOW_LITERALS but is not recognised as a permitted span")
+            f"{lit!r} is in ALLOW_LITERALS_CONTENT but is not recognised as a permitted span")
         # ⭐ THE SPAN MUST NOT REACH BEYOND THE LITERAL, IN EITHER DIRECTION. Asserted as an EXACT
         # extent: an earlier version of this checked only that the span did not contain the
         # substring "unraid-templates", which any leftward growth over "see https://" satisfied —
@@ -826,7 +826,7 @@ def test_the_allow_literals_are_recognised_as_permitted_spans():
         # rule exists for. A weaker assertion under a stronger comment is the shape this repo
         # treats as a defect.
         for s, e in spans:
-            assert line[s:e] in guard.ALLOW_LITERALS, (
+            assert line[s:e] in guard.ALLOW_LITERALS_CONTENT, (
                 f"a permitted span {line[s:e]!r} is not exactly one carve-out literal — it has "
                 f"grown over its neighbours and could mask a leak written there")
 
@@ -837,12 +837,38 @@ def test_a_repeated_allow_literal_is_recognised_at_EVERY_occurrence() -> None:
     Collapsing it to a single `find` left the whole suite green, because every other case puts one
     literal on a line. A second occurrence going unrecognised would report it as a hit.
     """
-    a, b = guard.ALLOW_LITERALS[0], guard.ALLOW_LITERALS[1]
+    a, b = guard.ALLOW_LITERALS_CONTENT[0], guard.ALLOW_LITERALS_CONTENT[1]
     line = f"{a} and again {a} and also {b}"
-    spans = guard._permitted_spans(line)
+    spans = guard._permitted_spans(line, guard.ALLOW_LITERALS_CONTENT)
     covered = sorted(line[s:e] for s, e in spans)
     assert covered.count(a) == 2, f"the repeated literal was found once, not twice: {covered}"
     assert b in covered, f"a second, different literal on the same line was missed: {covered}"
+
+
+def test_allow_literals_are_PER_SURFACE_not_global() -> None:
+    """⭐⭐ issue #45 item 3 — THE REGRESSION TEST FOR THE FIX ITSELF.
+
+    Before this fix, `ALLOW_LITERALS` was one flat tuple `_permitted_spans` read regardless of
+    surface: excusing a literal for a legitimate PATH also blinded the CONTENT scan to that exact
+    string wherever a line of code wrote it. Prove the three tuples are independent: a literal
+    scoped to PATH suppresses a hit on the path surface and does NOT suppress the identical text
+    on the content surface, and vice versa. Uses a real deny pattern (`unraid pool path`), not an
+    inert literal, so the suppression is observed through `scan_text`'s actual verdict rather than
+    asserted only against `_permitted_spans` in isolation.
+    """
+    leak = "/mnt/" + "user"  # fragmented: this file is itself scanned by the guard.
+    rx = [(label, r) for label, r in COMPILED if label == "unraid pool path"]
+    assert rx, "the 'unraid pool path' pattern has been renamed; this test would be vacuous"
+    line = f"prefix {leak} suffix"
+    assert guard.scan_text(line, rx), "the pattern does not bite at all; test is vacuous"
+
+    path_only = (leak,)
+    # Scoped to PATH: suppressed when the caller says "path", still caught when it says "content".
+    assert guard.scan_text(line, rx, literals=path_only) == [], (
+        "a literal scoped to PATH did not suppress a hit when scanned AS the path surface")
+    assert guard.scan_text(line, rx, literals=guard.ALLOW_LITERALS_CONTENT), (
+        "a literal scoped to PATH ALSO suppressed a hit on the CONTENT surface — this is the "
+        "exact global-escape-hatch bug issue #45 item 3 exists to close")
 
 
 def test_a_permitted_span_still_suppresses_what_it_actually_contains():
@@ -868,13 +894,15 @@ def test_a_permitted_span_still_suppresses_what_it_actually_contains():
     # Monkeypatch a span covering exactly the leak, then assert it is suppressed.
     original = guard._permitted_spans
     start = line.index(leak)
-    guard._permitted_spans = lambda _l: [(start, start + len(leak))]
+    # `scan_text` always calls `_permitted_spans(line, literals)` positionally (issue #45 gave it
+    # a per-surface `literals` arg), so the stand-in must accept it even though it ignores it.
+    guard._permitted_spans = lambda _l, _lits=None: [(start, start + len(leak))]
     try:
         assert guard.scan_text(line, rx) == [], (
             "a hit lying entirely inside a permitted span was still reported — the allowlist "
             "has become inert, which is the opposite failure to amnesty")
         # ...and a hit only PARTLY covered is still reported.
-        guard._permitted_spans = lambda _l: [(start, start + len(leak) - 1)]
+        guard._permitted_spans = lambda _l, _lits=None: [(start, start + len(leak) - 1)]
         assert guard.scan_text(line, rx), (
             "a hit that merely TOUCHES a permitted span was suppressed — containment must be "
             "total, or a span can mask a leak by overlapping it")

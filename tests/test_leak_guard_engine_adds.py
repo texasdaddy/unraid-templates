@@ -101,6 +101,7 @@ _DOTENV_LOCAL = ".env" + ".local"
 # `_MUST_PASS_PATHS`, and it can, because it is the one file both scans skip.
 _LOCAL = "." + "local"          # the machine-local override suffix, as a FILENAME
 _MNT_USER = "/mnt/" + "user"
+_MNT_USER_ROOT = "mnt/" + "user"  # no leading slash — the repo-relative, root-of-tree spelling
 _MNT_CACHE = "/mnt/" + "cache"
 _VERSION_4 = "10.0." + "0.1"    # a four-part assembly version, not an address
 
@@ -245,31 +246,43 @@ def test_a_NEW_pattern_reaches_every_surface_unless_an_override_says_otherwise(
 
 
 def test_the_PATH_surface_runs_a_DIFFERENT_pattern_set_and_says_which() -> None:
-    """⭐⭐ A PATH IS NOT FILE CONTENT, and three patterns rely on bounds that only hold in the
+    """⭐⭐ A PATH IS NOT FILE CONTENT, and several patterns rely on bounds that only hold in the
     grammar they were written for. Applied verbatim to paths they reddened trees that leak nothing
     — measured, and one of them refused a `git commit` end-to-end. `PATH_PATTERN_OVERRIDES` is the
-    correction; this pins WHICH patterns it removes, so removing a fourth is a deliberate act
+    correction; this pins WHICH patterns it changes, so changing a further one is a deliberate act
     rather than a quiet widening of the blind spot.
 
     ⚠️ ASSERTS THE COMPILED PATTERN, NOT THE LABEL. It used to check that the LABEL survived — and
     a label survives while half its regex is replaced, so a third narrowing (`.local`, dropped by
     `_LAN_ONLY`) walked straight past a test whose docstring claimed to stop exactly that.
+
+    ⭐ issue #45 turned two of the three removals into REPLACEMENTS. `unraid pool path` no longer
+    reads `None` — it is root-anchored (`_ROOT_POOL_PATH`) instead of dropped, so it still applies
+    at the one position (the path's first component) where "this is a docs/fixtures mention" is
+    not a possible reading. `private IPv4 (RFC1918)` gained its OWN path-only bound too
+    (`_RFC1918_PATH`), so it moves out of the "everything else is unchanged" list into the
+    named-override list alongside `private lan domain`.
     """
     compiled = dict(guard.path_patterns())
     assert "uuid (access policy / tenant id)" not in compiled, (
         "a UUID FILENAME is a naming convention — migrations, fixtures, cassettes, snapshots. "
         "The pattern exists for a policy or tenant id, which is a value written INSIDE a file, "
         "and the content scan still catches it there")
-    assert "unraid pool path" not in compiled, (
-        "a repo-relative path can never BE an absolute pool path; the pattern can only match one "
-        "directory deep, where it means a docs or fixtures tree")
+    assert compiled["unraid pool path"].pattern == guard._ROOT_POOL_PATH, (
+        "the path surface's 'unraid pool path' override changed — it should be root-anchored "
+        "(_ROOT_POOL_PATH, issue #45), not dropped: a repo-relative path with the pool segment as "
+        "its FIRST component has no 'docs/fixtures mention' reading the way a nested one does")
     assert compiled["private lan domain"].pattern == guard._LAN_ONLY, (
         "the `.lan`-only variant is a THIRD narrowing — it drops `.local` — and it must stay "
         "visible here rather than hiding behind a surviving label")
+    assert compiled["private IPv4 (RFC1918)"].pattern == guard._RFC1918_PATH, (
+        "the path surface's RFC1918 bound changed (issue #45: one extra dotted numeric component "
+        "is now allowed, closing the addr+rotation-suffix+extension under-match) — it must stay "
+        "visible here, not silently reabsorbed into 'everything else is unchanged'")
     # ...and everything else applies here UNCHANGED, byte for byte against the content pattern.
     content = dict(guard.compile_patterns())
-    for label in ("private IPv4 (RFC1918)", "cgnat address", "tailnet name",
-                  "personal mail address", "windows profile path"):
+    for label in ("cgnat address", "tailnet name", "personal mail address",
+                  "windows profile path"):
         assert compiled[label].pattern == content[label].pattern, label
 
 
@@ -290,24 +303,48 @@ def test_the_MESSAGE_surface_keeps_the_pool_path_but_ANCHORS_it() -> None:
 
 
 def test_the_path_scan_INHERITS_the_patterns_LIMITS_and_says_so() -> None:
-    """⚠️ DECLARED, NOT CLAIMED AWAY. Two limits, both deliberate, both pinned so the next reader
-    finds them rather than assuming coverage.
+    """⚠️ DECLARED, NOT CLAIMED AWAY — updated for the three fixes issue #45 shipped, plus the two
+    limits that remain deliberate.
 
-    1. `<host>.lan-runbook/` is NOT caught: the `.lan` bound rejects a following HYPHEN, and
-       loosening it would fire on ordinary hyphenated directory names.
-    2. A four-component VERSION directory in the `10.` range IS caught, and that is a known
+    FIXED by issue #45 (all three now CAUGHT, not missed):
+    1. `<host>.lan-runbook/` — the `.lan` bound used to reject a following HYPHEN. `_LAN_ONLY`'s
+       right bound is now `(?!\\w)`, so a hyphen no longer hides the host.
+    2. `mnt/user/appdata/svc/notes.md` AT THE REPO ROOT — `unraid pool path` used to be dropped
+       entirely from the path surface. `_ROOT_POOL_PATH` catches the pool segment as the path's
+       FIRST component, where "this is a docs/fixtures mention" has no basis.
+    3. An address followed by ONE extra dotted numeric component then a real extension
+       (`192.168.77.77.5.txt`) — `_RFC1918_PATH` allows exactly one such component through.
+
+    STILL A DELIBERATE LIMIT (unchanged by issue #45, stated rather than implied):
+    4. A four-component VERSION directory in the `10.` range IS caught, and that is a known
        OVER-match rather than a leak: a four-part assembly version and an RFC1918 address in that
        range are the same string, and no rule separates them. `192.168.*` and `172.16-31.*` have
        no such collision, which is why the pattern stays. Rename the directory, or use
-       `ALLOW_LITERALS`. Filed as #45.
+       `ALLOW_LITERALS_PATH`.
+    5. TWO OR MORE extra dotted numeric components after an address is still not caught — issue
+       #45 closed the one-component case only; the longer-chain gap moves by one component, it is
+       not removed, and solving path grammar in general was explicitly not this fix's job.
+    6. A NESTED pool-path mention (a doc naming the pool segment one directory in, not at the
+       path's root) still passes — `_ROOT_POOL_PATH` is anchored to the path's first component on
+       purpose; a doc/fixture tree one level in is not a filesystem layout.
     """
-    assert guard.scan_path(f"docs/{_HOST}-runbook/notes.md") == [], (
-        "if this now fires, the `.lan` bound changed — check the `_MUST_PASS_PATHS` corpus still "
-        "passes before keeping it")
+    # 1-3: FIXED.
+    assert guard.scan_path(f"docs/{_HOST}-runbook/notes.md"), (
+        "issue #45 fix regressed: the `.lan` bound must allow a trailing hyphen again")
+    assert guard.scan_path(f"{_MNT_USER_ROOT}/appdata/svc/notes.md"), (
+        "issue #45 fix regressed: a root-level pool path must be caught (_ROOT_POOL_PATH)")
+    assert guard.scan_path(f"{_ADDR}.5.txt"), (
+        "issue #45 fix regressed: addr + one rotation-suffix component + a real extension must "
+        "still be caught")
+    # 4-6: STILL LIMITS.
     assert guard.scan_path(f"docs/{_VERSION_4}/index.html"), (
         "the four-part version over-match is a STATED limit; if it stops firing, say so here "
         "rather than leaving the docstring claiming a limit that no longer exists")
     assert guard.scan_path("docs/1.2.3/index.html") == [], "a three-part version is not an address"
+    assert guard.scan_path(f"{_ADDR}.5.6.txt") == [], (
+        "TWO extra dotted numeric components is still a stated gap, not fixed by issue #45")
+    assert guard.scan_path(f"docs/{_MNT_USER_ROOT}/notes.md") == [], (
+        "a NESTED pool-path mention is still a doc/fixture reference, not a filesystem layout")
 
 
 @pytest.mark.parametrize("rel", [

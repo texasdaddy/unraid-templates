@@ -1722,6 +1722,30 @@ def test_commit_diff_preserves_the_C_QUOTED_path_property_issue_37(tmp_path: Pat
         f"the quoted path was not resolved byte-exactly through the combined --raw -z read: {paths}")
 
 
+def test_commit_diff_handles_a_GITLINK_entry_without_desyncing(tmp_path: Path) -> None:
+    """A gitlink (mode 160000, a submodule pointer) is the exact record shape that desynchronised
+    the historic `cat-file --batch` reader this module's docstring records — `:<path>` on a
+    submodule returns a COMMIT object, a different shape the old parser's protocol did not expect.
+    `commit_diff` never calls `cat-file` for this at all: `git diff-tree` reports a gitlink as an
+    ordinary raw record (`160000` still matches `_RAW_HEADER_RX`'s `[0-7]{6}`) plus an ordinary
+    `diff --git` patch block (`+Subproject commit <sha>`), the same grammar `parse_diff` already
+    parses for a regular file — no special-cased protocol to desync. Built with `update-index
+    --cacheinfo`, which needs no real submodule remote to fabricate the mode-160000 entry.
+    """
+    repo = tmp_path / "commit_diff_gitlink"
+    base = _seeded(repo)
+    fake_sha = "a" * 40
+    _git(repo, "update-index", "--add", "--cacheinfo", f"160000,{fake_sha},vendor/sub")
+    tree = _git(repo, "write-tree").strip()
+    sha = _git(repo, "commit-tree", tree, "-p", base, "-m", "add gitlink").strip()
+
+    paths, parsed = guard.commit_diff(repo, sha, base)
+    assert paths == ["vendor/sub"], f"the gitlink path was dropped or misattributed: {paths}"
+    assert parsed.unscannable == [], (
+        f"a gitlink's ordinary 'Subproject commit' line must not be reported unreadable: "
+        f"{parsed.unscannable}")
+
+
 def test_commit_identity_and_message_matches_the_two_calls_it_replaces(
         tmp_path: Path) -> None:
     repo = tmp_path / "ident_msg_parity"

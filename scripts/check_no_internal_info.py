@@ -1658,6 +1658,80 @@ def resolve_unscannable(root: Path, parsed: ParsedDiff, revs: tuple[str, ...]) -
     return ParsedDiff(added, still_unreadable)
 
 
+_RAW_HEADER_RX = re.compile(
+    r":[0-7]{6} [0-7]{6} [0-9a-f]{4,40}\.{0,3} [0-9a-f]{4,40}\.{0,3} [A-Z][0-9]{0,3}\Z")
+
+
+def _split_raw_and_patch(text: str) -> tuple[list[str], str]:
+    """Split `git diff --raw -z -p` output into (new-side paths, patch text) — issue #44.
+
+    ⚠️ WALKED FORWARD, NEVER `.split("\\0")` OVER THE WHOLE STRING. The first version of this did
+    exactly that and was WRONG — measured wrong, not theorised: the PATCH half can carry a raw NUL
+    byte of its own (a BOM-less UTF-16LE payload past git's 8000-byte binary window is diffed as
+    TEXT, and `parse_diff` exists specifically to still scan it, NUL and all — see #242 in
+    `parse_diff`'s docstring). A whole-string split assumed the patch was NUL-free and threw the
+    real record count off by however many NULs the content itself carried — silently misreading
+    which piece was which, the exact "shape looks fine, content is wrong" failure this module has
+    shipped before with a batched reader.
+
+    So this NEVER looks past what it has already classified. `-z` guarantees each of the N raw
+    records is `<header>\\0<path>\\0`, one path per header because `--no-renames` is pinned — so
+    the loop reads a header, unconditionally trusts the NUL-terminated token right after it as the
+    path (a path can never itself contain a NUL — no filesystem allows one — so this needs no
+    check), and only tests the NEXT token against the header grammar. The first token that fails
+    that test ends the raw section, and MUST be empty (the one extra terminating `\\0` git always
+    emits before the patch) — after that point NOT ANOTHER BYTE is inspected, so a NUL anywhere
+    in the patch that follows can never be mistaken for another record boundary.
+    """
+    if not text:
+        return [], ""
+    paths: list[str] = []
+    pos = 0
+    while True:
+        nul = text.find("\0", pos)
+        if nul == -1:
+            raise ValueError("`git diff --raw -z -p`: unterminated record, no NUL found")
+        header = text[pos:nul]
+        if not _RAW_HEADER_RX.match(header):
+            if header != "" or not paths:
+                raise ValueError(
+                    f"`git diff --raw -z -p`: expected a raw header or the terminator, got "
+                    f"{header!r}")
+            return paths, text[nul + 1:]
+        pos = nul + 1
+        path_end = text.find("\0", pos)
+        if path_end == -1:
+            raise ValueError("`git diff --raw -z -p`: unterminated path, no NUL found")
+        paths.append(text[pos:path_end])
+        pos = path_end + 1
+
+
+def commit_diff(root: Path, sha: str, parent: str) -> tuple[list[str], ParsedDiff]:
+    """(changed paths, parsed diff) for one commit, from ONE subprocess instead of two (#44).
+
+    `scan_range` used to run `added_lines` (a `git diff`) and `changed_paths` (a separate
+    `git diff --name-only -z`) against the SAME two revisions. `git diff --raw -z -p` answers
+    both questions in one call — `--raw -z` for the exact paths `changed_paths` wants, `-p` for
+    the unified patch `added_lines` parses — so this replaces both subprocesses with one.
+
+    `--name-only`, not `--raw`, is what `changed_paths` uses on its own — but `--name-only -p`
+    does NOT combine (measured: git prints the name list and silently drops the patch), while
+    `--raw -p` does. `--raw`'s extra columns (modes/blob shas/status letter) are unused here and
+    cost nothing; only the path each record carries is read.
+
+    `--diff-filter=d` is safe to add here even though `added_lines`'s own call never has it:
+    `parse_diff` already discards a pure deletion on its own (see its "A DELETION PUBLISHES
+    NOTHING" comments) — a deletion contributes no `+` lines to attribute — so excluding deleted
+    paths from the raw list changes nothing `added_lines` would otherwise have scanned, while
+    giving `changed_paths`'s own "a deletion publishes nothing new" rule for free.
+    """
+    text = _git(root, *_DIFF_CONFIG, "diff-tree", "-r", *_DIFF_FLAGS, "--raw", "-z", "-p",
+                "--no-commit-id", "--diff-filter=d", parent, sha)
+    paths, patch = _split_raw_and_patch(text)
+    parsed = resolve_unscannable(root, parse_diff(patch), (parent, sha))
+    return paths, parsed
+
+
 def scan_added(sha: str, parsed: ParsedDiff, compiled: list[tuple[str, re.Pattern[str]]],
                root: Path | None = None) -> tuple[list[str], list[str]]:
     """(findings, unscannable) for one commit.
@@ -1774,10 +1848,12 @@ def scan_identity(sha: str, ident: list[tuple[str, str]],
 # 0. It is exactly as permanent as a leaked line and costs the same history rewrite to remove,
 # which is why it belongs on this gate rather than in a checklist.
 #
-# ⛔ A SEPARATE CALL, NOT A FIFTH `_IDENT_FORMAT` FIELD. `%B` is multi-line, and `commit_identity`
-# fails CLOSED on a field count that is not exactly four — appending it would make every commit
-# with a two-line message raise "refusing to report on an identity that was not fully read".
-# The identity read stays NUL-delimited and exact; the message is read on its own.
+# `commit_message`/`commit_identity` stay as their own two calls below — every OTHER caller of
+# either (the tree scan owns none; tests exercise both independently) wants exactly one of the
+# two, so splitting them keeps each answerable on its own. `scan_range`, which always wants BOTH
+# for the same commit, uses `commit_identity_and_message` instead (issue #44): one call, `%B` as
+# a FIFTH NUL-delimited field rather than a fourth appended to `_IDENT_FORMAT` — multi-line
+# content is no obstacle once it is the LAST field, since nothing follows it to misalign.
 
 
 _MESSAGE_FORMAT = "%B"
@@ -1792,6 +1868,31 @@ def commit_message(root: Path, sha: str) -> str:
     a FABRICATED finding attributed to a commit message that is in fact clean.
     """
     return _git(root, "show", "-s", "--no-show-signature", f"--format={_MESSAGE_FORMAT}", sha)
+
+
+_IDENT_MESSAGE_FORMAT = _IDENT_FORMAT + "%x00" + _MESSAGE_FORMAT
+
+
+def commit_identity_and_message(root: Path, sha: str) -> tuple[list[tuple[str, str]], str]:
+    """(identity fields, message) for one commit, from ONE call instead of two (issue #44).
+
+    Same NUL-delimited format `commit_identity` uses, with `%B` appended as a FIFTH field. `%B`
+    being multi-line is not the hazard it looked like: it is now the LAST field, so nothing after
+    it depends on where it ends, and `commit_identity`'s own fail-closed discipline carries over
+    unchanged — split on EVERY `\\0` and require EXACTLY 5 pieces, not `maxsplit=4` (which would
+    silently absorb a corrupted/short response into a misaligned 5th field instead of raising).
+    A message containing a literal NUL byte — not something ordinary git tooling produces — shifts
+    the count and is refused the same way a short identity response already is, never
+    misattributed.
+    """
+    raw = _git(root, "show", "-s", "--no-show-signature", f"--format={_IDENT_MESSAGE_FORMAT}", sha)
+    parts = raw.split("\0")
+    if len(parts) != len(_IDENT_FIELDS) + 1:
+        raise ValueError(
+            f"commit {sha[:10]}: expected {len(_IDENT_FIELDS)} identity fields + a message from "
+            f"git, got {len(parts)} parts - refusing to report on a commit that was not fully read")
+    ident = [(field, value) for field, value in zip(_IDENT_FIELDS, parts) if value]
+    return ident, parts[-1]
 
 
 def scan_message(sha: str, message: str) -> list[str]:
@@ -1930,11 +2031,13 @@ def scan_range(root: Path, rev_range: str,
     commits = commits_in_range(root, rev_range)
     for sha in commits:
         parent = first_parent(root, sha)
-        hits, blind = scan_added(sha, added_lines(root, sha, parent), compiled, root)
+        paths, parsed = commit_diff(root, sha, parent)
+        hits, blind = scan_added(sha, parsed, compiled, root)
         findings += hits
-        findings += scan_paths(f"{sha[:10]} ", changed_paths(root, parent, sha))
-        findings += scan_identity(sha, commit_identity(root, sha), compiled)
-        findings += scan_message(sha, commit_message(root, sha))
+        findings += scan_paths(f"{sha[:10]} ", paths)
+        ident, message = commit_identity_and_message(root, sha)
+        findings += scan_identity(sha, ident, compiled)
+        findings += scan_message(sha, message)
         unscannable += blind
     findings += scan_tags(refs_being_published(root, rev_range))
     return RangeResult(findings, unscannable, len(commits))

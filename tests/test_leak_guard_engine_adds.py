@@ -1285,11 +1285,32 @@ def test_the_range_scan_reads_ALL_FIVE_surfaces_of_every_commit(tmp_path: Path) 
     _write(repo, "b.txt", "b\n")
     second = _commit(repo, "second")
 
+    # `added`+`paths` and `identity`+`message` are each now ONE reader (`commit_diff`,
+    # `commit_identity_and_message` — issue #44), so both wrappers below record their commit sha
+    # under BOTH of their old keys — the invariant this test proves (each surface read exactly
+    # once per commit in range) is unchanged by which function does the reading.
     called: dict[str, list[str]] = {"added": [], "paths": [], "identity": [], "message": [],
                                     "tags": []}
     originals = {name: getattr(guard, name) for name in
-                 ("added_lines", "changed_paths", "commit_identity", "commit_message",
-                  "refs_being_published")}
+                 ("commit_diff", "commit_identity_and_message", "refs_being_published")}
+
+    def wrap_commit_diff():
+        real = originals["commit_diff"]
+
+        def spy(root, sha, parent):
+            called["added"].append(sha)
+            called["paths"].append(sha)
+            return real(root, sha, parent)
+        return spy
+
+    def wrap_commit_identity_and_message():
+        real = originals["commit_identity_and_message"]
+
+        def spy(root, sha):
+            called["identity"].append(sha)
+            called["message"].append(sha)
+            return real(root, sha)
+        return spy
 
     def wrap(name: str, key: str, index: int):
         real = originals[name]
@@ -1299,10 +1320,8 @@ def test_the_range_scan_reads_ALL_FIVE_surfaces_of_every_commit(tmp_path: Path) 
             return real(*args, **kw)
         return spy
 
-    guard.added_lines = wrap("added_lines", "added", 1)
-    guard.changed_paths = wrap("changed_paths", "paths", 2)
-    guard.commit_identity = wrap("commit_identity", "identity", 1)
-    guard.commit_message = wrap("commit_message", "message", 1)
+    guard.commit_diff = wrap_commit_diff()
+    guard.commit_identity_and_message = wrap_commit_identity_and_message()
     guard.refs_being_published = wrap("refs_being_published", "tags", 1)
     try:
         result = guard.scan_range(repo, f"{first}..{second}", COMPILED)
@@ -1592,3 +1611,207 @@ def test_a_bulk_delete_of_MANY_staged_but_absent_files_no_longer_costs_ONE_SUBPR
     assert elapsed < 5.0, (
         f"{n} staged-but-absent files took {elapsed:.1f}s - back to one subprocess per file "
         f"(issue #34 regressed)")
+
+
+# ===== #44 (remaining scope: identity+message and diff+paths, per-commit, in the RANGE scan) =====
+
+
+def test_split_raw_and_patch_matches_a_hand_built_example() -> None:
+    """Pure-function check, no git needed: 0, 1 and 3 changed files, with a deletion mixed in."""
+    assert guard._split_raw_and_patch("") == ([], "")
+
+    one = ":100644 100644 aaaaaaa bbbbbbb M\0only.txt\0\0diff --git a/only.txt b/only.txt\n+x\n"
+    paths, patch = guard._split_raw_and_patch(one)
+    assert paths == ["only.txt"], paths
+    assert patch == "diff --git a/only.txt b/only.txt\n+x\n", patch
+
+    three = (":100644 100644 aaaaaaa bbbbbbb M\0a.txt\0"
+             ":000000 100644 0000000 ccccccc A\0c.txt\0"
+             ":100644 100644 ddddddd eeeeeee M\0d.txt\0"
+             "\0diff --git a/a.txt b/a.txt\n+1\ndiff --git a/c.txt b/c.txt\n+2\n")
+    paths, patch = guard._split_raw_and_patch(three)
+    assert paths == ["a.txt", "c.txt", "d.txt"], paths
+    assert patch.startswith("diff --git a/a.txt"), patch
+
+
+def test_split_raw_and_patch_SURVIVES_a_raw_NUL_byte_INSIDE_the_patch_text() -> None:
+    """⭐ THE ADVERSARIAL CASE THIS WHOLE PARSER EXISTS FOR — measured, not theorised.
+
+    The first version of `_split_raw_and_patch` did `text.split("\\0")` over the WHOLE combined
+    string and counted pieces. It shipped, and the very next full-suite run turned three EXISTING
+    tests red: a BOM-less UTF-16LE payload past git's 8000-byte binary window gets an ordinary
+    TEXT diff (#242), so the patch half of `--raw -z -p` can carry a raw NUL of its own — exactly
+    the content `parse_diff` exists to still scan. A whole-string split cannot tell "the NUL that
+    separates two raw records" from "the NUL that is the fourth commit's own added content" and
+    silently misreads which piece is which — the identical failure SHAPE the module docstring
+    already records for the `cat-file --batch` reader, one call site over.
+
+    This is the regression pin for that exact defect: a raw NUL sits INSIDE the patch, and the
+    walk-forward parser must still find the true paths and hand back the WHOLE patch (NUL
+    included) rather than truncating at the embedded NUL or miscounting the raw section.
+    """
+    text = (":100644 100644 aaaaaaa bbbbbbb M\0nul.txt\0"
+            "\0diff --git a/nul.txt b/nul.txt\n@@ -0,0 +1 @@\n+A\x00G\x00E\x00\n")
+    paths, patch = guard._split_raw_and_patch(text)
+    assert paths == ["nul.txt"], f"the embedded NUL desynchronised the raw section: {paths}"
+    assert patch == "diff --git a/nul.txt b/nul.txt\n@@ -0,0 +1 @@\n+A\x00G\x00E\x00\n", (
+        f"the patch was truncated or corrupted at the embedded NUL: {patch!r}")
+
+    # ⭐ THE MUTATION THAT PROVES IT: the naive whole-string-split version, reintroduced here as a
+    # local function rather than by patching the module (so this test cannot be satisfied by a
+    # coincidence in the real implementation) — CAUGHT means it disagrees with the correct answer
+    # above on this exact input.
+    def naive(s: str) -> tuple[list[str], str]:
+        if not s:
+            return [], ""
+        parts = s.split("\0")
+        n = (len(parts) - 2) // 2
+        return [parts[2 * i + 1] for i in range(n)], parts[-1]
+
+    naive_paths, naive_patch = naive(text)
+    assert (naive_paths, naive_patch) != (paths, patch), (
+        "the naive whole-split parser must MISREAD this input, or this test is not exercising "
+        "the defect it claims to catch")
+
+
+def test_commit_diff_matches_the_two_readers_it_replaces(tmp_path: Path) -> None:
+    """`commit_diff` must agree with `added_lines` + `changed_paths` on ordinary AND adversarial
+    commits, not just the happy path — a batched reader that only matches on easy input is exactly
+    the shape this module has shipped bypasses through before."""
+    repo = tmp_path / "commit_diff_parity"
+    base = _seeded(repo)
+    _write(repo, "keep.txt", "one\n")
+    _write(repo, "gone.txt", "one\n")
+    _commit(repo, "add two")
+    _write(repo, "keep.txt", "two\n")
+    (repo / "gone.txt").unlink()
+    _write(repo, "u16.txt", "")
+    (repo / "u16.txt").write_bytes(b"# header\n" * 1200 + "leak-a-lan".encode("utf-16-le"))
+    sha = _commit(repo, "modify, delete, and add a bomless-utf16 file")
+
+    parent = guard.first_parent(repo, sha)
+    got_paths, got_parsed = guard.commit_diff(repo, sha, parent)
+    want_paths = guard.changed_paths(repo, parent, sha)
+    want_parsed = guard.added_lines(repo, sha, parent)
+
+    assert sorted(got_paths) == sorted(want_paths), (got_paths, want_paths)
+    assert "gone.txt" not in got_paths, "a deletion must not be reported as a changed path"
+    assert sorted(got_parsed.added) == sorted(want_parsed.added), (
+        got_parsed.added, want_parsed.added)
+    assert sorted(got_parsed.unscannable) == sorted(want_parsed.unscannable), (
+        got_parsed.unscannable, want_parsed.unscannable)
+
+
+def test_commit_diff_preserves_the_C_QUOTED_path_property_issue_37(tmp_path: Path) -> None:
+    """#37 must not regress: `commit_diff`'s PATH list is what `scan_range` now scans for a
+    filename leak, so it must resolve a quote-bearing path byte-exactly, the same guarantee
+    `changed_paths`'s own `-z` docstring makes — built with plumbing, since no worktree on any
+    platform can hold this name."""
+    repo = tmp_path / "commit_diff_quoted"
+    base = _seeded(repo)
+    blob = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=repo,
+                          input=b"hello world\n", capture_output=True, check=True,
+                          timeout=120).stdout.decode().strip()
+    tree = subprocess.run(["git", "mktree", "-z"], cwd=repo,
+                          input=f'100644 blob {blob}\tquo"te.txt\0'.encode(),
+                          capture_output=True, check=True, timeout=120).stdout.decode().strip()
+    sha = _git(repo, "commit-tree", tree, "-p", base, "-m", "quoted path").strip()
+
+    paths, _parsed = guard.commit_diff(repo, sha, base)
+    assert paths == ['quo"te.txt'], (
+        f"the quoted path was not resolved byte-exactly through the combined --raw -z read: {paths}")
+
+
+def test_commit_identity_and_message_matches_the_two_calls_it_replaces(
+        tmp_path: Path) -> None:
+    repo = tmp_path / "ident_msg_parity"
+    _seeded(repo)
+    _write(repo, "second.txt", "content\n")
+    sha = _commit_with_message(repo, tmp_path, "subject line\n\nbody line one\nbody line two\n")
+
+    ident, message = guard.commit_identity_and_message(repo, sha)
+    assert ident == guard.commit_identity(repo, sha), (ident, guard.commit_identity(repo, sha))
+    assert message == guard.commit_message(repo, sha), (message, guard.commit_message(repo, sha))
+    assert "body line two" in message, message
+
+
+def test_commit_identity_and_message_fails_closed_on_a_short_response(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same posture `commit_identity` already has, extended to 5 fields — a corrupted/short
+    response must be refused, not silently misattributed to the wrong field."""
+    monkeypatch.setattr(guard, "_git", lambda *a, **k: "only\0four\0fields\0here")
+    with pytest.raises(ValueError, match="expected 4 identity fields"):
+        guard.commit_identity_and_message(Path("."), "abc1234567")
+
+
+def test_commit_identity_and_message_MUTATION_maxsplit_would_have_HIDDEN_the_short_response(
+) -> None:
+    """⭐ THE MUTATION FOR THE TEST ABOVE. `split("\\0", maxsplit=4)` looks like an equally valid
+    way to pull `%B` out as the 5th field — it even matches on every real git response, since a
+    real commit's identity fields never contain their own NUL. The reason it is wrong: it silently
+    ABSORBS a short/corrupted response into a misaligned final field instead of raising, because
+    `maxsplit` never lets the piece COUNT disagree with what was asked for. Reimplemented here
+    (never by patching the module) so this test cannot pass by coincidence — CAUGHT means the
+    mutation does NOT raise on input the real, shipped function correctly refuses.
+    """
+    corrupted = "only\0four\0fields\0here"
+
+    def maxsplit_version(raw: str) -> tuple[list, str]:
+        parts = raw.split("\0", 4)
+        ident = [(f, v) for f, v in zip(guard._IDENT_FIELDS, parts) if v]
+        return ident, parts[-1] if len(parts) > 4 else ""
+
+    maxsplit_version(corrupted)   # does not raise — the mutation's whole defect
+
+    with pytest.raises(ValueError, match="expected 4 identity fields"):
+        real_git, guard._git = guard._git, (lambda *a, **k: corrupted)
+        try:
+            guard.commit_identity_and_message(Path("."), "abc1234567")
+        finally:
+            guard._git = real_git
+
+
+def test_scan_range_now_costs_ONE_diff_call_and_ONE_show_call_PER_COMMIT_not_two(
+        tmp_path: Path) -> None:
+    """⭐ THE MEASURED REDUCTION issue #44 (remaining scope) exists to ship — pinned as a real
+    regression test, not just a printed number in a PR description.
+
+    Before this package: 2 `diff`-family calls (the unified diff + the separate `--name-only -z`
+    path list) and 2 `show`-family calls (identity, then message) per commit. After: 1 of each.
+    Spied on the real `scan_range` over a synthetic multi-commit repo, same shape as issue #44's
+    own `subprocess.run` instrumentation.
+    """
+    repo = tmp_path / "subprocess_count"
+    base = _seeded(repo)
+    shas = []
+    for i in range(4):
+        _write(repo, f"f{i}.txt", f"content {i}\n")
+        shas.append(_commit(repo, f"commit {i}"))
+
+    seen: list[list[str]] = []
+    real_run = subprocess.run
+
+    def spy(cmd, *a, **kw):
+        if isinstance(cmd, list) and cmd and cmd[0] == "git":
+            seen.append(list(cmd))
+        return real_run(cmd, *a, **kw)
+
+    guard.subprocess.run = spy
+    try:
+        result = guard.scan_range(repo, f"{base}..{shas[-1]}", COMPILED)
+    finally:
+        guard.subprocess.run = real_run
+
+    assert result.commits == 4, result
+    diff_calls = [c for c in seen if "diff-tree" in c]
+    ident_msg_calls = [c for c in seen if "show" in c]
+    assert len(diff_calls) == 4, (
+        f"expected exactly 1 diff-tree call per commit (4 commits), got {len(diff_calls)}: "
+        f"{diff_calls}")
+    assert len(ident_msg_calls) == 4, (
+        f"expected exactly 1 identity+message call per commit (4 commits), got "
+        f"{len(ident_msg_calls)}: {ident_msg_calls}")
+    for cmd in diff_calls:
+        for flag in ("--no-ext-diff", "--no-textconv", "--no-renames", "--unified=0",
+                     "--diff-filter=d"):
+            assert flag in cmd, f"{flag} missing from the batched diff-tree call: {cmd}"

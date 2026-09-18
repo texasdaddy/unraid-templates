@@ -2395,6 +2395,25 @@ def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
     # staged-but-deleted file by catching exceptions.
     submodules = gitlinks(root)
     tracked = tracked_files(root)
+    # ⭐ ISSUE #34 — PRE-FETCH EVERY STAGED-BUT-ABSENT PATH IN ONE BATCH, before the main loop
+    # below can reach it one file at a time. This mirrors the main loop's own self/submodule
+    # exclusions exactly (a real gitlink must never be a member of `absent`, since `staged_blobs`
+    # relies on that to stay safe from the desync a whole-tree batch hit before — see its
+    # docstring) and uses the same existence test the main loop's `try/except FileNotFoundError`
+    # would otherwise discover one subprocess launch at a time: `path.is_symlink() or
+    # path.exists()` is exactly the condition under which `path.read_bytes()` would NOT raise
+    # FileNotFoundError below (a symlink is read via `os.readlink`, never `read_bytes`, so it is
+    # excluded here even a dangling one).
+    absent: list[str] = []
+    for _path in tracked:
+        _rel = _path.relative_to(root).as_posix()
+        if _is_self(_rel, root):
+            continue
+        if _rel in submodules and not _path.is_file():
+            continue
+        if not _path.is_symlink() and not _path.exists():
+            absent.append(_rel)
+    prefetched_blobs = staged_blobs(root, absent)
     for path in tracked:
         rel = path.relative_to(root).as_posix()
         # ⭐ THE PATH IS SCANNED FIRST, AND FOR EVERY TRACKED FILE — before any skip, any
@@ -2470,13 +2489,16 @@ def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
             # staged leak precisely (file and line) AND stops an unstaged `rm` of a clean file
             # from reddening the commit. See `staged_text`.
             #
-            # ⚠️ ONE SUBPROCESS PER ABSENT FILE, ~74 ms each (issue #34). Irrelevant for the
-            # handful of files normally in this state, and ~77 s if a 1000-file tracked directory
-            # is deleted without staging the deletion. Left per-file DELIBERATELY: the batched
-            # form is what shipped an exit-0 bypass in this same package (a non-blob response
-            # carries a body, and not consuming it desynchronised the stream — see #33), and
-            # adding a third batch reader to fix a SLOWDOWN rather than a correctness defect was
-            # the wrong trade at the end of that package. #34 carries the design.
+            # ⭐ ONE BATCHED SUBPROCESS FOR *EVERY* ABSENT FILE, NOT ONE PER FILE (issue #34,
+            # fixed). This used to call `staged_blob` here directly — a fresh `git.exe` launch per
+            # absent path, ~74 ms each, ~77 s for a 1000-file tracked directory deleted without
+            # staging the deletion. `prefetched_blobs`, built once above via `staged_blobs`, is the
+            # answer to that same question asked for every absent path in one process instead —
+            # see its docstring for why this does NOT reopen the batched-`cat-file` desync that a
+            # whole-tree attempt hit during #33's own package (a gitlink answering `commit` instead
+            # of `blob`): `absent` above is built with the identical self/submodule exclusion this
+            # loop already applies, so nothing reaching this branch was ever a candidate for that
+            # failure mode.
             #
             # ⛔⛔ BYTES, NOT TEXT, AND THE SAME BYTES-DECIDE RULE AS THE WORKTREE READ. This
             # branch used to decode here and report anything that would not decode — and once the
@@ -2488,7 +2510,7 @@ def _scan_tree(root: Path, compiled: list[tuple[str, re.Pattern[str]]]) -> int:
             # asset" for both sources, which is what `_skipped`'s two-scans-must-agree note has
             # always been about.
             absent_from_worktree = True
-            raw = staged_blob(root, rel)
+            raw = prefetched_blobs.get(rel)
             if raw is None:
                 # ⚠️ DO NOT NAME A CAUSE THIS DOES NOT KNOW. The remaining reason `git cat-file`
                 # refuses `:<path>` is that there is no stage-0 entry — an UNMERGED path. The
@@ -2662,6 +2684,69 @@ def staged_blob(root: Path, rel: str) -> bytes | None:
                               capture_output=True, check=True, timeout=_GIT_TIMEOUT_S).stdout
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return None
+
+
+def staged_blobs(root: Path, rels: list[str]) -> dict[str, bytes | None]:
+    """`staged_blob`, for MANY paths, in ONE subprocess (issue #34).
+
+    ⭐ ROOT CAUSE: not a redundant stat or re-read, but the process-launch cost itself — `_scan_tree`
+    called `staged_blob` once per staged-but-absent file, and each call is a fresh `git.exe`
+    invocation (~74 ms on this workstation, mostly Windows process creation, not the read). A
+    1000-file tracked directory deleted without staging the deletion took ~77 s for that reason
+    alone. This asks for every path in ONE `git cat-file --batch` conversation instead: one process,
+    N request/response round-trips over its own stdin/stdout pipe.
+
+    ⛔⛔ SAFE FROM THE DESYNC THAT KILLED THE EARLIER BATCH ATTEMPT — NAMED, NOT RE-DISCOVERED.
+    `staged_diff`'s docstring records why a whole-tree `cat-file --batch` was tried and removed:
+    `:<path>` on a GITLINK answers with a COMMIT object, not a blob, and a parser that does not
+    expect that shape misreads its header and desynchronises every request after it — silently
+    misattributing one file's content to another and exiting 0 on a staged leak it never actually
+    read. That risk lives in the CALLER, not in this function: `_scan_tree` builds `rels` from
+    exactly the same `submodules` exclusion its main loop already applies before a path can reach
+    the FileNotFoundError branch this feeds, so a gitlink can never be a member of `rels` here.
+    Every request this function sends therefore answers `blob` or `missing`, never `commit` or
+    `tree` — proven by `test_staged_blobs_does_not_desync_around_a_missing_entry`, which puts an
+    unmerged (missing) path in the MIDDLE of a batch and asserts the paths after it still read
+    correctly. This is deliberately not exposed as a general-purpose batch reader for that reason:
+    a caller that fed it an unfiltered tracked list would reopen the exact bug this one avoids.
+
+    Fails CLOSED, not open: if `git` itself cannot be run at all, or the batch stream ends up
+    shorter than the headers it announced, every requested path comes back None (report unreadable)
+    rather than a wrong or partial answer being handed to a caller who would otherwise trust it.
+    """
+    if not rels:
+        return {}
+    try:
+        out = subprocess.run(["git", "cat-file", "--batch"], cwd=root,
+                             input="".join(f":{r}\n" for r in rels).encode("utf-8"),
+                             capture_output=True, check=True, timeout=_GIT_TIMEOUT_S).stdout
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return dict.fromkeys(rels)
+    results: dict[str, bytes | None] = {}
+    try:
+        pos = 0
+        for rel in rels:
+            nl = out.index(b"\n", pos)
+            header = out[pos:nl].decode("utf-8", errors="replace")
+            pos = nl + 1
+            if header.endswith(" missing"):
+                results[rel] = None
+                continue
+            # Found: "<sha> <type> <size>". The sha/type are never used - the caller already knows
+            # `rel` is not a gitlink, so `<type>` is always `blob` here - but the header is parsed
+            # from the right (size, then type) rather than assumed to be exactly three tokens,
+            # since nothing about this protocol promises the sha column never contains a space.
+            _, _, size_s = header.rpartition(" ")
+            size = int(size_s)
+            results[rel] = out[pos:pos + size]
+            pos += size + 1  # the protocol appends one trailing LF after the content
+    except (ValueError, IndexError):
+        # The stream ended before every announced path was consumed, or a size field was not a
+        # number - either way this function cannot vouch for ANY of it: a partially-parsed batch
+        # could easily have misaligned midway, which is exactly the silent-misattribution failure
+        # mode this function exists to avoid reopening. Fail closed for the whole request.
+        return dict.fromkeys(rels)
+    return results
 
 
 def staged_diff(root: Path) -> tuple[ParsedDiff, list[str]]:

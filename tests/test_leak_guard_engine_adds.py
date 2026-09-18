@@ -1479,3 +1479,116 @@ def test_working_tree_encoding_fallback_refuses_when_the_blob_does_not_DECODE(
     out = capsys.readouterr().out
     assert rc == 1, f"a blob that fails to decode was treated as a successful fallback:\n{out}"
     assert "cfg.txt" in out and "NUL byte" in out, out
+
+
+# ===========================================================================================
+# #34 — one subprocess for EVERY staged-but-absent file, not one PER file
+# ===========================================================================================
+
+
+def test_staged_blobs_matches_staged_blob_for_EVERY_absent_file(tmp_path: Path) -> None:
+    """⭐ #34, the batched form asked against the same question `staged_blob` already answers.
+
+    Three ordinary tracked files, all deleted from the worktree without staging the deletion (the
+    everyday "I ran `rm` mid-edit" shape `staged_blob` exists for). `staged_blobs` must answer the
+    same bytes for each, from ONE `git cat-file --batch` conversation rather than three separate
+    `git cat-file` launches.
+    """
+    repo = tmp_path / "batch_matches_single"
+    _seeded(repo)
+    rels = ["a.txt", "b.txt", "c.txt"]
+    for i, rel in enumerate(rels):
+        _write(repo, rel, f"content {i}\n")
+    _commit(repo, "three files")
+    for rel in rels:
+        (repo / rel).unlink()
+
+    individually = {rel: guard.staged_blob(repo, rel) for rel in rels}
+    batched = guard.staged_blobs(repo, rels)
+    assert batched == individually, (
+        f"the batched read disagreed with the per-file read: {batched!r} != {individually!r}")
+    assert all(v is not None for v in batched.values()), "vacuity guard: all three must resolve"
+
+
+def test_staged_blobs_does_not_DESYNC_around_a_MISSING_entry(tmp_path: Path) -> None:
+    """⭐⭐ THE REGRESSION TEST FOR THE FAILURE MODE THIS FUNCTION EXISTS TO AVOID REOPENING.
+
+    The earlier whole-tree `cat-file --batch` attempt (recorded in `staged_diff`'s docstring) was
+    removed because a NON-BLOB answer in the middle of a batch stream — there, a gitlink reporting
+    `commit` instead of `blob` — has a different header shape, and a parser that mishandles it
+    misreads every request that comes after. `staged_blobs` cannot see a gitlink (its caller
+    filters those out before this is ever called), but it CAN see a genuinely UNMERGED path — no
+    stage-0 entry, so `:<path>` answers `missing` rather than a header-plus-body — and that shape
+    is exercised here in the MIDDLE of a three-path batch, with an ordinary resolvable path on
+    either side. If the parser mis-consumed the `missing` line's (absent) body, `c.txt`'s read
+    would come back shifted or empty instead of its real content.
+    """
+    repo = tmp_path / "batch_missing_middle"
+    _seeded(repo)
+    for rel, text in (("a.txt", "before\n"), ("b.txt", "conflicted\n"), ("c.txt", "after\n")):
+        _write(repo, rel, text)
+    _commit(repo, "base three")
+    _git(repo, "checkout", "-q", "-b", "other")
+    _write(repo, "b.txt", "theirs\n")
+    _commit(repo, "theirs")
+    _git(repo, "checkout", "-q", "main")
+    _write(repo, "b.txt", "ours\n")
+    _commit(repo, "ours")
+    subprocess.run(["git", *_PINNED, "merge", "other"], cwd=repo, capture_output=True,
+                   timeout=120)
+    (repo / "a.txt").unlink()
+    (repo / "b.txt").unlink()   # conflicted AND absent - no stage-0 entry
+    (repo / "c.txt").unlink()
+
+    assert guard.staged_blob(repo, "b.txt") is None, "vacuity guard: b.txt must be unmerged"
+
+    batched = guard.staged_blobs(repo, ["a.txt", "b.txt", "c.txt"])
+    assert batched["a.txt"] == b"before\n", (
+        f"the entry BEFORE the missing one was misread: {batched['a.txt']!r}")
+    assert batched["b.txt"] is None, f"the unmerged path must resolve to None: {batched['b.txt']!r}"
+    assert batched["c.txt"] == b"after\n", (
+        f"desync: the entry AFTER the missing one was misread (would be the historic gitlink "
+        f"failure mode reopened) - got {batched['c.txt']!r}")
+
+
+def test_staged_blobs_of_an_empty_list_makes_no_subprocess_call(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The common case — nothing staged-but-absent — must not spend a `git.exe` launch to learn
+    that. `_scan_tree` calls this unconditionally, so an ordinary commit with zero absent files
+    would otherwise pay one empty round-trip on every run."""
+    def _boom(*_a: object, **_k: object) -> None:
+        raise AssertionError("subprocess.run must not be called for an empty request")
+    monkeypatch.setattr(subprocess, "run", _boom)
+    assert guard.staged_blobs(tmp_path, []) == {}
+
+
+def test_a_bulk_delete_of_MANY_staged_but_absent_files_no_longer_costs_ONE_SUBPROCESS_EACH(
+        tmp_path: Path) -> None:
+    """⭐ #34, the measured repro AND its fix, end to end through the real CLI.
+
+    Before this fix: `_scan_tree` called `staged_blob` — one fresh `git cat-file` process — for
+    every one of these files, individually. Measured at `main` before this package (200 files,
+    this workstation): ~9.1 s. The bound below is deliberately generous (an absolute wall-clock
+    ceiling, not a ratio against the old number, which would be a config-dependent assertion the
+    next slower CI runner fails on) — it exists to catch a REGRESSION back to per-file subprocess
+    cost, not to pin today's exact number.
+    """
+    import time
+
+    repo = tmp_path / "bulk_delete"
+    _seeded(repo)
+    n = 150
+    for i in range(n):
+        _write(repo, f"f_{i}.txt", f"clean content {i}\n")
+    _commit(repo, f"seed {n} files")
+    for i in range(n):
+        (repo / f"f_{i}.txt").unlink()
+
+    start = time.perf_counter()
+    res = _cli(repo)
+    elapsed = time.perf_counter() - start
+    assert res.returncode == 0, f"a clean bulk delete reddened the tree:\n{_out(res)}"
+    assert f"{n + 1} tracked text files scanned" in _out(res), _out(res)
+    assert elapsed < 5.0, (
+        f"{n} staged-but-absent files took {elapsed:.1f}s - back to one subprocess per file "
+        f"(issue #34 regressed)")

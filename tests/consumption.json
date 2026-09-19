@@ -10,8 +10,7 @@
       "MICROSOFT_CLIENT_ID": "config.py:188; auth.py:163,630,634,644,652",
       "MICROSOFT_CLIENT_SECRET": "config.py:189; auth.py:634,652",
       "DB_PATH": "config.py:99; db.py:22,270,350,371,382,400 (sqlite3.connect); scheduler.py:363,1957",
-      "FLASK_ENV": "config.py:95-96 sets DEBUG flag; main.py:57 branches logging behavior on it",
-      "SHARED_ROOT": "alerting_config.py:_config_path() (CEF-N3) -> kw_common.alerting_env.config_file_for(); locates the fleet-shared configs/alerting.env this app reads its SMTP infra creds from. OPTIONAL and unset-safe: alerting_config.smtp_settings() returns None when blank, and mailer._send() degrades to its existing 'SMTP not configured' skip"
+      "FLASK_ENV": "config.py:95-96 sets DEBUG flag; main.py:57 branches logging behavior on it"
     }
   },
   "keystone": {
@@ -77,6 +76,7 @@
       "TAPE_CLIENT_ID": "app/config.py:113,215-216 -> X-Client-Id header",
       "TAPE_CLIENT_SECRET": "app/config.py:114,217 -> X-Client-Secret header",
       "TAPE_API_KEY": "app/config.py:115,218-219 -> legacy X-API-Key header",
+      "DESK_API_TOKEN": "app/config.py:165 api_token field; app/main.py:184,199 — the one gate for both GET /api/v1/data and POST /mcp; unset, both routes refuse every request (Increment 4, PR#30/#31, v0.7.0)",
       "DEPLOY_ENV": "app/bootlog.py:52 (ALERTING_VARS); read by vendored kw_common.alerting_env to pick the ntfy topic and gate boot (SHARED_ROOT/CONFIG_PATH are baked Dockerfile ENV values as of the-desk PR#27, no longer template Variables — same pattern as reauth-bot's DEPLOY_ENV citation above)",
       "TZ": "app/config.py:128 comment + app/rules.py:271 — governs cron's local-timezone behavior at the libc/tzlocal level, not a direct os.environ read in app code",
       "DESK_NOTIFY_CRON": "app/config.py:137; app/scheduler.py:139,155 CronTrigger.from_crontab",

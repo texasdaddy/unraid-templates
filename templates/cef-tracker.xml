@@ -55,6 +55,4 @@
     github.com/texasdaddy/kw-common/blob/main/docs/alerting-setup.md
   -->
   <Config Name="Shared alerting root" Target="/kw_shared" Default="" Mode="ro" Description="OPTIONAL. The host directory holding configs/alerting.env - the ONE file every Keystone container reads its SMTP settings from. Mounted READ-ONLY: this container never writes to it. Leave blank to run with outbound email disabled (job-error alert emails and invitation emails will not send; the app itself is unaffected). Full instructions: github.com/texasdaddy/kw-common/blob/main/docs/alerting-setup.md" Type="Path" Display="always" Required="false" Mask="false"/>
-
-  <Config Name="SHARED_ROOT" Target="SHARED_ROOT" Default="/kw_shared" Mode="" Description="The CONTAINER path the shared alerting root above is mounted at. Leave it alone if you set the Shared alerting root mapping above - it must match that mapping's container-side target. Leave BOTH blank to disable outbound email." Type="Variable" Display="advanced" Required="false" Mask="false">/kw_shared</Config>
 </Container>

@@ -21,6 +21,7 @@ https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/icons/<name>.
 | reauth-bot | `icons/reauth_bot.png` | `templates/reauth-bot.xml` |
 | keystone | `icons/keystone.png` | `templates/keystone.xml` |
 | keystone-db | `icons/keystone_db.png` | `templates/keystone-db.xml` |
+| keystone-web (dev+prod) | `icons/keystone-web.png` | `templates/keystone-web.xml` |
 | github-runner (one instance per repo) | `icons/github-runner.png` | `templates/github-runner.xml` |
 | the-desk (prod) | `icons/the-desk.png` | `templates/the-desk.xml` |
 | iron-tide | `icons/iron-tide.png` | `templates/iron-tide.xml` |

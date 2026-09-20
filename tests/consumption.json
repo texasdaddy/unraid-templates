@@ -111,5 +111,12 @@
   "tldw-server": {
     "no_local_consumer": true,
     "note": "third-party tldw_server image; no consuming repo under C:\\dev"
+  },
+  "keystone-web": {
+    "no_local_consumer": false,
+    "vars": {
+      "KEYSTONE_API_URL": "lib/keystone.ts baseUrl(): every Route Handler upstream fetch; throws if unset; app/api/health/route.ts reachability probe",
+      "SESSION_COOKIE_MAX_AGE": "lib/session-cookie.ts maxAge(): Max-Age of the httpOnly refresh cookie (default 43200)"
+    }
   }
 }

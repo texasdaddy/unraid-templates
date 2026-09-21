@@ -131,10 +131,9 @@ ROLLING_TAG_EXCEPTIONS = frozenset(
     {("tldw-redis", "redis:7-alpine"), ("tape-db", "timescale/timescaledb:latest-pg16")}
 )
 
-# The one privileged container, and why: github-runner runs a Docker daemon INSIDE itself
-# (Docker-in-Docker), which needs Privileged and is the whole design — the README and the
-# template's own field descriptions carry the trust model. Nothing else here may be.
-PRIVILEGED_BY_DESIGN = frozenset({"github-runner"})
+# No template in this repo currently needs Privileged by design. When one does, name it here
+# and carry the trust model in the README and the template's own field descriptions.
+PRIVILEGED_BY_DESIGN = frozenset()
 
 # PostArgs is appended after the image name: it is the container's COMMAND LINE, and a shell
 # command there can export anything over the values asserted in this file. tldw-redis is
@@ -393,7 +392,7 @@ def test_the_credential_shape_rule_actually_matches_the_fleets_secret_fields():
         for cfg in configs(template(name)):
             if secret_bearing(cfg) and is_credential_name(var_name(cfg)):
                 seen.add(var_name(cfg))
-    for spelling in ("DB_PASSWORD", "POSTGRES_PASSWORD", "TAPE_CLIENT_SECRET", "ACCESS_TOKEN",
+    for spelling in ("DB_PASSWORD", "POSTGRES_PASSWORD", "TAPE_CLIENT_SECRET",
                      "SCHWAB_PASS", "TOKEN_ENCRYPTION_KEY", "TAPE_API_KEY", "MCP_API_KEY_SALT"):
         assert spelling in seen, f"the credential-shape rule no longer matches {spelling}"
 

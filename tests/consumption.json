@@ -100,10 +100,6 @@
     "no_local_consumer": true,
     "note": "stock timescaledb image; POSTGRES_* vars are consumed by the upstream postgres entrypoint, not a repo under C:\\dev"
   },
-  "github-runner": {
-    "no_local_consumer": true,
-    "note": "third-party actions-runner image; no consuming repo under C:\\dev"
-  },
   "tldw-redis": {
     "no_local_consumer": true,
     "note": "third-party redis image; no consuming repo under C:\\dev"

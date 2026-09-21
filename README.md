@@ -1,8 +1,7 @@
 # unraid-templates
 
 Public Unraid Docker templates + icons for the self-hosted stack
-(**Tape**, **CEF Tracker**, **Keystone**, **reauth-bot**, and a **github-runner** template
-used by all of them). Public so Unraid can fetch icons
+(**Tape**, **CEF Tracker**, **Keystone**, **reauth-bot**). Public so Unraid can fetch icons
 anonymously via `raw.githubusercontent.com`; the application source stays in its own
 private repos.
 
@@ -22,7 +21,6 @@ https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/icons/<name>.
 | keystone | `icons/keystone.png` | `templates/keystone.xml` |
 | keystone-db | `icons/keystone_db.png` | `templates/keystone-db.xml` |
 | keystone-web (dev+prod) | `icons/keystone-web.png` | `templates/keystone-web.xml` |
-| github-runner (one instance per repo) | `icons/github-runner.png` | `templates/github-runner.xml` |
 | the-desk (prod) | `icons/the-desk.png` | `templates/the-desk.xml` |
 | iron-tide | `icons/iron-tide.png` | `templates/iron-tide.xml` |
 | tldw-redis (start 1st) | `icons/tldw-redis.png` | `templates/tldw-redis.xml` |
@@ -35,66 +33,6 @@ Every template + icon in this repo must have a row here — keep this table in s
 by design — fill them in Unraid on import.
 
 **`sync-templates.py` is the only thing that carries a template change toward a container that already exists — and it carries it as far as that container's *saved template*, not into the container itself.** Stock Unraid never merges a template change into an existing container, and that is deliberate rather than a bug: in `emhttp/plugins/dynamix.docker.manager/include/DockerClient.php`, `updateUserTemplate()` opens with `// Don't update templates, but leave code in place for future reference` and returns — on every release from 6.12 to current. Its sibling `downloadTemplates()` became a no-op only in **7.3.0**; on 6.12.x—7.2.x it is live, so registering this repo in `/boot/config/plugins/dockerMan/template-repos` there really does mirror it into `templates-usb` and refresh the *Default templates* list — but that path only populates the Add Container list (and deletes templates it no longer finds); it never touches an existing `my-*.xml`. Templates from this repo appear under **Docker → Add Container** in the *User templates* group because `sync-templates.py` seeds a `my-<name>.xml` for each; `<TemplateURL>` earns its keep by letting that script map an instance back to its template. **So: edit a template here, run `sync-templates.py`, then open the container's Edit page and press Apply.** The script rewrites `my-<name>.xml`; the container is rebuilt from that file by Apply, and equally by any container **Update** or *force update* — but never on its own. "Check for update" compares the image only.
-
-### `github-runner.xml`
-
-The one template here that is not a service: a self-hosted GitHub Actions runner, **one
-instance per repository**. Nothing in it names a repository or a host — `ACCESS_TOKEN`,
-`REPO_URL`, `RUNNER_NAME` and `LABELS` are set per instance. Use it on a **private**
-repository, where its minutes do not count against the account's Actions allowance; that is
-the usual reason to run one, since GitHub's *standard* hosted runners are already free for
-public repos.
-
-It runs **its own Docker daemon inside itself** (Docker-in-Docker): `Privileged` on,
-`START_DOCKER_SERVICE=true`, `Network` on Bridge, and *no* host socket mounted. That is the
-whole design, and it replaced an earlier host-socket + host-networking version.
-
-Everything an operator has to act on is in the template's own `<Config Description>`
-fields, which is deliberate: Unraid never renders XML comments, and `sync-templates.py`
-reconciles `<Config>` elements only — so for a container that already exists, edits to
-`<Overview>` never arrive, and a field description is the one place *prose* reaches both new
-and existing instances — via `sync-templates.py` followed by an Apply, which is the only route
-there is (see above). What follows is orientation, not the reference.
-
-- **Why Docker-in-Docker.** Under the socket model the runner asked the *host's* daemon for
-  a workflow's `services:` container, so the published port landed in the **host's** network
-  namespace while the job's steps ran in the runner's own — `localhost:5432` found nothing.
-  Measured on a real cutover, where the daemon had genuinely published the port
-  (`-p 5432:5432`, read out of the command the runner issued) and the steps still could not
-  reach it, so the usual "the port was never published" explanation did not apply. Host
-  networking fixes that for *one* runner and still occupies a host port, so any second
-  runner running the same workflow collides. An in-container daemon makes the service a
-  sibling on a private daemon: `localhost` resolves, nothing is published on the host, and
-  N runners never collide.
-- **Three settings have no `<Config>` field of their own**, so their instructions ride inside
-  other fields' descriptions: **Network** (must be `Bridge`) and **Privileged** (must be on)
-  in `START_DOCKER_SERVICE`, and the container **Name** in `RUNNER_NAME`. For a container
-  that already exists, *none* of the three is updated by `sync-templates.py` or by Unraid's
-  template merge — set them by hand. This is the step most easily missed when converting an
-  existing host-socket runner, and getting it wrong is silent.
-- **`Privileged` and `START_DOCKER_SERVICE` are one setting in two places.** Both are
-  required, and `START_DOCKER_SERVICE` must be the *exact string* `true` — the entrypoint
-  string-compares it and defaults it to `false`, so `True`/`yes`/`1` all mean off. Note this
-  is the opposite of `EPHEMERAL`, which any non-empty value enables, including `false`.
-  Set only one of the pair and nothing complains: the entrypoint never checks that the
-  daemon started, so the runner registers, goes Idle, accepts a job, and *then* every Docker
-  step fails against a runner the UI shows as healthy.
-- **Do not point this runner at a public repository.** A job on it is root in a privileged
-  container, and on a public repo anyone can open a fork pull request. If outside
-  contributions are in play at all, go to Settings → Actions → General and, under the fork
-  pull-request approval settings, choose **Require approval for all external contributors**. The default — *Require approval for first-time contributors* — is not enough here.
-- **`RUNNER_NAME` is printed in every job log**, so never name it for the machine. A runner's
-  full registered label set is not printed the same way, but the labels a job *requests* are
-  shown on the run in a `Requested labels` line that GitHub's side emits, and the `runs-on:` line
-  naming them is in the workflow file, world-readable on a public repo. Same conclusion for labels, by a different route.
-- **Known limit, measured:** a container the in-container daemon starts on a bridge network
-  may have no return path to the network — on the runner this was measured on, attached to a
-  *custom* Unraid network, the outbound SYN was forwarded and source-NATed out correctly and
-  no reply ever came back, so a build failed with a DNS error that was not a DNS problem.
-  Workaround: `docker build --network=host` (inside the runner that means the *runner
-  container's* namespace, not the Unraid host's — provided the runner is on Bridge).
-  `services:` containers are unaffected. The template ships the plain bridge network, which
-  is the configuration it was *not* reproduced on.
 
 ## Scripts
 
@@ -127,7 +65,7 @@ values**:
 
 - **CREATE** — seeds `my-<name>.xml` for any repo template that has no `my-` file yet, so it is ready to pick under *Add Container*.
 - **UPDATE** — for **every live instance** of a template (`my-tape.xml` *and* `my-tape-dev.xml`, `my-tape-db-dev.xml`, …): keeps that instance's applied value for each variable, refreshes the variable's metadata (description, defaults, visibility) from the repo template, and adds variables the template has gained.
-- **DELETE-as-necessary** — drops a variable the template no longer defines **only when it is genuinely unused** (blank, or still at its default). A removed variable that still holds a real, non-default value is **kept and loudly flagged** (`!! KEPT`), because that almost always means the *template* is missing it — repo drift, not an intentional removal. Treat a `!! KEPT` line as a bug in `templates/` — **except during a deliberate migration**, when it is the script telling you a mapping is still on your container. Converting a `github-runner` off the host-socket design is the case that exists today: a `!! KEPT` line naming the Docker socket or the old work directory means delete that mapping in the Unraid UI, **not** put it back in the template.
+- **DELETE-as-necessary** — drops a variable the template no longer defines **only when it is genuinely unused** (blank, or still at its default). A removed variable that still holds a real, non-default value is **kept and loudly flagged** (`!! KEPT`), because that almost always means the *template* is missing it — repo drift, not an intentional removal. Treat a `!! KEPT` line as a bug in `templates/` — **except during a deliberate migration**, when it is the script telling you a mapping is still on your container: a `!! KEPT` line naming a variable the migration intentionally dropped means delete that mapping in the Unraid UI, **not** put it back in the template.
 
 Container-level settings you set per instance — image tag, network/IP, WebUI, Extra
 Params, ports, the container Name — are **always preserved**; only `<Config>`

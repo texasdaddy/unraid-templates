@@ -296,6 +296,23 @@ def test_every_config_carries_the_full_attribute_set_with_known_values(name):
 
 
 @pytest.mark.parametrize("name", NAMES)
+def test_every_required_config_is_displayed_without_show_more(name):
+    # UT-BACKUP-AUDIT / INFRASTRUCTURE.md §2.B.11: a Required field hidden behind "Show more
+    # advanced settings" can be applied unset — Unraid does not block Apply on a hidden
+    # Required Config the way it does on a visible one left blank. A 2026-09-20 manual sweep
+    # found the fleet already clean; this is the automated guard so a future Config addition
+    # cannot silently regress it.
+    for cfg in configs(template(name)):
+        label = cfg.get("Name") or cfg.get("Target") or "<unnamed>"
+        if (cfg.get("Required") or "").strip() == "true":
+            assert (cfg.get("Display") or "").strip() == "always", (
+                f"{name}: Config {label!r} is Required=true but Display="
+                f"{cfg.get('Display')!r}, not 'always' — a required field must never be "
+                f"behind Show more advanced settings"
+            )
+
+
+@pytest.mark.parametrize("name", NAMES)
 def test_the_default_attribute_and_the_element_text_agree(name):
     # The value lives twice. A change that updates one is half a change, and which half
     # Unraid honours is not something to discover in production.
@@ -719,6 +736,22 @@ def test_mutation_docker_sock_named_only_in_description_is_now_caught():
     cfg = configs(ET.fromstring(xml))[0]
     both = f"{cfg.get('Target') or ''} {cfg.get('Default') or ''} {cfg.get('Description') or ''}".lower()
     assert "docker.sock" in both, "Description must now be part of the docker.sock check"
+
+
+def test_mutation_a_required_config_hidden_behind_advanced_is_now_caught():
+    """UT-BACKUP-AUDIT: a Required=true Config left at Display=advanced (or any non-'always'
+    value) used to pass silently — nothing checked Required and Display together."""
+    xml = """<Container><Name>x</Name>
+      <Config Name="Backups" Target="/backups" Default="" Mode="rw" Description="d" Type="Path"
+              Display="advanced" Required="true" Mask="false"></Config>
+      <Config Name="Data" Target="/data" Default="" Mode="rw" Description="d" Type="Path"
+              Display="always" Required="true" Mask="false"></Config>
+    </Container>"""
+    cfgs = configs(ET.fromstring(xml))
+    violations = [cfg.get("Name") for cfg in cfgs
+                  if (cfg.get("Required") or "").strip() == "true"
+                  and (cfg.get("Display") or "").strip() != "always"]
+    assert violations == ["Backups"], "a required-but-hidden Config must be caught"
 
 
 def test_mutation_jwt_public_key_and_authorized_keys_are_not_flagged_as_credentials():

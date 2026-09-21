@@ -34,11 +34,13 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 TEMPLATES = REPO / "templates"
 
 # The set, in the order it must be started.
-TLDW = ("tldw-redis", "tldw-server")
+TLDW = ("tldw-redis", "tldw-server", "tldw-webui")
 
 # The exact ordering sentence each Overview must carry. Asserting that both container names
 # merely APPEAR would pass an Overview that stated the order backwards, which is worse than
 # saying nothing: Unraid has no depends_on, so this prose is the only thing an operator has.
+# tldw-webui's Overview carries the 3-step form, "tldw-redis first, then tldw-server, then
+# tldw-webui", which contains this exact phrase as a substring, so one constant covers both.
 ORDER_PHRASE = "tldw-redis first, then tldw-server"
 
 # Credential variables this set requires the operator to fill in. The repo-wide rule makes
@@ -48,23 +50,28 @@ ORDER_PHRASE = "tldw-redis first, then tldw-server"
 REQUIRED_SECRETS = {
     "tldw-server": {"SINGLE_USER_API_KEY", "MCP_JWT_SECRET", "MCP_API_KEY_SALT"},
     "tldw-redis": set(),
+    "tldw-webui": set(),
 }
 
 # The image each template must actually pull. The repo-wide pin rule proves the reference
 # cannot move; it says nothing about WHICH image it names, so the repository half is pinned
-# here. tldw-server is a third-party image and its tag must be a full release number.
+# here. tldw-server is a third-party image and its tag must be a full release number;
+# tldw-webui publishes no such tag at all (confirmed live against the GHCR tags API), so its
+# shape is asserted separately below rather than folded into this same release-number regex.
 EXPECTED_IMAGE = {
     "tldw-server": "ghcr.io/rmusser01/tldw_server",
     "tldw-redis": "redis",
+    "tldw-webui": "ghcr.io/rmusser01/tldw_server-webui",
 }
 
 # The minimum each template must actually declare, so "no rule fired" cannot mean "there was
 # nothing left to look at". Gutting tldw-redis to a single placeholder Config previously
 # stayed green, because every rule that covers it is conditional and its required-secret set
-# is legitimately empty.
+# is legitimately empty. tldw-webui has no Path Config by design - it is stateless.
 MUST_DECLARE = {
     "tldw-server": {("Port", "8000"), ("Path", "/app/Databases")},
     "tldw-redis": {("Port", "6379"), ("Path", "/data")},
+    "tldw-webui": {("Port", "3000")},
 }
 
 # Upstream's two compose service names, as they appear in a URL: `redis://redis:6379/0`,
@@ -183,6 +190,12 @@ def test_the_image_is_the_expected_one(name):
         # numbers, and the header comment documents the one that was verified.
         tag = repository.rsplit(":", 1)[-1]
         assert re.fullmatch(r"\d+\.\d+\.\d+", tag), f"tldw-server: tag {tag!r} is not a release number"
+    if name == "tldw-webui":
+        # No release-numbered tag exists for this image (confirmed live against the GHCR tags
+        # API) - the repo-wide pin rule accepts a sha-* tag as a pinned shape, and this asserts
+        # it is actually that shape rather than a silently-drifted `main`/`latest`.
+        tag = repository.rsplit(":", 1)[-1]
+        assert re.fullmatch(r"sha-[0-9a-f]{7,}", tag), f"tldw-webui: tag {tag!r} is not a pinned sha-* tag"
 
 
 def test_the_compose_host_classifier_bites_on_upstreams_service_names():
@@ -272,6 +285,57 @@ def test_the_api_overview_carries_the_disclosures_the_operator_needs_up_front():
         "GPU support is unverified",
     ):
         assert phrase in overview, f"the API Overview no longer mentions {phrase!r}"
+
+
+def test_webui_offers_no_field_for_either_inert_baked_env_var():
+    # unraid-templates#55: the API origin is compiled into the published image's build
+    # output, so a Variable Config for it would be decorative - fill it in, Apply, and every
+    # API call silently proxies to a name the field never actually controls. Any
+    # NEXT_PUBLIC_* Next.js variable is build-time-inlined the same way, for an unrelated
+    # reason (Next.js's own design, not this specific baked-URL bug). Neither belongs as a
+    # field; this pins that decision so a well-meaning future edit cannot quietly reintroduce
+    # either one, believing it will work now.
+    root = template("tldw-webui")
+    offered = {var_name(c) for c in configs(root) if is_variable(c)}
+    for inert in ("TLDW_INTERNAL_API_ORIGIN", "NEXT_PUBLIC_TLDW_DEPLOYMENT_MODE"):
+        assert inert not in offered, (
+            f"tldw-webui: {inert} is offered as a Variable Config, but it is build-time-baked "
+            f"into the published image and inert at runtime - see the template's own header"
+        )
+
+
+def test_webui_documents_the_alias_requirement_with_a_working_issue_link():
+    # The single most important fact on this template: skip the manual network-alias setup
+    # and the container starts, renders, and silently talks to nothing. Both the field the
+    # operator actually sees before Apply (Overview) and the one place prose survives an
+    # existing container's template update (the HTTP Port Config's own Description - Overview
+    # edits never reach an already-created container, per this repo's own sync-templates.py
+    # behaviour) must carry it, not just the header comment a reader of the raw XML sees.
+    root = template("tldw-webui")
+    overview = root.findtext("Overview") or ""
+    # one_by_target/by_target only look at Type="Variable" Configs; the port is Type="Port",
+    # so it is found directly here rather than through that variable-only helper.
+    port_configs = [c for c in configs(root) if var_name(c) == "3000"]
+    assert len(port_configs) == 1, f"expected exactly one Config with Target='3000', got {len(port_configs)}"
+    port_description = port_configs[0].get("Description") or ""
+    for phrase in ("network-alias=app", "unraid-templates#55"):
+        assert phrase in overview, f"tldw-webui Overview no longer mentions {phrase!r}"
+    for phrase in ("network-alias=app",):
+        assert phrase in port_description, (
+            f"tldw-webui's HTTP Port Config Description no longer mentions {phrase!r} - this is "
+            f"the one place prose reaches an ALREADY-CREATED container on a template update, "
+            f"per this repo's own sync-templates.py behaviour, so it cannot rely on the "
+            f"Overview alone"
+        )
+
+
+def test_webui_ships_no_path_config_because_it_is_stateless():
+    # Nothing in the published image's config or any layer references a persistent path
+    # (checked directly against the image, not assumed) - a Path Config appearing later
+    # would be a real behaviour change worth a second look, not a silent addition.
+    root = template("tldw-webui")
+    kinds = {(c.get("Type") or "").strip() for c in configs(root)}
+    assert "Path" not in kinds, "tldw-webui: a Path Config was added - is this still stateless?"
 
 
 @pytest.mark.parametrize("name", TLDW)

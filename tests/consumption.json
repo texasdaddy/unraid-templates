@@ -34,7 +34,9 @@
       "ADMIN_RECOVERY_EMAIL": "app/core/breakglass.py: the one account ADMIN_MFA_RESET is allowed to touch",
       "ALLOW_UNSAFE_DB_POSTURE": "app/main.py boot check: downgrades the RLS-posture refusal to a warning",
       "LOG_LEVEL": "app/main.py: logging.basicConfig level",
-      "WEB_CONCURRENCY": "docker-entrypoint.sh:117 -> gunicorn --workers \"${WEB_CONCURRENCY:-2}\"; app/core/throttle.py notes it governs worker count for the shared-state design"
+      "WEB_CONCURRENCY": "docker-entrypoint.sh:117 -> gunicorn --workers \"${WEB_CONCURRENCY:-2}\"; app/core/throttle.py notes it governs worker count for the shared-state design",
+      "DB_BACKUP_USER": "app/config.py:63,372-373 assembles the backup pg_dump SQLAlchemy URL; app/backup.py connects with it (BYPASSRLS required for a full dump under FORCE RLS)",
+      "DB_BACKUP_PASSWORD": "app/config.py:64,373 same backup DB URL assembly; unset simply disables the nightly backup loop (app/main.py lifespan), it does not fail boot"
     }
   },
   "reauth-bot": {

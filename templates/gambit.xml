@@ -1,0 +1,48 @@
+<?xml version="1.0"?>
+<!--
+  gambit — the rule-builder / dry-run dashboard of an autonomous trading-research bot (FastAPI;
+  its own repo: github.com/texasdaddy/gambit). Self-contained image built by that repo's CI → GHCR.
+  It places no orders anywhere: every write is to its own paper-trading ledger on /data.
+
+  ⛔ IT REFUSES TO START WITHOUT ALL FIVE LOGIN-GATE VARIABLES. Every page sits behind a Google
+  sign-in admitting exactly ONE Google account (GAMBIT_ALLOWED_EMAIL); there is no open mode. A
+  missing variable stops the boot and the container log names it.
+
+  ⭐ SIGN-IN ONLY WORKS AT THE ADDRESS IN GAMBIT_OAUTH_REDIRECT_URI. Google accepts a redirect URI
+  only on https with a real domain, or on localhost - never a bare LAN IP - and the sign-in cookie
+  is per host. So open the dashboard at that URI's host (an https hostname in front of the
+  container, or http://localhost:<port> through a port-forward), not at [IP]:[PORT]. That is why
+  this template has no WebUI link.
+
+  ⭐ /data IS LOAD-BEARING. It holds gambit.db, the paper-trading ledger (accounts, rules, orders,
+  tax lots). It is append-only simulation history with no re-importable source: put it on a
+  pool and back it up.
+-->
+<Container version="2">
+  <Name>gambit</Name>
+  <Repository>ghcr.io/texasdaddy/gambit:stable</Repository>
+  <Registry>https://github.com/texasdaddy/gambit/pkgs/container/gambit</Registry>
+  <Network>bridge</Network>                                          <!-- neutral default; pick br0 + a fixed IP in the UI if you prefer. -->
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support/>
+  <Project>https://github.com/texasdaddy/gambit</Project>
+  <Overview>gambit - the rule-builder / dry-run dashboard for an autonomous trading-research bot. Create paper accounts, attach trading rules, and watch positions, tax lots and simulated orders on a local SQLite ledger. It places NO orders anywhere: every write is to its own ledger. LOGIN: every page sits behind a Google sign-in that admits exactly ONE Google account (GAMBIT_ALLOWED_EMAIL); any other account gets "not authorized". It REFUSES TO START unless all five login-gate variables are set, and the container log names any that are missing. Create a Google OAuth 2.0 "Web application" client and register GAMBIT_OAUTH_REDIRECT_URI on it exactly. SIGN-IN ONLY WORKS AT THAT URI'S HOST: Google accepts https on a real domain or localhost, never a bare LAN IP, so open the dashboard through that hostname (or http://localhost:8000 via a port-forward) rather than at the container's IP. The Data path holds gambit.db, the paper-trading ledger - back it up. Runs as uid 99, gid 100 (nobody:users).</Overview>
+  <Category>Productivity: Network:Other</Category>
+  <WebUI/>
+  <TemplateURL>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/templates/gambit.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/icons/gambit.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <DateInstalled/>
+  <Description>gambit - rule-builder / dry-run dashboard (FastAPI), behind a single-account Google sign-in.</Description>
+
+  <Config Name="HTTP Port" Target="8000" Default="8000" Mode="tcp" Description="App HTTP port. Put an https reverse proxy in front of it for a hostname Google will accept as the sign-in redirect." Type="Port" Display="always" Required="false" Mask="false">8000</Config>
+  <Config Name="Data" Target="/data" Default="" Mode="rw" Description="Holds gambit.db, the paper-trading ledger (accounts, rules, simulated orders, tax lots). Append-only history with no re-importable source - losing it loses that history. The container runs as uid 99, gid 100 (nobody:users), what Unraid gives appdata; a directory owned otherwise must be made writable by 99:100. REQUIRED - an absolute path on a POOL." Type="Path" Display="always" Required="true" Mask="false"/>
+
+  <Config Name="GAMBIT_GOOGLE_CLIENT_ID" Target="GAMBIT_GOOGLE_CLIENT_ID" Default="" Mode="" Description="REQUIRED. Client ID of your Google OAuth 2.0 client of type Web application (Google Cloud Console, Google Auth Platform, Clients). Not a secret." Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="GAMBIT_GOOGLE_CLIENT_SECRET" Target="GAMBIT_GOOGLE_CLIENT_SECRET" Default="" Mode="" Description="REQUIRED. Client secret of the same Google OAuth client." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="GAMBIT_SESSION_SECRET" Target="GAMBIT_SESSION_SECRET" Default="" Mode="" Description="REQUIRED. At least 32 random characters; signs the sign-in session cookie. Changing it signs every session out, nothing else." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="GAMBIT_ALLOWED_EMAIL" Target="GAMBIT_ALLOWED_EMAIL" Default="" Mode="" Description="REQUIRED. The ONE Google account allowed past the sign-in (case-insensitive). Every other Google account is told it is not authorized. Changing it signs out any session issued to the previous address." Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="GAMBIT_OAUTH_REDIRECT_URI" Target="GAMBIT_OAUTH_REDIRECT_URI" Default="" Mode="" Description="REQUIRED. The address Google sends the browser back to after sign-in, ending in /auth/callback - e.g. https://gambit.example.com/auth/callback, or http://localhost:8000/auth/callback when reached through a port-forward. Must be registered on the Google client EXACTLY, and the dashboard must be opened at this same host. https here also marks the cookies Secure." Type="Variable" Display="always" Required="true" Mask="false"/>
+</Container>

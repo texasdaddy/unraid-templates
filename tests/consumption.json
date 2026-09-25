@@ -114,5 +114,15 @@
   "tldw-webui": {
     "no_local_consumer": true,
     "note": "third-party tldw_server-webui image; no consuming repo under C:\\dev"
+  },
+  "gambit": {
+    "no_local_consumer": false,
+    "vars": {
+      "GAMBIT_GOOGLE_CLIENT_ID": "gambit/config.py:87-88 (AUTH_ENV_KEYS), 120-121 AuthConfig.from_env(); scripts/run_ui.py:44 refuses to start (exit 2) if unset; gambit/ui/auth.py:102 (sign-in request), 122 (token exchange), 132 (ID-token aud check)",
+      "GAMBIT_GOOGLE_CLIENT_SECRET": "gambit/config.py:87-88 (AUTH_ENV_KEYS), 120-121 AuthConfig.from_env(); scripts/run_ui.py:44 refuses to start (exit 2) if unset; gambit/ui/auth.py:122 (code-for-token exchange at Google's token endpoint)",
+      "GAMBIT_SESSION_SECRET": "gambit/config.py:87-88 (AUTH_ENV_KEYS), 120-121 AuthConfig.from_env(); scripts/run_ui.py:44 refuses to start (exit 2) if unset; gambit/config.py:111 (>= 32 chars); gambit/ui/auth.py:107,153,165,186 (HMAC-signs the state and session cookies)",
+      "GAMBIT_ALLOWED_EMAIL": "gambit/config.py:87-88 (AUTH_ENV_KEYS), 120-121 AuthConfig.from_env(); scripts/run_ui.py:44 refuses to start (exit 2) if unset; gambit/ui/auth.py:83-87 _is_allowed(), called at 156 (every request) and 179 (sign-in)",
+      "GAMBIT_OAUTH_REDIRECT_URI": "gambit/config.py:87-88 (AUTH_ENV_KEYS), 120-121 AuthConfig.from_env(); scripts/run_ui.py:44 refuses to start (exit 2) if unset; gambit/config.py:116 (must end /auth/callback); gambit/ui/auth.py:102,123 (sent to Google), 143 (https => Secure cookies); scripts/run_ui.py:56 (prints the address to open)"
+    }
   }
 }

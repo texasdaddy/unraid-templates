@@ -22,6 +22,7 @@ https://raw.githubusercontent.com/texasdaddy/unraid-templates/main/icons/<name>.
 | keystone-db | `icons/keystone_db.png` | `templates/keystone-db.xml` |
 | keystone-web (dev+prod) | `icons/keystone-web.png` | `templates/keystone-web.xml` |
 | the-desk (prod) | `icons/the-desk.png` | `templates/the-desk.xml` |
+| gambit (prod) | `icons/gambit.png` | `templates/gambit.xml` |
 | iron-tide | `icons/iron-tide.png` | `templates/iron-tide.xml` |
 | tldw-redis (start 1st) | `icons/tldw-redis.png` | `templates/tldw-redis.xml` |
 | tldw-server (start 2nd) | `icons/tldw-server.png` | `templates/tldw-server.xml` |

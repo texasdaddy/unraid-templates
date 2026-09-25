@@ -20,7 +20,7 @@
 
   <Config Name="HTTP Port" Target="8000" Default="8000" Mode="tcp" Description="App HTTP port (FastAPI/gunicorn)" Type="Port" Display="always" Required="false" Mask="false">8000</Config>
   <Config Name="Data" Target="/data" Default="" Mode="rw" Description="App data (encrypted file vault). REQUIRED - an absolute path on a POOL, NOT the user-share FUSE overlay." Type="Path" Display="always" Required="true" Mask="false"/>
-  <Config Name="Backups" Target="/backups" Default="" Mode="rw" Description="Where a future DB dump job will land. Nothing writes here yet — the mount exists now so that job is a code change rather than a container edit later: without this mount in place from the start, a dump job would write INSIDE the container and be destroyed by the next update while still reporting success. Set an absolute path on a POOL DIFFERENT from the one holding the DB container's data, so one pool failure cannot take both the database and its only backup." Type="Path" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Backups" Target="/backups" Default="" Mode="rw" Description="Where the nightly pg_dump lands (KW-SELF-BACKUP-1). REQUIRED for a real backup: WITHOUT this mount the dump is written INSIDE the container and destroyed by the next update — the job still reports success, which is exactly the failure mode tape hit for months before its own Backups mount existed. Set an absolute path on a POOL DIFFERENT from the one holding the DB container's data (e.g. /mnt/&lt;other-pool&gt;/appdata/keystone/backups), so one pool failure cannot take both the database and its only backup. The app WARNS in the container log at boot and at every dump if this path is not a persistent mount. ⚠️ THIS MOUNT IS THE BACKUP DESTINATION — there is deliberately no separate Variable for it, because the two must never disagree: a Variable pointing anywhere other than this mount point would send dumps into the container filesystem, which is the exact silent failure above." Type="Path" Display="always" Required="true" Mask="false"/>
 
   <!-- Database connection — TWO logins (keystone#14). The runtime posture is load-bearing
        for row-level security: MIGRATIONS run as the OWNER (DB_*), which owns the tables; the
@@ -38,6 +38,15 @@
   <Config Name="DB_NAME" Target="DB_NAME" Default="keystone" Mode="" Description="PostgreSQL database name" Type="Variable" Display="always" Required="true" Mask="false">keystone</Config>
   <Config Name="APP_DB_USER" Target="APP_DB_USER" Default="keystone_app" Mode="" Description="APPLICATION (runtime) DB login — the NON-owner identity gunicorn connects as (keystone#14). Must be a member of app_role with NO BYPASSRLS and must NOT own tables, or RLS is bypassed. Create on keystone-db: CREATE ROLE keystone_app LOGIN PASSWORD '...' NOSUPERUSER INHERIT; GRANT app_role TO keystone_app;" Type="Variable" Display="always" Required="true" Mask="false">keystone_app</Config>
   <Config Name="APP_DB_PASSWORD" Target="APP_DB_PASSWORD" Default="" Mode="" Description="Password for the APP login APP_DB_USER (the non-owner app_role member). Required whenever DB_HOST is set — the container fails closed without it rather than running as the owner." Type="Variable" Display="always" Required="true" Mask="true"/>
+
+  <!-- Backup DB login — a THIRD identity, for the nightly pg_dump (KW-SELF-BACKUP-1). Every
+       tenant table carries FORCE ROW LEVEL SECURITY, so neither DB_* (the owner) nor
+       APP_DB_* (the RLS-bound app login) can read every row for a full dump: FORCE binds
+       even the owner unless it ALSO has BYPASSRLS, and BYPASSRLS is a role ATTRIBUTE, never
+       inherited through GRANT. OPTIONAL — unset, the container simply runs with no backup
+       coverage (logged once at boot), it does not fail closed. -->
+  <Config Name="DB_BACKUP_USER" Target="DB_BACKUP_USER" Default="keystone_backup" Mode="" Description="BACKUP DB login — the identity the nightly pg_dump connects as. Must have its own BYPASSRLS attribute (a migration cannot set this; it is not inheritable) AND be a member of backup_role for schema-wide SELECT. Create on keystone-db: CREATE ROLE keystone_backup LOGIN PASSWORD '...' NOSUPERUSER BYPASSRLS; GRANT backup_role TO keystone_backup;" Type="Variable" Display="advanced" Required="false" Mask="false">keystone_backup</Config>
+  <Config Name="DB_BACKUP_PASSWORD" Target="DB_BACKUP_PASSWORD" Default="" Mode="" Description="Password for the BACKUP login DB_BACKUP_USER. Left blank, the nightly backup job does not run (logged once at boot) — the app still serves normally." Type="Variable" Display="advanced" Required="false" Mask="true"/>
 
   <!-- Reverse proxy. Keystone's auth surface is rate-limited per account AND per source
        IP (keystone#15). Behind a proxy the socket peer is the PROXY, so unless the proxy

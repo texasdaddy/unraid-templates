@@ -43,10 +43,11 @@
        tenant table carries FORCE ROW LEVEL SECURITY, so neither DB_* (the owner) nor
        APP_DB_* (the RLS-bound app login) can read every row for a full dump: FORCE binds
        even the owner unless it ALSO has BYPASSRLS, and BYPASSRLS is a role ATTRIBUTE, never
-       inherited through GRANT. OPTIONAL — unset, the container simply runs with no backup
-       coverage (logged once at boot), it does not fail closed. -->
-  <Config Name="DB_BACKUP_USER" Target="DB_BACKUP_USER" Default="keystone_backup" Mode="" Description="BACKUP DB login — the identity the nightly pg_dump connects as. Must have its own BYPASSRLS attribute (a migration cannot set this; it is not inheritable) AND be a member of backup_role for schema-wide SELECT. Create on keystone-db: CREATE ROLE keystone_backup LOGIN PASSWORD '...' NOSUPERUSER BYPASSRLS; GRANT backup_role TO keystone_backup;" Type="Variable" Display="advanced" Required="false" Mask="false">keystone_backup</Config>
-  <Config Name="DB_BACKUP_PASSWORD" Target="DB_BACKUP_PASSWORD" Default="" Mode="" Description="Password for the BACKUP login DB_BACKUP_USER. Left blank, the nightly backup job does not run (logged once at boot) — the app still serves normally." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+       inherited through GRANT. The app never fails closed without it, but with the password
+       blank every nightly dump fails to log in: blanking BACKUP_DB_USER does not turn the job
+       off, because Unraid passes a blank Variable's Default (keystone_backup) instead. -->
+  <Config Name="BACKUP_DB_USER" Target="BACKUP_DB_USER" Default="keystone_backup" Mode="" Description="BACKUP DB login — the identity the nightly pg_dump connects as. Must have its own BYPASSRLS attribute (a migration cannot set this; it is not inheritable) AND be a member of backup_role for schema-wide SELECT. Create on keystone-db: CREATE ROLE keystone_backup LOGIN PASSWORD '...' NOSUPERUSER BYPASSRLS; GRANT backup_role TO keystone_backup;" Type="Variable" Display="advanced" Required="false" Mask="false">keystone_backup</Config>
+  <Config Name="BACKUP_DB_PASSWORD" Target="BACKUP_DB_PASSWORD" Default="" Mode="" Description="Password for the BACKUP login BACKUP_DB_USER. Left blank, the nightly backup job still starts and every dump fails to log in (logged as a failed nightly dump). Blanking BACKUP_DB_USER does not stop it: Unraid passes that Variable's Default, keystone_backup, when it is blank. The app still serves normally." Type="Variable" Display="advanced" Required="false" Mask="true"/>
 
   <!-- Reverse proxy. Keystone's auth surface is rate-limited per account AND per source
        IP (keystone#15). Behind a proxy the socket peer is the PROXY, so unless the proxy

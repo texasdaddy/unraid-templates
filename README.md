@@ -96,14 +96,15 @@ A template added to the repo later gets its own copy then; no per-template copy 
 
 A backup whose instance is gone, is not a repo template's (a foreign container, or a
 template since removed from the repo), or cannot be read belongs to no template —
-except the backups of a template's own `my-<name>.xml`, which are always that template's. No per-template copy redacts, prunes or
-reports it, even one that cannot be parsed. Every backup this script writes is already
-redacted, so such an orphan holds a secret only if it predates #27 or was dropped there
-by hand. Delete orphans by hand: in `templates-user/.template-sync-backups/`, remove
-the backups whose `my-*.xml` is gone or no longer synced — but keep those of a
-`my-*.xml` that cannot be read, since they are how you restore it. A live full pass would redact
-them too, but it also ships every template's pending changes, and it never deletes the
-newest 10 of any group.
+except the backups of a template's own `my-<name>.xml`, which are that template's
+(unless that file maps to another template, in which case its run refuses). No
+per-template copy redacts, prunes or reports an orphan, even one that cannot be parsed.
+Every backup this script writes is already redacted, so such an orphan holds a secret
+only if it predates #27 or was dropped there by hand. Delete orphans by hand: in
+`templates-user/.template-sync-backups/`, remove the backups whose `my-*.xml` is gone
+or no longer synced — but keep those of a `my-*.xml` that cannot be read, since they
+are how you restore it. A live full pass would redact them too, but it also ships
+every template's pending changes, and it never deletes the newest 10 of any group.
 
 > **Backups redact your `Mask="true"` values** (#27). `Mask="true"` is a *UI* setting —
 > it makes the Unraid form render a password box, but the XML on the flash drive

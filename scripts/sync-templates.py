@@ -17,7 +17,8 @@ across the managed container templates that TEMPLATE (below) selects:
                       variants of the name, e.g. my-Tape.xml, included); and a
                       templates dir that cannot be listed. A backup whose
                       instance is gone, unmapped or unreadable is left to the
-                      full pass — except my-tape.xml's, which is always tape's.
+                      full pass — except my-tape.xml's, which are tape's (unless
+                      that file maps to another template, when tape refuses).
 
   ONE USER SCRIPT PER TEMPLATE: each installed copy is identical to this file
   apart from its TEMPLATE line, so syncing one template can never ship another

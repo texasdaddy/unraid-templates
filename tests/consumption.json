@@ -35,8 +35,8 @@
       "ALLOW_UNSAFE_DB_POSTURE": "app/main.py boot check: downgrades the RLS-posture refusal to a warning",
       "LOG_LEVEL": "app/main.py: logging.basicConfig level",
       "WEB_CONCURRENCY": "docker-entrypoint.sh:117 -> gunicorn --workers \"${WEB_CONCURRENCY:-2}\"; app/core/throttle.py notes it governs worker count for the shared-state design",
-      "DB_BACKUP_USER": "app/config.py:63,372-373 assembles the backup pg_dump SQLAlchemy URL; app/backup.py connects with it (BYPASSRLS required for a full dump under FORCE RLS)",
-      "DB_BACKUP_PASSWORD": "app/config.py:64,373 same backup DB URL assembly; unset simply disables the nightly backup loop (app/main.py lifespan), it does not fail boot"
+      "BACKUP_DB_USER": "reads settings field backup_db_user at app/config.py:63 (origin/dev). pydantic-settings, no env_prefix, case-insensitive: field backup_db_user -> env BACKUP_DB_USER. app/config.py:372-373 effective_backup_database_url assembles the pg_dump URL from it; app/main.py:81-85 starts the nightly backup loop only when that URL is non-empty",
+      "BACKUP_DB_PASSWORD": "reads settings field backup_db_password at app/config.py:64 (origin/dev). Same no-prefix, case-insensitive mapping: field backup_db_password -> env BACKUP_DB_PASSWORD. app/config.py:373 passes it into the same pg_dump URL; blank with BACKUP_DB_USER set, the loop still starts and each dump fails to log in"
     }
   },
   "reauth-bot": {

@@ -60,13 +60,12 @@ by design — fill them in Unraid on import.
 
 ### `sync-templates.py`
 
-One button, no parameters. Each run does **create / update / delete-as-necessary**
-across every managed container template in
-`/boot/config/plugins/dockerMan/templates-user`, **keeping each instance's applied
-values**:
+No parameters. Each run does **create / update / delete-as-necessary** across the
+managed container templates in `/boot/config/plugins/dockerMan/templates-user` that
+its `TEMPLATE` setting selects, **keeping each instance's applied values**:
 
 - **CREATE** — seeds `my-<name>.xml` for any repo template that has no `my-` file yet, so it is ready to pick under *Add Container*.
-- **UPDATE** — for **every live instance** of a template (`my-tape.xml` *and* `my-tape-dev.xml`, `my-tape-db-dev.xml`, …): keeps that instance's applied value for each variable, refreshes the variable's metadata (description, defaults, visibility) from the repo template, and adds variables the template has gained.
+- **UPDATE** — for **every live instance** of a template (for `tape`: `my-tape.xml` *and* `my-tape-dev.xml`, …; `my-tape-db-dev.xml` is `tape-db`'s): keeps that instance's applied value for each variable, refreshes the variable's metadata (description, defaults, visibility) from the repo template, and adds variables the template has gained.
 - **DELETE-as-necessary** — drops a variable the template no longer defines **only when it is genuinely unused** (blank, or still at its default). A removed variable that still holds a real, non-default value is **kept and loudly flagged** (`!! KEPT`), because that almost always means the *template* is missing it — repo drift, not an intentional removal. Treat a `!! KEPT` line as a bug in `templates/` — **except during a deliberate migration**, when it is the script telling you a mapping is still on your container: a `!! KEPT` line naming a variable the migration intentionally dropped means delete that mapping in the Unraid UI, **not** put it back in the template.
 
 Container-level settings you set per instance — image tag, network/IP, WebUI, Extra
@@ -77,16 +76,35 @@ Instances map to templates by their `<TemplateURL>` basename, falling back to th
 longest dash-prefix of the filename — so `my-tape-db-dev.xml` maps to `tape-db`
 and never to `tape`. Containers that came from anywhere else are never touched.
 
-**`DRY_RUN` is the only switch**, a constant at the top of the file — never a
-parameter, never a second script:
+**Two constants at the top of the file are its only settings** — never a parameter:
 
 | | |
 |---|---|
+| `TEMPLATE = None` | The full pass: every repo template and all of their instances. |
+| `TEMPLATE = "tape"` | **Only** `templates/tape.xml` and its live instances. Nothing that maps to another template is created, updated, deleted, or has its backups redacted or pruned — `tape-db` included, because instances are mapped against the *full* template list before the scope is applied. The output's `scope:` line names the template, so a dry run shows the scope before a live run acts on it. **Refused before anything is written** (exit non-zero, `Nothing changed.`): a name the repo does not have; a `my-tape.xml` that is really a *different* template's instance (by its `<TemplateURL>`) or a foreign container — case variants of the name such as `my-Tape.xml` included, since `/boot` is FAT32 — so fix that file's `<TemplateURL>` or rename the container; and a templates dir that cannot be listed. |
 | `DRY_RUN = True` | Prints exactly what it *would* create/update/delete. Writes nothing. |
 | `DRY_RUN = False` | Performs the changes. Every overwritten file is backed up first (timestamped, under `templates-user/.template-sync-backups/`), writes are atomic, and a merged result is validated before it replaces the original. |
 
-The committed copy is the **live** version (`DRY_RUN = False`). To validate a change
-first, flip the constant to `True`, run it, review the output, then flip it back.
+The committed copy is the **live full pass** (`DRY_RUN = False`, `TEMPLATE = None`).
+To validate a change first, flip `DRY_RUN` to `True`, run it, review the output, then
+flip it back.
+
+**One installed User Script per template.** A full pass also ships every *other*
+template's merged-but-not-yet-intended changes, so the host runs one copy per repo
+template instead — each **identical to the repo copy except for its `TEMPLATE` line**.
+A template added to the repo later gets its own copy then; no per-template copy seeds it.
+
+A backup whose instance is gone, is not a repo template's (a foreign container, or a
+template since removed from the repo), or cannot be read belongs to no template —
+except the backups of a template's own `my-<name>.xml`, which are that template's
+(unless that file maps to another template, in which case its run refuses). No
+per-template copy redacts, prunes or reports an orphan, even one that cannot be parsed.
+Every backup this script writes is already redacted, so such an orphan holds a secret
+only if it predates #27 or was dropped there by hand. Delete orphans by hand: in
+`templates-user/.template-sync-backups/`, remove the backups whose `my-*.xml` is gone
+or no longer synced — but keep those of a `my-*.xml` that cannot be read, since they
+are how you restore it. A live full pass would redact them too, but it also ships
+every template's pending changes, and it never deletes the newest 10 of any group.
 
 > **Backups redact your `Mask="true"` values** (#27). `Mask="true"` is a *UI* setting —
 > it makes the Unraid form render a password box, but the XML on the flash drive
@@ -97,8 +115,9 @@ first, flip the constant to `True`, run it, review the output, then flip it back
 > Now a backup is written with every masked value replaced by `***REDACTED***`,
 > the **first run also redacts the backups earlier versions already wrote**, and
 > backups are pruned to the newest `KEEP_BACKUPS` (10) per instance. A `.bak`
-> that cannot be parsed is *reported by name and left alone* — it may still hold
-> a secret, so review and delete those by hand.
+> that cannot be parsed is *reported by name and left alone* by the run that owns
+> it (a full pass owns them all; see orphans above) — it may still hold a secret,
+> so review and delete those by hand.
 >
 > **What this costs a restore:** the structure and every non-secret value come
 > back in full; a masked value must be re-entered. That is not much of a loss —
@@ -115,7 +134,13 @@ first, flip the constant to `True`, run it, review the output, then flip it back
 > `-e TOKEN=...`), which is free text with no `Mask` flag to key on. Keep secrets
 > in masked variables, not in Extra Parameters.
 
-**Install as an Unraid User Script:** *Settings → User Utilities → User Scripts → Add New Script*,
-name it `sync-templates`, paste the file in as the script body, and run it with
-*Run Script* (leave it unscheduled — it is a deliberate, on-demand action, not a
-cron job). Requires python3 ≥ 3.9; stdlib only, no dependencies to install.
+**Install as Unraid User Scripts, one per template:** for each file in `templates/`,
+*Settings → User Utilities → User Scripts → Add New Script*, name it
+`sync-templates-<name>` (e.g. `sync-templates-tape`), paste the file in as the script
+body, and change **only** its `TEMPLATE` line to `TEMPLATE = "<name>"` (and `DRY_RUN`
+while you rehearse — see above). Run it with *Run Script* (leave it unscheduled — it
+is a deliberate, on-demand action, not a cron job). When the script changes, re-paste
+every copy and re-set each one's `TEMPLATE` line. **Delete the old single
+`sync-templates` User Script** when the per-template copies go in: it is a live full
+pass, one click from shipping every template at once. Requires python3 ≥ 3.9; stdlib
+only, no dependencies to install.

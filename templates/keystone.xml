@@ -43,10 +43,11 @@
        tenant table carries FORCE ROW LEVEL SECURITY, so neither DB_* (the owner) nor
        APP_DB_* (the RLS-bound app login) can read every row for a full dump: FORCE binds
        even the owner unless it ALSO has BYPASSRLS, and BYPASSRLS is a role ATTRIBUTE, never
-       inherited through GRANT. OPTIONAL — unset, the container simply runs with no backup
-       coverage (logged once at boot), it does not fail closed. -->
+       inherited through GRANT. OPTIONAL — with BACKUP_DB_USER blank the container runs with
+       no backup coverage (logged at boot); with the user set and the password blank, every
+       nightly dump fails to log in. Neither fails closed. -->
   <Config Name="BACKUP_DB_USER" Target="BACKUP_DB_USER" Default="keystone_backup" Mode="" Description="BACKUP DB login — the identity the nightly pg_dump connects as. Must have its own BYPASSRLS attribute (a migration cannot set this; it is not inheritable) AND be a member of backup_role for schema-wide SELECT. Create on keystone-db: CREATE ROLE keystone_backup LOGIN PASSWORD '...' NOSUPERUSER BYPASSRLS; GRANT backup_role TO keystone_backup;" Type="Variable" Display="advanced" Required="false" Mask="false">keystone_backup</Config>
-  <Config Name="BACKUP_DB_PASSWORD" Target="BACKUP_DB_PASSWORD" Default="" Mode="" Description="Password for the BACKUP login BACKUP_DB_USER. Left blank while BACKUP_DB_USER is set (it defaults to keystone_backup), the nightly backup job still starts and every dump fails to log in (logged as a failed nightly dump). To run with no backups, blank BACKUP_DB_USER as well: the job then never starts (logged once at boot). Either way the app still serves normally." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="BACKUP_DB_PASSWORD" Target="BACKUP_DB_PASSWORD" Default="" Mode="" Description="Password for the BACKUP login BACKUP_DB_USER. Left blank while BACKUP_DB_USER is set (it defaults to keystone_backup), the nightly backup job still starts and every dump fails to log in (logged as a failed nightly dump). To run with no backups, blank BACKUP_DB_USER as well: the job then never starts (logged at boot). Either way the app still serves normally." Type="Variable" Display="advanced" Required="false" Mask="true"/>
 
   <!-- Reverse proxy. Keystone's auth surface is rate-limited per account AND per source
        IP (keystone#15). Behind a proxy the socket peer is the PROXY, so unless the proxy

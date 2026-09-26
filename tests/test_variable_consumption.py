@@ -26,12 +26,15 @@ that actually uses it. This file enforces that the record is COMPLETE and never 
   * a template flagged `no_local_consumer` carries no per-var citations to go stale, and is
     itself checked against the actual absence of a same-named repo under `C:\\dev` at audit
     time was recorded correctly by a human — this file cannot re-verify that part.
-  * every citation says `reads <VARIABLE>`: the exact env-var name the code looks up, not
+  * every citation starts `reads <VARIABLE>`: the exact env-var name the code looks up, not
     just the feature it serves. Find that name before writing the line. For os.environ /
     getenv / a shell `${VAR}` it is the literal string. For a pydantic-settings field it is
-    env_prefix + the field name, compared case-insensitively unless case_sensitive=True. A
-    citation that mentions a field or env name made of the Variable's words in another order
-    (`backup_db_user` under `DB_BACKUP_USER`) fails: that is a Variable nothing reads.
+    env_prefix + the field name, compared case-insensitively unless case_sensitive=True; an
+    alias / validation_alias replaces it (no consumer uses one, and the check below does
+    not model one). A citation that says pydantic names its `field <name>`, plus
+    `env_prefix <PREFIX>` when there is one, and those must spell the Variable. A citation
+    that mentions a field or env name made of the Variable's words in another order
+    (`backup_db_user` under `DB_BACKUP_USER`) fails too: that is a Variable nothing reads.
 This is a structural gate, not a semantic one: it cannot itself prove a citation is true.
 That proof is the one-time job the accompanying RETURN records; ⚠️ re-run the grep behind a
 citation before trusting it if the cited consumer file has moved on since.
@@ -123,8 +126,15 @@ def test_every_citation_is_non_trivial(name):
 def _citation_problems(var, citation):
     """What is wrong with `citation` as the record of where `var` is read ([] = nothing)."""
     problems = []
-    if not re.search(rf"\breads {re.escape(var)}\b", citation):
-        problems.append(f"does not say `reads {var}`")
+    if not re.match(rf"reads {re.escape(var)}\b", citation):
+        problems.append(f"does not start `reads {var}`")
+    fields = re.findall(r"\bfield (\w+)", citation)
+    if "pydantic" in citation and not fields:
+        problems.append("says pydantic but names no `field <name>`")
+    prefix = "".join(re.findall(r"\benv_prefix (\w+)", citation)[:1])
+    misread = [f"{f} -> {(prefix + f).upper()}" for f in fields if (prefix + f).upper() != var]
+    if misread:
+        problems.append(f"names a field that reads another env var ({', '.join(misread)})")
     words = sorted(var.lower().split("_"))
     swapped = sorted({t for t in re.findall(r"[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+", citation)
                       if t.lower() != var.lower() and sorted(t.lower().split("_")) == words})
@@ -140,19 +150,33 @@ def test_every_citation_names_the_env_var_the_code_reads(name):
         assert not problems, (
             f"{name}: {var}'s citation {'; '.join(problems)}. Find the env-var name the "
             f"consumer actually looks up (a pydantic field reads env_prefix + its name) and "
-            f"write `reads {var}` only if that is it; if it is not, the template declares a "
-            f"Variable nothing reads"
+            f"start the citation `reads {var}` only if that is it; if it is not, the template "
+            f"declares a Variable nothing reads"
         )
 
 
-@pytest.mark.parametrize("citation, caught", [
+@pytest.mark.parametrize("var, citation, caught", [
     # The citation that let DB_BACKUP_USER ship while the app read BACKUP_DB_USER.
-    ("app/config.py:63,372-373 assembles the backup pg_dump SQLAlchemy URL", True),
+    ("DB_BACKUP_USER", "app/config.py:63,372-373 assembles the backup pg_dump SQLAlchemy URL", True),
     # Naming the Variable by rote while citing the field that actually reads another name.
-    ("reads DB_BACKUP_USER via settings field backup_db_user, app/config.py:63", True),
-    ("reads DB_BACKUP_USERS at app/config.py:63", True),
-    ("reads BACKUP_DB_USER via settings field backup_db_user, app/config.py:63", True),
-    ("reads DB_BACKUP_USER via os.environ.get at app/backup.py:12", False),
+    ("DB_BACKUP_USER", "reads DB_BACKUP_USER via settings field backup_db_user, app/config.py:63", True),
+    ("APP_DB_USER", "reads APP_DB_USER via pydantic-settings field db_user in app/config.py", True),
+    ("DB_BACKUP_USER", "reads DB_BACKUP_USER via pydantic-settings in app/config.py:63", True),
+    ("DESK_NOTIFY_CRON", "reads DESK_NOTIFY_CRON via pydantic-settings field notify_cron (no env_prefix)", True),
+    ("DESK_NOTIFY_CRON", "reads DESK_NOTIFY_CRON via pydantic-settings field notify_cron (env_prefix DESK_)", False),
+    # `reads <VAR>` is the citation's opening claim, spelled exactly.
+    ("DB_BACKUP_USER", "reads DB_BACKUP_USERS at app/config.py:63", True),
+    ("DB_BACKUP_USER", "reads BACKUP_DB_USER via settings field backup_db_user, app/config.py:63", True),
+    ("DB_BACKUP_USER", "nothing reads DB_BACKUP_USER; app/config.py:63 reads BACKUP_DB_USER", True),
+    ("DB_BACKUP_USER", "threads DB_BACKUP_USER through app/config.py:63", True),
+    ("DB_BACKUP_USER", "read DB_BACKUP_USER via os.environ.get at app/backup.py:12", True),
+    ("DB_BACKUP_USER", "reads db_backup_user via os.environ.get at app/backup.py:12", True),
+    # Another name built from the Variable's words, two-word and with digits.
+    ("DB_USER", "reads DB_USER via the shell; entrypoint.sh exports USER_DB", True),
+    ("S3_BUCKET", "reads S3_BUCKET via os.environ.get; app.py passes BUCKET_S3 on", True),
+    ("DB_BACKUP_USER", "reads DB_BACKUP_USER via os.environ.get at app/backup.py:12", False),
+    ("BACKUP_DB_USER", "reads BACKUP_DB_USER via pydantic-settings field backup_db_user in app/config.py "
+                       "(no env_prefix, case-insensitive)", False),
 ])
-def test_the_citation_rule_catches_a_citation_that_never_names_what_is_read(citation, caught):
-    assert bool(_citation_problems("DB_BACKUP_USER", citation)) is caught
+def test_the_citation_rule_catches_a_citation_that_never_names_what_is_read(var, citation, caught):
+    assert bool(_citation_problems(var, citation)) is caught

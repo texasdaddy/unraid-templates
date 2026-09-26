@@ -12,10 +12,11 @@ across the managed container templates that TEMPLATE (below) selects:
                       or has its backups redacted or pruned — `tape-db` included,
                       since instances are mapped against the FULL template list
                       (see MAPPING below). Refused before anything is written: a
-                      name the repo does not have, and a my-tape.xml (in any
-                      letter case) that is really another template's instance
-                      or a foreign container. A backup whose instance is gone
-                      (other than my-tape.xml's) is left to the full pass.
+                      name the repo does not have, and a my-tape.xml that is
+                      really another template's instance or a foreign container
+                      (case variants of the name, e.g. my-Tape.xml, included).
+                      A backup whose instance is gone (other than my-tape.xml's),
+                      unmapped or unreadable is left to the full pass.
 
   ONE USER SCRIPT PER TEMPLATE: each installed copy is identical to this file
   apart from its TEMPLATE line, so syncing one template can never ship another
@@ -783,8 +784,14 @@ def main():
         # file there that is really another template's instance, or a foreign container, would be
         # rewritten with the wrong template's variables. SAME FILE, not same name: /boot is FAT32,
         # where my-Tape.xml IS my-tape.xml. Refuse rather than guess; the full pass is unchanged.
+        # Without a listing there is nothing to tell this template's instances from anyone else's.
+        try:
+            os.listdir(TEMPLATES_USER)
+        except OSError as e:
+            sys.exit(f"error: could not list the templates dir ({e}), so a TEMPLATE={TEMPLATE!r} run "
+                     f"cannot tell its own instances apart. Nothing changed.")
         base = os.path.join(TEMPLATES_USER, f"my-{TEMPLATE}.xml")
-        claimed = [(p, f"maps to {t!r} by its <TemplateURL>")
+        claimed = [(p, f"maps to {t!r}")
                    for t, paths in instances_by_tpl.items() if t != TEMPLATE for p in paths]
         claimed += [(os.path.join(TEMPLATES_USER, f), "is not from these templates") for f in unmapped]
         for p, why in sorted(claimed):

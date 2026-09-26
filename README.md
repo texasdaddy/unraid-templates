@@ -81,7 +81,7 @@ and never to `tape`. Containers that came from anywhere else are never touched.
 | | |
 |---|---|
 | `TEMPLATE = None` | The full pass: every repo template and all of their instances. |
-| `TEMPLATE = "tape"` | **Only** `templates/tape.xml` and its live instances. Nothing that maps to another template is created, updated, deleted, or has its backups redacted or pruned — `tape-db` included, because instances are mapped against the *full* template list before the scope is applied. The output's `scope:` line names the template, so a dry run shows the scope before a live run acts on it. **Refused before anything is written** (exit non-zero, `Nothing changed.`): a name the repo does not have, and a `my-tape.xml` — in any letter case, since `/boot` is FAT32 — that is really a *different* template's instance (by its `<TemplateURL>`) or a foreign container; fix that file's `<TemplateURL>` or rename the container. |
+| `TEMPLATE = "tape"` | **Only** `templates/tape.xml` and its live instances. Nothing that maps to another template is created, updated, deleted, or has its backups redacted or pruned — `tape-db` included, because instances are mapped against the *full* template list before the scope is applied. The output's `scope:` line names the template, so a dry run shows the scope before a live run acts on it. **Refused before anything is written** (exit non-zero, `Nothing changed.`): a name the repo does not have; a `my-tape.xml` that is really a *different* template's instance (by its `<TemplateURL>`) or a foreign container — case variants of the name such as `my-Tape.xml` included, since `/boot` is FAT32 — so fix that file's `<TemplateURL>` or rename the container; and a templates dir that cannot be listed. |
 | `DRY_RUN = True` | Prints exactly what it *would* create/update/delete. Writes nothing. |
 | `DRY_RUN = False` | Performs the changes. Every overwritten file is backed up first (timestamped, under `templates-user/.template-sync-backups/`), writes are atomic, and a merged result is validated before it replaces the original. |
 
@@ -94,13 +94,15 @@ template's merged-but-not-yet-intended changes, so the host runs one copy per re
 template instead — each **identical to the repo copy except for its `TEMPLATE` line**.
 A template added to the repo later gets its own copy then; no per-template copy seeds it.
 
-A backup whose instance no longer exists (other than the template's own `my-<name>.xml`)
-belongs to no template, so no per-template copy redacts, prunes or reports it — even
-one that cannot be parsed. Every backup this script writes is already redacted, so such
-an orphan holds a secret only if it predates #27 or was dropped there by hand. Delete
-orphans by hand: list `templates-user/.template-sync-backups/` and remove the backups
-whose `my-*.xml` is gone. A live full pass would redact them too, but it also ships
-every template's pending changes, and it never deletes the newest 10 of any group.
+A backup whose instance is gone (other than the template's own `my-<name>.xml`), is
+not a repo template's (a foreign container, or a template since removed from the repo),
+or cannot be read belongs to no template. No per-template copy redacts, prunes or
+reports it, even one that cannot be parsed. Every backup this script writes is already
+redacted, so such an orphan holds a secret only if it predates #27 or was dropped there
+by hand. Delete orphans by hand: in `templates-user/.template-sync-backups/`, remove
+the backups whose `my-*.xml` is gone or no longer synced. A live full pass would redact
+them too, but it also ships every template's pending changes, and it never deletes the
+newest 10 of any group.
 
 > **Backups redact your `Mask="true"` values** (#27). `Mask="true"` is a *UI* setting —
 > it makes the Unraid form render a password box, but the XML on the flash drive

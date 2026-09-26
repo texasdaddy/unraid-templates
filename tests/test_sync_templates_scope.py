@@ -243,8 +243,10 @@ def test_an_unknown_TEMPLATE_refuses_and_writes_nothing(sync, tmp_path, capsys, 
     world(tmp_path)
     # A container of that name, with a cleartext backup: a refusal placed after the redaction
     # step would redact it (the scope treats my-<TEMPLATE>.xml as its own) before refusing.
+    # Unreadable on purpose: a readable foreign one would trip the stub refusal first and hide
+    # the ordering this is here to catch.
     if not (tmp_path / f"my-{bad}.xml").exists():
-        (tmp_path / f"my-{bad}.xml").write_bytes(container("other", [cfg("X", "1")]).encode())
+        (tmp_path / f"my-{bad}.xml").write_bytes(b"<Container><unclosed>")
     (tmp_path / BACKUPS / f"my-{bad}.xml.20190101-000000.bak").write_bytes(
         container("other", [cfg("K", "bad-s3cret", masked=True)]).encode())
     before = snap(tmp_path)
@@ -341,9 +343,13 @@ def test_a_backup_whose_instance_is_gone_is_left_to_the_full_pass(sync, tmp_path
         (b / f"my-tape-old.xml.20200101-0000{i:02d}.bak").write_bytes(
             container("tape-old", [cfg("TOKEN", "gone-s3cret", masked=True)]).encode())
     (b / "notes.bak").write_bytes(container("x", [cfg("K", "loose-s3cret", masked=True)]).encode())
+    # extends a stub's name, but not with a dot: not my-tape.xml's
+    (b / "my-tape.xml-pre-upgrade.bak").write_bytes(
+        container("tape", [cfg("TOKEN", "loose-s3cret", masked=True)]).encode())
 
     def orphans():
-        return {k: v for k, v in snap(tmp_path).items() if "tape-old" in k or k.endswith("notes.bak")}
+        return {k: v for k, v in snap(tmp_path).items()
+                if "tape-old" in k or k.endswith(("notes.bak", "pre-upgrade.bak"))}
 
     before = orphans()
     for name in ("tape", "tape-db", "widget"):
@@ -355,7 +361,7 @@ def test_a_backup_whose_instance_is_gone_is_left_to_the_full_pass(sync, tmp_path
     sync.TEMPLATE = None
     run(sync, tmp_path, capsys)
     after = orphans()
-    assert len(after) == 11   # 10 of my-tape-old's group, plus notes.bak (never pruned)
+    assert len(after) == 12   # 10 of my-tape-old's group, plus the two hand-named (never pruned)
     assert not any(b"gone-s3cret" in v or b"loose-s3cret" in v for v in after.values())
 
 
@@ -387,6 +393,42 @@ def test_a_case_variant_stub_that_is_not_this_templates_is_never_rewritten(sync,
         assert isinstance(code, str) and "my-Tape.xml (the file at my-tape.xml)" in code, code
     else:
         assert code == 0, out   # a separate file: the tape stub is simply CREATEd beside it
+
+
+def test_the_stub_refusal_compares_files_not_names_on_any_filesystem(sync, tmp_path, capsys):
+    """The same alias as FAT32's case folding, built from a hard link so a case-sensitive CI
+    runner exercises it too: my-tape.xml IS foreign my-plex.xml."""
+    world(tmp_path)
+    (tmp_path / "my-tape.xml").unlink()
+    content = container("plex", [cfg("X", "1")]).encode()
+    (tmp_path / "my-plex.xml").write_bytes(content)
+    try:
+        os.link(tmp_path / "my-plex.xml", tmp_path / "my-tape.xml")
+    except (OSError, NotImplementedError) as e:
+        pytest.skip(f"no hard links here: {e}")
+    before = snap(tmp_path)
+    sync.TEMPLATE = "tape"
+    code, out, _ = run(sync, tmp_path, capsys)
+    assert isinstance(code, str) and "is not from these templates" in code, code
+    assert snap(tmp_path) == before
+
+
+def test_a_scoped_run_refuses_when_it_cannot_list_the_templates_dir(sync, tmp_path, capsys, monkeypatch):
+    world(tmp_path)
+    before = snap(tmp_path)
+    real = os.listdir
+
+    def flaky(path="."):
+        if os.path.normcase(str(path)) == os.path.normcase(str(tmp_path)):
+            raise PermissionError(13, "Permission denied")
+        return real(path)
+
+    monkeypatch.setattr(sync.os, "listdir", flaky)
+    sync.TEMPLATE = "tape"
+    code, out, _ = run(sync, tmp_path, capsys)
+    assert isinstance(code, str) and "could not list the templates dir" in code, code
+    monkeypatch.undo()
+    assert snap(tmp_path) == before
 
 
 def test_a_scoped_run_still_reports_an_unreadable_instance_it_cannot_attribute(sync, tmp_path, capsys):

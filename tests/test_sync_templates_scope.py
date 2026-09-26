@@ -413,21 +413,34 @@ def test_the_stub_refusal_compares_files_not_names_on_any_filesystem(sync, tmp_p
     assert snap(tmp_path) == before
 
 
-def test_a_scoped_run_refuses_when_it_cannot_list_the_templates_dir(sync, tmp_path, capsys, monkeypatch):
+@pytest.mark.parametrize("failures", [1, 99])
+def test_a_scoped_run_refuses_when_it_cannot_list_the_templates_dir(
+        sync, tmp_path, capsys, monkeypatch, failures):
+    """`failures=1`: only the FIRST listing fails, which is the one the scope is built from —
+    a second look that happens to succeed must not stand in for it. The stub here is a hard
+    link to a foreign container, so a run that carried on would rewrite it."""
     world(tmp_path)
+    (tmp_path / "my-tape.xml").unlink()
+    (tmp_path / "my-plex.xml").write_bytes(container("plex", [cfg("X", "1")]).encode())
+    try:
+        os.link(tmp_path / "my-plex.xml", tmp_path / "my-tape.xml")
+    except (OSError, NotImplementedError) as e:
+        pytest.skip(f"no hard links here: {e}")
     before = snap(tmp_path)
-    real = os.listdir
+    real, left = os.listdir, [failures]
 
     def flaky(path="."):
-        if os.path.normcase(str(path)) == os.path.normcase(str(tmp_path)):
+        if os.path.normcase(str(path)) == os.path.normcase(str(tmp_path)) and left[0]:
+            left[0] -= 1
             raise PermissionError(13, "Permission denied")
         return real(path)
 
     monkeypatch.setattr(sync.os, "listdir", flaky)
     sync.TEMPLATE = "tape"
     code, out, _ = run(sync, tmp_path, capsys)
-    assert isinstance(code, str) and "could not list the templates dir" in code, code
     monkeypatch.undo()
+    assert isinstance(code, str) and "could not list the directory" in code, code
+    assert "cannot tell its own instances apart" in code and "Nothing changed" in code
     assert snap(tmp_path) == before
 
 

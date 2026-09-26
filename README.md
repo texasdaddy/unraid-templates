@@ -94,13 +94,14 @@ template's merged-but-not-yet-intended changes, so the host runs one copy per re
 template instead — each **identical to the repo copy except for its `TEMPLATE` line**.
 A template added to the repo later gets its own copy then; no per-template copy seeds it.
 
-A backup whose instance is gone (other than the template's own `my-<name>.xml`), is
-not a repo template's (a foreign container, or a template since removed from the repo),
-or cannot be read belongs to no template. No per-template copy redacts, prunes or
+A backup whose instance is gone, is not a repo template's (a foreign container, or a
+template since removed from the repo), or cannot be read belongs to no template —
+except the backups of a template's own `my-<name>.xml`, which are always that template's. No per-template copy redacts, prunes or
 reports it, even one that cannot be parsed. Every backup this script writes is already
 redacted, so such an orphan holds a secret only if it predates #27 or was dropped there
 by hand. Delete orphans by hand: in `templates-user/.template-sync-backups/`, remove
-the backups whose `my-*.xml` is gone or no longer synced. A live full pass would redact
+the backups whose `my-*.xml` is gone or no longer synced — but keep those of a
+`my-*.xml` that cannot be read, since they are how you restore it. A live full pass would redact
 them too, but it also ships every template's pending changes, and it never deletes the
 newest 10 of any group.
 

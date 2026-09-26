@@ -296,7 +296,7 @@ def test_a_stub_whose_TemplateURL_names_another_template_is_refused_not_rewritte
     sync.DRY_RUN = dry
     sync.TEMPLATE = "tape"
     code, out, _ = run(sync, tmp_path, capsys)
-    assert isinstance(code, str) and "my-tape.xml maps to 'tape-db'" in code and "Nothing changed" in code
+    assert isinstance(code, str) and "maps to 'tape-db'" in code and "Nothing changed" in code
     assert snap(tmp_path) == before
 
     sync.TEMPLATE = "tape-db"
@@ -305,24 +305,88 @@ def test_a_stub_whose_TemplateURL_names_another_template_is_refused_not_rewritte
     assert "[tape-db]" in out and "my-tape.xml" in out.split("[tape-db]")[1]
 
 
-def test_a_backup_belongs_to_the_LONGEST_instance_name_it_extends(sync, tmp_path, capsys):
-    """`my-tape.xml.old.xml` is a tape-db container (by TemplateURL) whose backups all start
-    with `my-tape.xml.`. They are its backups, not my-tape.xml's: a `tape` run leaves them."""
+@pytest.mark.parametrize("kind", ["tape-db instance", "foreign", "unreadable"])
+def test_a_backup_belongs_to_the_LONGEST_instance_name_it_extends(sync, tmp_path, capsys, kind):
+    """`my-tape.xml.old.xml` — a tape-db container by TemplateURL, a foreign one, or one that
+    cannot be read — has backups that all start with `my-tape.xml.`. They are its backups, not
+    my-tape.xml's: a `tape` run leaves them."""
     world(tmp_path)
-    (tmp_path / "my-tape.xml.old.xml").write_bytes(INSTANCES["my-tape-db.xml"].encode())
+    body = {"tape-db instance": INSTANCES["my-tape-db.xml"].encode(),
+            "foreign": container("old", [cfg("X", "1")]).encode(),
+            "unreadable": b"<Container><unclosed>"}[kind]
+    (tmp_path / "my-tape.xml.old.xml").write_bytes(body)
     for i in range(11):
         (tmp_path / BACKUPS / f"my-tape.xml.old.xml.20200101-0000{i:02d}.bak").write_bytes(
             container("tape-db", [cfg("DB_PASS", "dotted-s3cret", masked=True)]).encode())
     before = {k: v for k, v in snap(tmp_path).items() if "my-tape.xml.old.xml" in k}
     sync.TEMPLATE = "tape"
     code, out, _ = run(sync, tmp_path, capsys)
-    assert code == 0, out
+    assert code == (1 if kind == "unreadable" else 0), out   # an unreadable instance is reported
     assert {k: v for k, v in snap(tmp_path).items() if "my-tape.xml.old.xml" in k} == before
 
-    sync.TEMPLATE = "tape-db"
+    if kind == "tape-db instance":
+        sync.TEMPLATE = "tape-db"
+        run(sync, tmp_path, capsys)
+        left = {k: v for k, v in snap(tmp_path).items()
+                if "my-tape.xml.old.xml" in k and k.endswith(".bak")}
+        assert len(left) == 10 and not any(b"dotted-s3cret" in v for v in left.values())
+
+
+def test_a_backup_whose_instance_is_gone_is_left_to_the_full_pass(sync, tmp_path, capsys):
+    """A gone container named like a template's instance (`my-tape-old.xml`) and a hand-dropped
+    ownerless `.bak`: no per-template run may redact or prune them. The full pass does both."""
+    world(tmp_path)
+    b = tmp_path / BACKUPS
+    for i in range(11):
+        (b / f"my-tape-old.xml.20200101-0000{i:02d}.bak").write_bytes(
+            container("tape-old", [cfg("TOKEN", "gone-s3cret", masked=True)]).encode())
+    (b / "notes.bak").write_bytes(container("x", [cfg("K", "loose-s3cret", masked=True)]).encode())
+
+    def orphans():
+        return {k: v for k, v in snap(tmp_path).items() if "tape-old" in k or k.endswith("notes.bak")}
+
+    before = orphans()
+    for name in ("tape", "tape-db", "widget"):
+        sync.TEMPLATE = name
+        code, out, _ = run(sync, tmp_path, capsys)
+        assert code == 0, out
+        assert orphans() == before, f"TEMPLATE={name!r} touched an orphan backup"
+
+    sync.TEMPLATE = None
     run(sync, tmp_path, capsys)
-    left = {k: v for k, v in snap(tmp_path).items() if "my-tape.xml.old.xml" in k and k.endswith(".bak")}
-    assert len(left) == 10 and not any(b"dotted-s3cret" in v for v in left.values())
+    after = orphans()
+    assert len(after) == 11   # 10 of my-tape-old's group, plus notes.bak (never pruned)
+    assert not any(b"gone-s3cret" in v or b"loose-s3cret" in v for v in after.values())
+
+
+def test_another_templates_unreadable_backup_is_not_this_runs_failure(sync, tmp_path, capsys):
+    world(tmp_path)
+    (tmp_path / BACKUPS / "my-tape-db.xml.20200101-000099.bak").write_bytes(b"<Container><unclosed>")
+    sync.TEMPLATE = "tape"
+    code, out, _ = run(sync, tmp_path, capsys)
+    assert code == 0 and "000099" not in out, out
+    sync.TEMPLATE = "tape-db"
+    code, out, _ = run(sync, tmp_path, capsys)
+    assert code == 1 and "my-tape-db.xml.20200101-000099.bak" in out, out
+
+
+@pytest.mark.parametrize("body", ["tape-db instance", "foreign"])
+def test_a_case_variant_stub_that_is_not_this_templates_is_never_rewritten(sync, tmp_path, capsys, body):
+    """/boot is FAT32: there `my-Tape.xml` IS `my-tape.xml`, so a name comparison cannot see
+    that the stub a `tape` run would update is really a tape-db (or foreign) container."""
+    world(tmp_path)
+    (tmp_path / "my-tape.xml").unlink()
+    content = {"tape-db instance": INSTANCES["my-tape-db.xml"],
+               "foreign": container("Tape", [cfg("X", "1")])}[body].encode()
+    (tmp_path / "my-Tape.xml").write_bytes(content)
+    case_insensitive = (tmp_path / "my-tape.xml").exists()
+    sync.TEMPLATE = "tape"
+    code, out, _ = run(sync, tmp_path, capsys)
+    assert (tmp_path / "my-Tape.xml").read_bytes() == content
+    if case_insensitive:
+        assert isinstance(code, str) and "my-Tape.xml (the file at my-tape.xml)" in code, code
+    else:
+        assert code == 0, out   # a separate file: the tape stub is simply CREATEd beside it
 
 
 def test_a_scoped_run_still_reports_an_unreadable_instance_it_cannot_attribute(sync, tmp_path, capsys):

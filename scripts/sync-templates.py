@@ -12,10 +12,10 @@ across the managed container templates that TEMPLATE (below) selects:
                       or has its backups redacted or pruned — `tape-db` included,
                       since instances are mapped against the FULL template list
                       (see MAPPING below). Refused before anything is written: a
-                      name the repo does not have, and a my-tape.xml whose
-                      <TemplateURL> maps it to another template. A backup whose
-                      instance is gone (other than my-tape.xml's) is left to the
-                      full pass.
+                      name the repo does not have, and a my-tape.xml (in any
+                      letter case) that is really another template's instance
+                      or a foreign container. A backup whose instance is gone
+                      (other than my-tape.xml's) is left to the full pass.
 
   ONE USER SCRIPT PER TEMPLATE: each installed copy is identical to this file
   apart from its TEMPLATE line, so syncing one template can never ship another
@@ -23,9 +23,10 @@ across the managed container templates that TEMPLATE (below) selects:
 
   CREATE  — seed my-<name>.xml for any repo template that has no my- file yet,
             so it is ready to pick in Add Container.
-  UPDATE  — for EVERY live instance of a template (my-tape.xml AND my-tape-dev.xml,
-            my-tape-db-dev.xml, ...): keep each instance's applied values, refresh
-            each variable's metadata from the template, and ADD new template vars.
+  UPDATE  — for EVERY live instance of a template (tape: my-tape.xml AND
+            my-tape-dev.xml, ...; my-tape-db-dev.xml is tape-db's): keep each
+            instance's applied values, refresh each variable's metadata from the
+            template, and ADD new template vars.
   DELETE  — drop a variable the template removed ONLY when it is genuinely unused
             (blank or still at its default). A removed variable that still holds a
             real, non-default value is KEPT and loudly flagged — that almost always
@@ -474,6 +475,14 @@ def _backup_owner(fname, instances):
     return max(owners, key=len) if owners else None
 
 
+def _same_file(a, b):
+    """os.path.samefile, and False when either cannot be stat'd (absent, unreadable)."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
 def redact_existing_backups(backup_dir, scope=None):
     """ONE-TIME CLEAR-OUT of the plaintext accumulation already on the flash drive.
 
@@ -770,15 +779,19 @@ def main():
     instances_by_tpl, unmapped, broken = discover_instances(TEMPLATES_USER, all_repo)
     scope = None                                # the full pass may touch every backup
     if TEMPLATE is not None:
-        # ⛔ The stub my-<TEMPLATE>.xml is always processed as TEMPLATE's (process_template), so
-        # one whose <TemplateURL> hands it to another template would be rewritten with the wrong
-        # template's variables. Refuse rather than guess; the full pass is left as it always was.
+        # ⛔ The stub my-<TEMPLATE>.xml is always processed as TEMPLATE's (process_template), so a
+        # file there that is really another template's instance, or a foreign container, would be
+        # rewritten with the wrong template's variables. SAME FILE, not same name: /boot is FAT32,
+        # where my-Tape.xml IS my-tape.xml. Refuse rather than guess; the full pass is unchanged.
         base = os.path.join(TEMPLATES_USER, f"my-{TEMPLATE}.xml")
-        elsewhere = sorted(t for t, paths in instances_by_tpl.items() if t != TEMPLATE and base in paths)
-        if elsewhere:
-            sys.exit(f"error: my-{TEMPLATE}.xml maps to {elsewhere[0]!r} by its <TemplateURL>, so a "
-                     f"TEMPLATE={TEMPLATE!r} run would rewrite it with the wrong template. Fix its "
-                     f"<TemplateURL> or rename that container. Nothing changed.")
+        claimed = [(p, f"maps to {t!r} by its <TemplateURL>")
+                   for t, paths in instances_by_tpl.items() if t != TEMPLATE for p in paths]
+        claimed += [(os.path.join(TEMPLATES_USER, f), "is not from these templates") for f in unmapped]
+        for p, why in sorted(claimed):
+            if _same_file(p, base):
+                sys.exit(f"error: {os.path.basename(p)} (the file at my-{TEMPLATE}.xml) {why}, so a "
+                         f"TEMPLATE={TEMPLATE!r} run would rewrite it with the wrong template. Fix its "
+                         f"<TemplateURL> or rename that container. Nothing changed.")
         # A backup is this run's only if its owner — judged against EVERY instance name, not just
         # this template's — is one of this template's instances. A backup whose instance is gone
         # (other than the stub's) belongs to no scoped run; only the full pass touches those.

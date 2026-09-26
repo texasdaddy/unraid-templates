@@ -30,13 +30,14 @@ that actually uses it. This file enforces that the record is COMPLETE and never 
     just the feature it serves. Find that name before writing the line. For os.environ /
     getenv / a shell `${VAR}` it is the literal string. For a pydantic-settings field it is
     env_prefix + the field name, compared case-insensitively unless case_sensitive=True; an
-    alias / validation_alias replaces it. A citation that says pydantic names its
-    `field <name>`, and that field, like any quoted os.environ / getenv / `${VAR}` /
-    process.env name in the citation, must spell the Variable. The check does not model
-    env_prefix, aliases or case_sensitive=True, since no consumer uses them; extend it
-    when one does. A citation that mentions a field or env name made of the Variable's
-    words in another order (`backup_db_user` under `DB_BACKUP_USER`) fails too: that is
-    a Variable nothing reads.
+    alias / validation_alias replaces it. A citation that says pydantic names a
+    `field <name>`, and every `field <name>` in the citation must spell the Variable, as
+    must every lookup written as `${NAME}`, `os.environ.get("NAME")`, `os.environ["NAME"]`,
+    `getenv("NAME")` or `process.env.NAME`. Other shapes, such as a project's own
+    `_env("NAME")` wrapper, are not checked. The check does not model env_prefix, aliases
+    or case_sensitive=True, since no consumer uses them; extend it when one does. Any
+    identifier in the citation made of the Variable's words in another order
+    (`backup_db_user` under `DB_BACKUP_USER`) fails too: that is a Variable nothing reads.
 This is a structural gate, not a semantic one: it cannot itself prove a citation is true.
 That proof is the one-time job the accompanying RETURN records; ⚠️ re-run the grep behind a
 citation before trusting it if the cited consumer file has moved on since.

@@ -3,8 +3,20 @@
 sync-templates — reconcile Unraid dockerMan container templates against the
 published `unraid-templates` repo WITHOUT losing your applied values.
 
-SINGLE SCRIPT, ONE BUTTON. No parameters, no wrapper. Running it does
-create / update / delete-as-necessary across every managed container template.
+NO PARAMETERS, NO WRAPPER. Running it does create / update / delete-as-necessary
+across the managed container templates that TEMPLATE (below) selects:
+
+  TEMPLATE = None     every repo template and all their instances (the full pass).
+  TEMPLATE = "tape"   ONLY the `tape` repo template and its live instances. Nothing
+                      that maps to another template is created, updated, deleted,
+                      or has its backups redacted or pruned — `tape-db` included,
+                      since instances are mapped against the FULL template list
+                      (see MAPPING below). A name the repo does not have is refused
+                      before anything is written.
+
+  ONE USER SCRIPT PER TEMPLATE: each installed copy is identical to this file
+  apart from its TEMPLATE line, so syncing one template can never ship another
+  template's merged-but-not-intended changes. The repo copy is the full pass.
 
   CREATE  — seed my-<name>.xml for any repo template that has no my- file yet,
             so it is ready to pick in Add Container.
@@ -40,7 +52,8 @@ BACKUPS AND SECRETS  (unraid-templates#27)
   merge() copies applied values across verbatim, so a merge cannot damage a
   secret, and the backup is there for a bad merge.
   Workflow: run the dry-run version -> review -> when it is correct, install the
-  version with DRY_RUN = False. Never a parameter, never a second script.
+  version with DRY_RUN = False. Never a parameter; a copy differs from this file
+  only in its TEMPLATE line (and DRY_RUN while you rehearse).
 ------------------------------------------------------------------------------
 
 INSTANCE -> TEMPLATE MAPPING
@@ -53,6 +66,7 @@ REQUIRES  python3 >= 3.9 (stdlib only). Run on the Unraid host via User Scripts.
 
 # =============================================================================
 DRY_RUN = False    # LIVE — creates/updates/deletes with timestamped backups. (dev phase used True)
+TEMPLATE = None    # None = every template. "<name>" = only templates/<name>.xml and its instances.
 # =============================================================================
 
 import copy
@@ -447,7 +461,18 @@ def _backup_files(backup_dir):
         return [], str(e)
 
 
-def redact_existing_backups(backup_dir):
+def _in_scope(fname, only):
+    """Is backup `fname` one this run may touch? `only` = the instance filenames of a
+    TEMPLATE-scoped run, or None for the full pass (every backup).
+
+    Matched on `<instance>.` — the dot included — never a bare prefix: `my-tape-db.xml.*` is not
+    a backup of `my-tape.xml`. A backup of an instance no longer on disk belongs to no scoped run;
+    only the full pass (TEMPLATE = None) redacts or prunes those.
+    """
+    return only is None or any(fname.startswith(i + ".") for i in only)
+
+
+def redact_existing_backups(backup_dir, only=None):
     """ONE-TIME CLEAR-OUT of the plaintext accumulation already on the flash drive.
 
     Fixing `backup()` stops NEW cleartext copies; it does nothing about the pile already written,
@@ -472,6 +497,8 @@ def redact_existing_backups(backup_dir):
                             f"could not list the backup dir: {list_error}"))
         return redacted_files, redacted_values, unreadable
     for fname in files:
+        if not _in_scope(fname, only):
+            continue
         full = os.path.join(backup_dir, fname)
         try:
             tree = ET.parse(full)
@@ -511,7 +538,7 @@ def _discard(path):
         pass
 
 
-def prune_backups(backup_dir, protected=()):
+def prune_backups(backup_dir, protected=(), only=None):
     """Keep the newest KEEP_BACKUPS per instance file; drop the rest.
 
     Returns (dropped, failed) — `dropped` is what was actually removed; `failed` is
@@ -541,7 +568,7 @@ def prune_backups(backup_dir, protected=()):
                         f"could not list the backup dir: {list_error}"))
         return dropped, failed
     for fname in files:
-        if fname in protected:
+        if fname in protected or not _in_scope(fname, only):
             continue
         m = _BAK_RX.match(fname)
         if not m:
@@ -719,20 +746,35 @@ def main():
     if not all_repo:
         sys.exit(f"error: could not list repo templates from {REPO}@{BRANCH}"
                  f"{why or ' (empty listing)'}. Nothing changed.")
+    # ⛔ REFUSE BEFORE THE FIRST WRITE (the backup redaction below). A misspelt TEMPLATE must
+    # never quietly become a clean-looking no-op, nor fall back to the full pass it exists to avoid.
+    if TEMPLATE is not None and TEMPLATE not in all_repo:
+        sys.exit(f"error: TEMPLATE={TEMPLATE!r} is not a template in {REPO}@{BRANCH} "
+                 f"(it has: {', '.join(all_repo)}). Nothing changed.")
+    names = all_repo if TEMPLATE is None else [TEMPLATE]
 
     banner = "DRY-RUN — writes NOTHING (validate me, then install the DRY_RUN=False version)" \
         if DRY_RUN else "LIVE — will create/update/delete with backups"
     print(f"sync-templates  repo={REPO}@{BRANCH}  dir={TEMPLATES_USER}")
-    print(f"mode: {banner}\ntemplates: {', '.join(all_repo)}\n")
+    print(f"mode: {banner}")
+    if TEMPLATE is not None:
+        print(f"scope: TEMPLATE={TEMPLATE!r} — only this template and its live instances; "
+              f"the other {len(all_repo) - 1} repo template(s) are left alone")
+    print(f"templates: {', '.join(names)}\n")
 
+    # ⚠️ Map against the FULL list, then pick this run's templates out of the result. Mapping
+    # against [TEMPLATE] alone leaves it the only candidate prefix, so a `tape` run would claim
+    # `my-tape-db-dev.xml` — the exact trap the longest-dash-prefix rule exists to avoid.
     instances_by_tpl, unmapped, broken = discover_instances(TEMPLATES_USER, all_repo)
+    only = None if TEMPLATE is None else (
+        {f"my-{TEMPLATE}.xml"} | {os.path.basename(p) for p in instances_by_tpl.get(TEMPLATE, ())})
     backup_dir = os.path.join(TEMPLATES_USER, BACKUP_SUBDIR)
     failures = 0                                # unraid-templates#62: a run must be able to say so
 
     # BEFORE anything else touches the backup dir. Every `.bak` written before this release is a
     # cleartext copy of whatever secrets that instance held, and this is the run that clears
     # them; doing it first means a crash later still leaves the flash drive better than it was.
-    files, values, unreadable = redact_existing_backups(backup_dir)
+    files, values, unreadable = redact_existing_backups(backup_dir, only)
     if files:
         print(f"{'would redact' if DRY_RUN else 'REDACTED'} {values} masked value(s) across "
               f"{files} pre-existing backup(s) in {BACKUP_SUBDIR}/ (unraid-templates#27: "
@@ -755,14 +797,14 @@ def main():
             print(f"    {fname} ({why})")
         print()
 
-    for name in all_repo:
+    for name in names:
         failures += process_template(name, instances_by_tpl, backup_dir)
         print()
 
     # ⭐ PRUNE LAST, once this run's own backups exist. Pruning first left KEEP_BACKUPS + 1 on
     # disk afterwards, so the run ended one over the number it reported keeping. It also spent
     # flash writes redacting files it was about to delete.
-    dropped, prune_failed = prune_backups(backup_dir, protected={f for f, _ in unreadable})
+    dropped, prune_failed = prune_backups(backup_dir, protected={f for f, _ in unreadable}, only=only)
     if prune_failed:
         failures += len(prune_failed)
         print(f"! {len(prune_failed)} backup(s) could not be pruned:")

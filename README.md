@@ -60,10 +60,9 @@ by design — fill them in Unraid on import.
 
 ### `sync-templates.py`
 
-One button, no parameters. Each run does **create / update / delete-as-necessary**
-across every managed container template in
-`/boot/config/plugins/dockerMan/templates-user`, **keeping each instance's applied
-values**:
+No parameters. Each run does **create / update / delete-as-necessary** across the
+managed container templates in `/boot/config/plugins/dockerMan/templates-user` that
+its `TEMPLATE` setting selects, **keeping each instance's applied values**:
 
 - **CREATE** — seeds `my-<name>.xml` for any repo template that has no `my-` file yet, so it is ready to pick under *Add Container*.
 - **UPDATE** — for **every live instance** of a template (`my-tape.xml` *and* `my-tape-dev.xml`, `my-tape-db-dev.xml`, …): keeps that instance's applied value for each variable, refreshes the variable's metadata (description, defaults, visibility) from the repo template, and adds variables the template has gained.
@@ -77,16 +76,24 @@ Instances map to templates by their `<TemplateURL>` basename, falling back to th
 longest dash-prefix of the filename — so `my-tape-db-dev.xml` maps to `tape-db`
 and never to `tape`. Containers that came from anywhere else are never touched.
 
-**`DRY_RUN` is the only switch**, a constant at the top of the file — never a
-parameter, never a second script:
+**Two constants at the top of the file are its only settings** — never a parameter:
 
 | | |
 |---|---|
+| `TEMPLATE = None` | The full pass: every repo template and all of their instances. |
+| `TEMPLATE = "tape"` | **Only** `templates/tape.xml` and its live instances. Nothing that maps to another template is created, updated, deleted, or has its backups redacted or pruned — `tape-db` included, because instances are mapped against the *full* template list before the scope is applied. The output's `scope:` line names the template, so a dry run shows the scope before a live run acts on it. A name the repo does not have is **refused before anything is written** (exit non-zero, `Nothing changed.`). |
 | `DRY_RUN = True` | Prints exactly what it *would* create/update/delete. Writes nothing. |
 | `DRY_RUN = False` | Performs the changes. Every overwritten file is backed up first (timestamped, under `templates-user/.template-sync-backups/`), writes are atomic, and a merged result is validated before it replaces the original. |
 
-The committed copy is the **live** version (`DRY_RUN = False`). To validate a change
-first, flip the constant to `True`, run it, review the output, then flip it back.
+The committed copy is the **live full pass** (`DRY_RUN = False`, `TEMPLATE = None`).
+To validate a change first, flip `DRY_RUN` to `True`, run it, review the output, then
+flip it back.
+
+**One installed User Script per template.** A full pass also ships every *other*
+template's merged-but-not-yet-intended changes, so the host runs one copy per repo
+template instead — each **identical to the repo copy except for its `TEMPLATE` line**.
+A backup of an instance that no longer exists belongs to no template, so only a full
+pass redacts or prunes it.
 
 > **Backups redact your `Mask="true"` values** (#27). `Mask="true"` is a *UI* setting —
 > it makes the Unraid form render a password box, but the XML on the flash drive
@@ -115,7 +122,10 @@ first, flip the constant to `True`, run it, review the output, then flip it back
 > `-e TOKEN=...`), which is free text with no `Mask` flag to key on. Keep secrets
 > in masked variables, not in Extra Parameters.
 
-**Install as an Unraid User Script:** *Settings → User Utilities → User Scripts → Add New Script*,
-name it `sync-templates`, paste the file in as the script body, and run it with
+**Install as Unraid User Scripts, one per template:** for each file in `templates/`,
+*Settings → User Utilities → User Scripts → Add New Script*, name it
+`sync-templates-<name>` (e.g. `sync-templates-tape`), paste the file in as the script
+body, and change **only** its `TEMPLATE` line to `TEMPLATE = "<name>"`. Run it with
 *Run Script* (leave it unscheduled — it is a deliberate, on-demand action, not a
-cron job). Requires python3 ≥ 3.9; stdlib only, no dependencies to install.
+cron job). When the script changes, re-paste every copy and re-set each one's
+`TEMPLATE` line. Requires python3 ≥ 3.9; stdlib only, no dependencies to install.

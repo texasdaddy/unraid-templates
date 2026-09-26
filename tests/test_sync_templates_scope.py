@@ -128,9 +128,13 @@ def run(sync, root, capsys):
 
 
 def owned_by(path, instances):
-    """Is `path` (relative to templates-user) one of `instances` or a backup of one?"""
+    """Is `path` (relative to templates-user) one of `instances` or a backup of one?
+
+    Deliberately NOT the script's own attribution rule: every backup in world() is
+    `<instance>.<one-dot-free-suffix>.bak`, so its instance is exactly what precedes those two
+    segments."""
     base = path.split("/")[-1]
-    return any(base == i or base.startswith(i + ".") for i in instances)
+    return (base if base.endswith(".xml") else base.rsplit(".", 2)[0]) in instances
 
 
 # ------------------------------------------------------------------ 1. unset = the full pass
@@ -143,9 +147,11 @@ def test_golden_unset_TEMPLATE_is_byte_identical_to_the_pre_split_full_pass(sync
         world(root)
         sync.DRY_RUN = dry
         code, out, _ = run(sync, root, capsys)
+        # line endings normalised: ElementTree writes in text mode, so CRLF on Windows, LF on
+        # the Linux CI runner and on Unraid
         got[mode] = {"exit": code, "stdout": out,
-                     "files": {k: v.decode() for k, v in snap(root).items()}}
-    if os.environ.get("SYNC_GOLDEN_REGEN"):
+                     "files": {k: v.decode().replace("\r\n", "\n") for k, v in snap(root).items()}}
+    if os.environ.get("SYNC_GOLDEN_REGEN") == "1":
         GOLDEN.write_text(json.dumps(got, indent=1, sort_keys=True) + "\n",
                           encoding="utf-8", newline="\n")
     assert got == json.loads(GOLDEN.read_text(encoding="utf-8"))
@@ -212,6 +218,10 @@ def test_a_scoped_run_creates_only_its_own_stub(sync, tmp_path, capsys, name, ex
     assert code == 0, out
     stubs = sorted(p.name for p in tmp_path.glob("my-*.xml"))
     assert stubs == [expect]
+    # the stub's own backups are this run's even before the stub exists; nobody else's are
+    after = b"".join(p.read_bytes() for p in (tmp_path / BACKUPS).iterdir())
+    mine, other = {"tape": ("old-s3cret", "hand-s3cret"), "tape-db": ("hand-s3cret", "old-s3cret")}[name]
+    assert mine.encode() not in after and other.encode() in after
 
 
 def test_the_scope_is_decided_against_the_FULL_template_list(sync, tmp_path, capsys):
@@ -227,10 +237,16 @@ def test_the_scope_is_decided_against_the_FULL_template_list(sync, tmp_path, cap
 
 # ------------------------------------------------------------- 3. unknown name = refuse, loudly
 
-@pytest.mark.parametrize("bad", ["tap", "tape.xml", "TAPE", "", " tape", "tape-db-dev"])
+@pytest.mark.parametrize("bad", ["tap", "tape.xml", "TAPE", "", " tape", "tape-db-dev", "plex"])
 @pytest.mark.parametrize("dry", [False, True])
 def test_an_unknown_TEMPLATE_refuses_and_writes_nothing(sync, tmp_path, capsys, bad, dry):
-    world(tmp_path)   # holds cleartext backups: a refusal placed after redaction would show up here
+    world(tmp_path)
+    # A container of that name, with a cleartext backup: a refusal placed after the redaction
+    # step would redact it (the scope treats my-<TEMPLATE>.xml as its own) before refusing.
+    if not (tmp_path / f"my-{bad}.xml").exists():
+        (tmp_path / f"my-{bad}.xml").write_bytes(container("other", [cfg("X", "1")]).encode())
+    (tmp_path / BACKUPS / f"my-{bad}.xml.20190101-000000.bak").write_bytes(
+        container("other", [cfg("K", "bad-s3cret", masked=True)]).encode())
     before = snap(tmp_path)
     sync.TEMPLATE = bad
     sync.DRY_RUN = dry
@@ -252,7 +268,69 @@ def test_the_run_names_its_scope_before_acting(sync, tmp_path, capsys, dry):
     code, out, _ = run(sync, tmp_path, capsys)
     head = out.split("\n\n")[0]
     assert "scope: TEMPLATE='tape-db'" in head, head
+    assert "the other 2 repo template(s) are left alone" in head
     assert "templates: tape-db\n" in head + "\n"
     assert "[tape]" not in out and "[widget]" not in out
+    # the housekeeping figures are the scoped ones, in the rehearsal as well as the live run:
+    # tape-db owns one cleartext backup, and 11 stamped ones (+1 from this live run)
     if dry:
         assert snap(tmp_path) == before
+        assert "would redact 1 masked value(s) across 1 pre-existing backup(s)" in out
+        assert "would prune at least 1 backup(s)" in out
+    else:
+        assert "REDACTED 1 masked value(s) across 1 pre-existing backup(s)" in out
+        assert "pruned 2 backup(s)" in out
+
+
+# -------------------------------------------------------------------- 5. edges of the scope
+
+@pytest.mark.parametrize("dry", [False, True])
+def test_a_stub_whose_TemplateURL_names_another_template_is_refused_not_rewritten(
+        sync, tmp_path, capsys, dry):
+    """my-tape.xml would be processed as `tape` by name while the mapping says `tape-db`: a
+    `tape` run would pour tape's variables into a tape-db container. Refuse; the `tape-db` run
+    owns it."""
+    world(tmp_path)
+    (tmp_path / "my-tape.xml").write_bytes(INSTANCES["my-tape-db.xml"].encode())
+    before = snap(tmp_path)
+    sync.DRY_RUN = dry
+    sync.TEMPLATE = "tape"
+    code, out, _ = run(sync, tmp_path, capsys)
+    assert isinstance(code, str) and "my-tape.xml maps to 'tape-db'" in code and "Nothing changed" in code
+    assert snap(tmp_path) == before
+
+    sync.TEMPLATE = "tape-db"
+    code, out, _ = run(sync, tmp_path, capsys)
+    assert code == 0, out
+    assert "[tape-db]" in out and "my-tape.xml" in out.split("[tape-db]")[1]
+
+
+def test_a_backup_belongs_to_the_LONGEST_instance_name_it_extends(sync, tmp_path, capsys):
+    """`my-tape.xml.old.xml` is a tape-db container (by TemplateURL) whose backups all start
+    with `my-tape.xml.`. They are its backups, not my-tape.xml's: a `tape` run leaves them."""
+    world(tmp_path)
+    (tmp_path / "my-tape.xml.old.xml").write_bytes(INSTANCES["my-tape-db.xml"].encode())
+    for i in range(11):
+        (tmp_path / BACKUPS / f"my-tape.xml.old.xml.20200101-0000{i:02d}.bak").write_bytes(
+            container("tape-db", [cfg("DB_PASS", "dotted-s3cret", masked=True)]).encode())
+    before = {k: v for k, v in snap(tmp_path).items() if "my-tape.xml.old.xml" in k}
+    sync.TEMPLATE = "tape"
+    code, out, _ = run(sync, tmp_path, capsys)
+    assert code == 0, out
+    assert {k: v for k, v in snap(tmp_path).items() if "my-tape.xml.old.xml" in k} == before
+
+    sync.TEMPLATE = "tape-db"
+    run(sync, tmp_path, capsys)
+    left = {k: v for k, v in snap(tmp_path).items() if "my-tape.xml.old.xml" in k and k.endswith(".bak")}
+    assert len(left) == 10 and not any(b"dotted-s3cret" in v for v in left.values())
+
+
+def test_a_scoped_run_still_reports_an_unreadable_instance_it_cannot_attribute(sync, tmp_path, capsys):
+    """Unreadable and unmappable, so it may be this template's (its TemplateURL cannot be read):
+    every scoped run reports it and exits non-zero rather than assume it is someone else's."""
+    world(tmp_path)
+    (tmp_path / "my-zzz.xml").write_bytes(b"<Container><unclosed>")
+    sync.TEMPLATE = "tape"
+    code, out, _ = run(sync, tmp_path, capsys)
+    assert code == 1
+    assert "my-zzz.xml" in out and "could not be read" in out

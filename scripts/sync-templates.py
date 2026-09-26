@@ -11,8 +11,11 @@ across the managed container templates that TEMPLATE (below) selects:
                       that maps to another template is created, updated, deleted,
                       or has its backups redacted or pruned — `tape-db` included,
                       since instances are mapped against the FULL template list
-                      (see MAPPING below). A name the repo does not have is refused
-                      before anything is written.
+                      (see MAPPING below). Refused before anything is written: a
+                      name the repo does not have, and a my-tape.xml whose
+                      <TemplateURL> maps it to another template. A backup whose
+                      instance is gone (other than my-tape.xml's) is left to the
+                      full pass.
 
   ONE USER SCRIPT PER TEMPLATE: each installed copy is identical to this file
   apart from its TEMPLATE line, so syncing one template can never ship another
@@ -32,7 +35,7 @@ across the managed container templates that TEMPLATE (below) selects:
   elements are reconciled.
 
 ------------------------------------------------------------------------------
-DRY-RUN vs LIVE  —  the ONLY switch is the DRY_RUN constant below.
+DRY-RUN vs LIVE  —  the DRY_RUN constant below is the switch.
   * DRY_RUN = True   prints exactly what it WOULD create/update/delete, writes
                      nothing. This is the version you validate.
   * DRY_RUN = False  performs the changes (each overwritten file is backed up
@@ -461,18 +464,17 @@ def _backup_files(backup_dir):
         return [], str(e)
 
 
-def _in_scope(fname, only):
-    """Is backup `fname` one this run may touch? `only` = the instance filenames of a
-    TEMPLATE-scoped run, or None for the full pass (every backup).
+def _backup_owner(fname, instances):
+    """The instance file that backup `fname` was taken of, or None (an orphan).
 
-    Matched on `<instance>.` — the dot included — never a bare prefix: `my-tape-db.xml.*` is not
-    a backup of `my-tape.xml`. A backup of an instance no longer on disk belongs to no scoped run;
-    only the full pass (TEMPLATE = None) redacts or prunes those.
+    The LONGEST of `instances` that `fname` extends with a dot: `my-tape-db.xml.*` is never a
+    `my-tape.xml` backup, and `my-tape.xml.old.xml.*` belongs to that instance, not `my-tape.xml`.
     """
-    return only is None or any(fname.startswith(i + ".") for i in only)
+    owners = [i for i in instances if fname.startswith(i + ".")]
+    return max(owners, key=len) if owners else None
 
 
-def redact_existing_backups(backup_dir, only=None):
+def redact_existing_backups(backup_dir, scope=None):
     """ONE-TIME CLEAR-OUT of the plaintext accumulation already on the flash drive.
 
     Fixing `backup()` stops NEW cleartext copies; it does nothing about the pile already written,
@@ -497,7 +499,7 @@ def redact_existing_backups(backup_dir, only=None):
                             f"could not list the backup dir: {list_error}"))
         return redacted_files, redacted_values, unreadable
     for fname in files:
-        if not _in_scope(fname, only):
+        if scope is not None and not scope(fname):
             continue
         full = os.path.join(backup_dir, fname)
         try:
@@ -538,7 +540,7 @@ def _discard(path):
         pass
 
 
-def prune_backups(backup_dir, protected=(), only=None):
+def prune_backups(backup_dir, protected=(), scope=None):
     """Keep the newest KEEP_BACKUPS per instance file; drop the rest.
 
     Returns (dropped, failed) — `dropped` is what was actually removed; `failed` is
@@ -568,7 +570,7 @@ def prune_backups(backup_dir, protected=(), only=None):
                         f"could not list the backup dir: {list_error}"))
         return dropped, failed
     for fname in files:
-        if fname in protected or not _in_scope(fname, only):
+        if fname in protected or (scope is not None and not scope(fname)):
             continue
         m = _BAK_RX.match(fname)
         if not m:
@@ -766,15 +768,33 @@ def main():
     # against [TEMPLATE] alone leaves it the only candidate prefix, so a `tape` run would claim
     # `my-tape-db-dev.xml` — the exact trap the longest-dash-prefix rule exists to avoid.
     instances_by_tpl, unmapped, broken = discover_instances(TEMPLATES_USER, all_repo)
-    only = None if TEMPLATE is None else (
-        {f"my-{TEMPLATE}.xml"} | {os.path.basename(p) for p in instances_by_tpl.get(TEMPLATE, ())})
+    scope = None                                # the full pass may touch every backup
+    if TEMPLATE is not None:
+        # ⛔ The stub my-<TEMPLATE>.xml is always processed as TEMPLATE's (process_template), so
+        # one whose <TemplateURL> hands it to another template would be rewritten with the wrong
+        # template's variables. Refuse rather than guess; the full pass is left as it always was.
+        base = os.path.join(TEMPLATES_USER, f"my-{TEMPLATE}.xml")
+        elsewhere = sorted(t for t, paths in instances_by_tpl.items() if t != TEMPLATE and base in paths)
+        if elsewhere:
+            sys.exit(f"error: my-{TEMPLATE}.xml maps to {elsewhere[0]!r} by its <TemplateURL>, so a "
+                     f"TEMPLATE={TEMPLATE!r} run would rewrite it with the wrong template. Fix its "
+                     f"<TemplateURL> or rename that container. Nothing changed.")
+        # A backup is this run's only if its owner — judged against EVERY instance name, not just
+        # this template's — is one of this template's instances. A backup whose instance is gone
+        # (other than the stub's) belongs to no scoped run; only the full pass touches those.
+        own = {f"my-{TEMPLATE}.xml"} | {os.path.basename(p) for p in instances_by_tpl.get(TEMPLATE, ())}
+        known = ({os.path.basename(p) for paths in instances_by_tpl.values() for p in paths}
+                 | set(unmapped) | {f for f, _ in broken} | {f"my-{t}.xml" for t in all_repo})
+
+        def scope(fname):
+            return _backup_owner(fname, known) in own
     backup_dir = os.path.join(TEMPLATES_USER, BACKUP_SUBDIR)
     failures = 0                                # unraid-templates#62: a run must be able to say so
 
     # BEFORE anything else touches the backup dir. Every `.bak` written before this release is a
     # cleartext copy of whatever secrets that instance held, and this is the run that clears
     # them; doing it first means a crash later still leaves the flash drive better than it was.
-    files, values, unreadable = redact_existing_backups(backup_dir, only)
+    files, values, unreadable = redact_existing_backups(backup_dir, scope)
     if files:
         print(f"{'would redact' if DRY_RUN else 'REDACTED'} {values} masked value(s) across "
               f"{files} pre-existing backup(s) in {BACKUP_SUBDIR}/ (unraid-templates#27: "
@@ -804,7 +824,7 @@ def main():
     # ⭐ PRUNE LAST, once this run's own backups exist. Pruning first left KEEP_BACKUPS + 1 on
     # disk afterwards, so the run ended one over the number it reported keeping. It also spent
     # flash writes redacting files it was about to delete.
-    dropped, prune_failed = prune_backups(backup_dir, protected={f for f, _ in unreadable}, only=only)
+    dropped, prune_failed = prune_backups(backup_dir, protected={f for f, _ in unreadable}, scope=scope)
     if prune_failed:
         failures += len(prune_failed)
         print(f"! {len(prune_failed)} backup(s) could not be pruned:")

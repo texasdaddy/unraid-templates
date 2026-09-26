@@ -81,7 +81,7 @@ and never to `tape`. Containers that came from anywhere else are never touched.
 | | |
 |---|---|
 | `TEMPLATE = None` | The full pass: every repo template and all of their instances. |
-| `TEMPLATE = "tape"` | **Only** `templates/tape.xml` and its live instances. Nothing that maps to another template is created, updated, deleted, or has its backups redacted or pruned — `tape-db` included, because instances are mapped against the *full* template list before the scope is applied. The output's `scope:` line names the template, so a dry run shows the scope before a live run acts on it. A name the repo does not have is **refused before anything is written** (exit non-zero, `Nothing changed.`). |
+| `TEMPLATE = "tape"` | **Only** `templates/tape.xml` and its live instances. Nothing that maps to another template is created, updated, deleted, or has its backups redacted or pruned — `tape-db` included, because instances are mapped against the *full* template list before the scope is applied. The output's `scope:` line names the template, so a dry run shows the scope before a live run acts on it. **Refused before anything is written** (exit non-zero, `Nothing changed.`): a name the repo does not have, and a `my-tape.xml` whose `<TemplateURL>` maps it to a *different* template — fix that file's `<TemplateURL>` or rename the container. |
 | `DRY_RUN = True` | Prints exactly what it *would* create/update/delete. Writes nothing. |
 | `DRY_RUN = False` | Performs the changes. Every overwritten file is backed up first (timestamped, under `templates-user/.template-sync-backups/`), writes are atomic, and a merged result is validated before it replaces the original. |
 
@@ -92,8 +92,12 @@ flip it back.
 **One installed User Script per template.** A full pass also ships every *other*
 template's merged-but-not-yet-intended changes, so the host runs one copy per repo
 template instead — each **identical to the repo copy except for its `TEMPLATE` line**.
-A backup of an instance that no longer exists belongs to no template, so only a full
-pass redacts or prunes it.
+A template added to the repo later gets its own copy then; no per-template copy seeds it.
+A backup whose instance no longer exists (other than the template's own `my-<name>.xml`)
+belongs to no template, so only a full pass redacts or prunes it. Every backup this
+script writes is already redacted, so such an orphan costs flash space — a secret only
+if it predates #27 or was dropped there by hand. A full pass with `DRY_RUN = True`
+reports how many backups it would redact or prune.
 
 > **Backups redact your `Mask="true"` values** (#27). `Mask="true"` is a *UI* setting —
 > it makes the Unraid form render a password box, but the XML on the flash drive

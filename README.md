@@ -43,20 +43,17 @@ by design — fill them in Unraid on import.
 | Script | What it is | Where it runs |
 |---|---|---|
 | `scripts/sync-templates.py` | Reconciles the Unraid host's `my-*.xml` container templates against this repo | Unraid host, via **User Scripts** |
-| `scripts/check_no_internal_info.py` | Public-repo guard: fails on internal-looking **shapes** — RFC1918/CGNAT addresses, `.lan`/`.local`/`*.ts.net` hosts, the real Unraid share roots under `/mnt/` (`apps`, `user`, `cache`, `remotes`, `disks`, `disk1`…`diskN` — an arbitrarily-named pool is NOT matched), freemail addresses, bare UUIDs, and `C:\Users\<name>\…` Windows profile paths. It scans **five surfaces**, because a push publishes all five: file **content** (the tracked tree, the lines each commit adds, and the index via `--staged`), file and directory **paths**, each commit's **author/committer name and email**, each commit's **message**, and any annotated **tag** the push names — its whole object, which carries the tag's name, its tagger and its message together. Four of those can only be removed by rewriting history; a tag is a ref and can be deleted. ⚠️ A **lightweight** tag has no object, so a leak that exists only as a ref NAME — a lightweight tag or a branch called after a host — is read by no layer ([#49](https://github.com/sdr-ventures/unraid-templates/issues/49)). The path and message surfaces run a slightly **narrower** pattern set than file content does — a machine-local override *filename*, a UUID-named migration, and a commit message that merely mentions one are all ordinary, while the same shapes written *inside* a file are not. It **cannot** see a bare hostname, codename or personal name; those have no shape, and a second guard held outside every repo is what catches them. Both layers are required, and green CI here is not clearance. | CI, on every PR, on push to `main`, and on `v*` tags — required by branch protection, see below. ⚠️ **`--staged` is the exception: it runs only in the opt-in `.githooks/pre-commit` hook** (`git config core.hooksPath .githooks`), because a CI checkout has nothing staged. The push-path range scan still catches a staged leak before it reaches the remote. |
 
-> **The guard is enforcing now** (this was the other half of #4). `main` carries
-> branch protection requiring all three checks — `No internal info (public-repo
-> guard)`, `Leak-guard tests`, `Templates are well-formed XML` — with
-> `enforce_admins` on and `strict` (branches must be up to date) set, so a red run
-> cannot be merged, including by the owner.
+> **The leak guard is the pinned kw-common `v1.7.0` guard** — nothing is vendored here. CI runs it as the
+> `leak-guard` job (the reusable `leak-guard.yml`); the local hooks are written into the git directory by
+> `kw-leak-guard --install-hooks` from a venv outside the tracked tree (`.venv-guard/`, ignored); allowances,
+> if ever needed, live in `.leakguard.json`. It matches shapes only, so a bare hostname, codename or
+> personal name still has no shape and **green CI is not clearance**: that is the project-side guard's job.
 >
-> Two consequences worth knowing. **A job's `name:` is the status-check context**,
-> so renaming one of those three jobs does not fail its check — the required
-> context simply never reports and every PR sits BLOCKED with green jobs and
-> nothing to click. And **green CI still is not clearance**: this guard matches
-> shapes only, and a bare hostname, codename or personal name has no shape. That
-> is the project-side guard's job, and it is not run by CI.
+> `main` carries branch protection requiring `leak-guard / No internal info (leak guard)`,
+> `Leak-guard tests` and `Templates are well-formed XML`, with `enforce_admins` on and `strict` set.
+> **A job's `name:` is the status-check context**: renaming one does not fail its check, the required
+> context simply never reports and every PR sits BLOCKED with green jobs.
 
 ### `sync-templates.py`
 
